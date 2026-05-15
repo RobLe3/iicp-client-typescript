@@ -1,0 +1,30 @@
+{
+  "name": "@iicp/client",
+  "version": "0.0.1-pre",
+  "description": "Official TypeScript client SDK for IICP (Intent-based Inter-agent Communication Protocol)",
+  "license": "Apache-2.0",
+  "author": "Roble Mumin",
+  "homepage": "https://iicp.network",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RobLe3/iicp-client-typescript.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RobLe3/IICP/issues"
+  },
+  "keywords": ["iicp", "ai", "protocol", "distributed", "inference"],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src",
+    "test": "echo 'No tests yet — name reservation only' && exit 0"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}
