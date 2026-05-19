@@ -1,9 +1,17 @@
-# @iicp/client — TypeScript / JavaScript SDK
+# @iicp/client · TypeScript / JavaScript SDK
 
-Official TypeScript client library for the [IICP protocol](https://iicp.network) (Intent-based Inter-agent Communication Protocol).
+[![CI](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml/badge.svg)](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Protocol](https://img.shields.io/badge/IICP-v1.5-indigo.svg)](https://iicp.network/spec)
+[![npm](https://img.shields.io/badge/npm-%40iicp%2Fclient-red?logo=npm)](https://www.npmjs.com/package/@iicp/client)
 
-Implements **ADR-016 §1** — SDK conformance rules SDK-01 through SDK-06.
-Works in Node.js ≥ 18, Deno, Bun, and modern browsers with the native Fetch API.
+Official TypeScript client library for the [IICP protocol](https://iicp.network) — route AI agent tasks by intent across a self-organising mesh of provider nodes. No central broker. No hardcoded endpoints.
+
+Works in **Node.js ≥ 18**, Deno, Bun, and modern browsers with the native Fetch API.
+
+```
+urn:iicp:intent:llm:chat:v1  →  discover  →  select  →  submit
+```
 
 ---
 
@@ -11,10 +19,8 @@ Works in Node.js ≥ 18, Deno, Bun, and modern browsers with the native Fetch AP
 
 ```bash
 npm install @iicp/client
-# or
-yarn add @iicp/client
-# or
-pnpm add @iicp/client
+# yarn add @iicp/client
+# pnpm add @iicp/client
 ```
 
 ---
@@ -24,27 +30,15 @@ pnpm add @iicp/client
 ```typescript
 import { IicpClient } from "@iicp/client";
 
-const client = new IicpClient({
-  directory_url: "https://iicp.network/api",
-  timeout_ms: 30_000,
-});
+const client = new IicpClient({ directory_url: "https://iicp.network/api" });
 
-// Discover nodes capable of LLM chat
 const { nodes } = await client.discover("urn:iicp:intent:llm:chat:v1");
 if (!nodes.length) throw new Error("No nodes available");
 
-// Submit a chat task to the best node
 const response = await client.chat(nodes[0], {
   messages: [{ role: "user", content: "Hello from IICP!" }],
 });
 console.log(response.choices[0].message.content);
-```
-
-### CommonJS (Node.js require)
-
-```javascript
-const { IicpClient } = require("@iicp/client");
-const client = new IicpClient({ directory_url: "https://iicp.network/api" });
 ```
 
 ---
@@ -55,17 +49,17 @@ const client = new IicpClient({ directory_url: "https://iicp.network/api" });
 import { IicpClient, ClientConfig } from "@iicp/client";
 
 const client = new IicpClient({
-  directory_url: "https://iicp.network/api", // IICP directory endpoint
-  timeout_ms: 30_000,                        // max 120_000 (SDK-04)
-  region: "eu-central",                      // prefer nodes in this region
-  node_token: "your-token",                  // optional auth token
+  directory_url : "https://iicp.network/api",   // IICP directory
+  timeout_ms    : 30_000,                        // max 120 000 (SDK-04)
+  region        : "eu-central",                  // prefer nodes in region
+  node_token    : "your-token",                  // optional auth token
 } satisfies ClientConfig);
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `directory_url` | `"https://iicp.network/api"` | IICP directory endpoint |
-| `timeout_ms` | `30000` | Request timeout (max 120 000 ms) |
+| `timeout_ms` | `30000` | Request timeout — max 120 000 ms |
 | `region` | `undefined` | Preferred node region |
 | `node_token` | `undefined` | Bearer token for authenticated nodes |
 
@@ -74,17 +68,12 @@ const client = new IicpClient({
 ## Discover options
 
 ```typescript
-import { DiscoverOptions } from "@iicp/client";
-
-const { nodes } = await client.discover(
-  "urn:iicp:intent:llm:chat:v1",
-  {
-    region: "eu-central",
-    model: "phi3:mini",       // request a specific model
-    min_reputation: 0.7,      // only well-regarded nodes
-    limit: 5,
-  } satisfies DiscoverOptions
-);
+const { nodes } = await client.discover("urn:iicp:intent:llm:chat:v1", {
+  region        : "eu-central",
+  model         : "phi3:mini",
+  min_reputation: 0.7,
+  limit         : 5,
+});
 ```
 
 ---
@@ -95,7 +84,7 @@ const { nodes } = await client.discover(
 import { IicpClient, IicpError } from "@iicp/client";
 
 try {
-  const resp = await client.submit(request);
+  const response = await client.submit(node, request);
 } catch (e) {
   if (e instanceof IicpError) {
     console.error(`[${e.code}] ${e.message}  (HTTP ${e.status})`);
@@ -103,52 +92,44 @@ try {
 }
 ```
 
-Error codes match the [IICP error reference](https://iicp.network/docs/error-reference).
+Error codes match the [IICP error reference](https://iicp.network/docs/error-reference) — e.g. `task_timeout`, `capacity_exceeded`, `no_nodes_available`.
 
 ---
 
-## Conformance
+## SDK conformance
 
-This SDK targets the **IICP SDK conformance tier** (`iicp:sdk:v1`, spec S.14).
-See [Conformance badges](https://iicp.network/conformance) for how to obtain a signed badge.
+| Rule | Description | Status |
+|------|-------------|--------|
+| SDK-01 | discover → select → submit pipeline with node retry | ✓ |
+| SDK-02 | `task_id` auto-generated (UUID v4) | ✓ |
+| SDK-03 | Intent URN pattern validation | ✓ |
+| SDK-04 | `timeout_ms` capped at 120 000 ms | ✓ |
+| SDK-05 | Retry on 429 / 503 with exponential back-off | ✓ |
+| SDK-06 | W3C `traceparent` propagation | ✓ |
 
-| ADR | Rule | Status |
-|-----|------|--------|
-| ADR-016 | SDK-01 discover → select → submit pipeline | ✓ |
-| ADR-016 | SDK-02 task_id auto-generated (UUID v4) | ✓ |
-| ADR-016 | SDK-03 intent validation (URN pattern) | ✓ |
-| ADR-016 | SDK-04 timeout_ms ≤ 120 000 enforced | ✓ |
-| ADR-016 | SDK-05 retry on 429/503 with back-off | ✓ |
-| ADR-016 | SDK-06 W3C traceparent propagation | ✓ |
+Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.network/conformance)
 
 ---
 
 ## Development
 
 ```bash
-# Install dependencies
-npm install
-
-# Type-check
-npm run typecheck
-
-# Build
-npm run build
-
-# Run tests
-npm test
+npm install        # install deps
+npm run typecheck  # tsc strict
+npm test           # 16 unit tests
+npm run build      # emit to dist/
 ```
 
 ---
 
 ## Links
 
-- Protocol spec: [iicp.network/spec](https://iicp.network/spec)
-- Node setup: [iicp.network/docs/node-setup](https://iicp.network/docs/node-setup)
-- Error reference: [iicp.network/docs/error-reference](https://iicp.network/docs/error-reference)
-- Conformance: [iicp.network/conformance](https://iicp.network/conformance)
-- GitHub issues: [github.com/RobLe3/iicp-client-typescript](https://github.com/RobLe3/iicp-client-typescript/issues)
+- [Protocol spec](https://iicp.network/spec) — full IICP specification
+- [Node setup guide](https://iicp.network/docs/node-setup) — run your own node
+- [Error reference](https://iicp.network/docs/error-reference) — all error codes
+- [iicp-client-python](https://github.com/RobLe3/iicp-client-python) — Python SDK
+- [iicp-client-rust](https://github.com/RobLe3/iicp-client-rust) — Rust SDK
 
 ---
 
-**License**: Apache 2.0 · © IICP Working Group
+Apache 2.0 · [iicp.network](https://iicp.network)
