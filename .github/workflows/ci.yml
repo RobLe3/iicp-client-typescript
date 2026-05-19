@@ -1,22 +1,82 @@
-name: ci
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  lint:
+  typecheck:
+    name: Type Check (tsc)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
+          cache: npm
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Type check
-        run: npx tsc --noEmit
-      - name: Test
+        run: npm run typecheck
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  test:
+    name: Tests (node:test)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
         run: npm test
+
+  conformance-marks:
+    name: Conformance Mark Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify all test files reference SDK conformance marks
+        run: |
+          FAIL=0
+          for f in tests/*.test.ts; do
+            if ! grep -qE "SDK-0[1-9]|SDK-1[0-9]|ADR-016" "$f"; then
+              echo "MISSING conformance mark: $f"
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -eq 0 ]; then
+            echo "All test files reference SDK conformance marks"
+          fi
+          exit $FAIL

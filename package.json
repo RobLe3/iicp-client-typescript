@@ -1,30 +1,31 @@
 {
-  "name": "@iicp/client",
-  "version": "0.0.1-pre",
-  "description": "Official TypeScript client SDK for IICP (Intent-based Inter-agent Communication Protocol)",
-  "license": "Apache-2.0",
-  "author": "Roble Mumin",
-  "homepage": "https://iicp.network",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/RobLe3/iicp-client-typescript.git"
-  },
-  "bugs": {
-    "url": "https://github.com/RobLe3/IICP/issues"
-  },
-  "keywords": ["iicp", "ai", "protocol", "distributed", "inference"],
+  "name": "iicp-client",
+  "version": "0.1.0",
+  "description": "Official TypeScript/JavaScript SDK for the IICP protocol (ADR-016)",
   "main": "dist/index.js",
+  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE"],
-  "publishConfig": {
-    "access": "public"
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "import": "./dist/index.mjs",
+      "types": "./dist/index.d.ts"
+    }
   },
   "scripts": {
-    "build": "tsc",
-    "lint": "eslint src",
-    "test": "echo 'No tests yet — name reservation only' && exit 0"
+    "build": "tsc --project tsconfig.json",
+    "test": "node --loader tsx/esm --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["iicp", "ai-agents", "protocol", "sdk"],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
   },
   "devDependencies": {
-    "typescript": "^5"
-  }
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0"
+  },
+  "files": ["dist", "README.md"]
 }

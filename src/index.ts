@@ -1,8 +1,17 @@
-/**
- * Official TypeScript client SDK for IICP.
- *
- * Name reservation publication. Functional SDK arrives with IICP v1.5 stable.
- * See https://iicp.network for project status.
- */
-
-export const VERSION = "0.0.1-pre";
+export { IicpClient } from "./client.js";
+export { IicpError } from "./errors.js";
+export type {
+  ChatMessage,
+  ChatOptions,
+  ChatResponse,
+  ChatChoice,
+  ChatUsage,
+  ClientConfig,
+  DiscoverOptions,
+  Node,
+  TaskAuth,
+  TaskConstraints,
+  TaskMetrics,
+  TaskRequest,
+  TaskResponse,
+} from "./types.js";

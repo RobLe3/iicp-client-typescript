@@ -1,0 +1,96 @@
+/** IICP TypeScript SDK — type definitions (ADR-016 §1) */
+
+export interface ClientConfig {
+  /** Directory URL. Default: https://iicp.network */
+  directory_url: string;
+  /** Request timeout in ms. Max 120 000 (SDK-04). Default: 30 000 */
+  timeout_ms: number;
+  /** Preferred region for node selection. */
+  region?: string;
+  /** Bearer token for authenticated routes. */
+  api_token?: string;
+  /** Verify TLS certificates. Default: true */
+  tls_verify: boolean;
+}
+
+export interface TaskConstraints {
+  region?: string;
+  qos?: string;
+  timeout_ms?: number;
+  min_reputation?: number;
+}
+
+export interface TaskAuth {
+  token: string;
+  mode?: "bearer" | "node";
+}
+
+export interface TaskMetrics {
+  latency_ms?: number;
+  tokens_used?: number;
+  node_id?: string;
+}
+
+export interface TaskRequest {
+  /** Intent URN — must match urn:iicp:intent:* (SDK-02) */
+  intent: string;
+  payload: Record<string, unknown>;
+  constraints?: TaskConstraints;
+  auth?: TaskAuth;
+  task_id?: string;
+}
+
+export interface TaskResponse {
+  task_id: string;
+  result: unknown;
+  status: string;
+  metrics?: TaskMetrics;
+}
+
+export interface DiscoverOptions {
+  limit?: number;
+  region?: string;
+  qos?: string;
+  min_reputation?: number;
+}
+
+export interface Node {
+  node_id: string;
+  endpoint: string;
+  score: number;
+  available: boolean;
+  region: string;
+  latency_estimate_ms?: number;
+  reputation_score?: number;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface ChatUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface ChatChoice {
+  index: number;
+  message: ChatMessage;
+  finish_reason: string;
+}
+
+export interface ChatResponse {
+  id: string;
+  choices: ChatChoice[];
+  usage?: ChatUsage;
+  node_id?: string;
+}
+
+export interface ChatOptions {
+  intent?: string;
+  region?: string;
+  timeout_ms?: number;
+  min_reputation?: number;
+}
