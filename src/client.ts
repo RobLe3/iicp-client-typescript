@@ -47,7 +47,7 @@ export class IicpClient {
   // ------------------------------------------------------------------
 
   /** Discover nodes capable of handling the given intent. */
-  async discover(intent: string, opts?: DiscoverOptions): Promise<Node[]> {
+  async discover(intent: string, opts?: DiscoverOptions, traceparent?: string): Promise<Node[]> {
     const o = opts ?? {};
     const params = new URLSearchParams();
     params.set("intent", intent);
@@ -61,6 +61,7 @@ export class IicpClient {
     const data = await this._get(
       `${this.cfg.directory_url}/api/v1/discover?${params}`,
       5_000,
+      traceparent,
     );
     const raw: unknown[] = (data as { nodes?: unknown[] }).nodes ?? [];
     return raw.map((n) => {
@@ -83,11 +84,12 @@ export class IicpClient {
    */
   async submit(req: TaskRequest): Promise<TaskResponse> {
     this._validateIntent(req.intent);
+    const tp = _traceparent(); // SDK-06: shared trace across discover + submit
     const nodes = await this.discover(req.intent, {
       region: req.constraints?.region ?? this.cfg.region,
       qos: req.constraints?.qos,
       min_reputation: req.constraints?.min_reputation,
-    });
+    }, tp);
 
     if (nodes.length === 0) {
       throw new IicpError(
@@ -123,6 +125,7 @@ export class IicpClient {
           body,
           req.constraints?.timeout_ms ?? this.cfg.timeout_ms,
           headers,
+          tp,
         );
         return {
           task_id: taskId,
@@ -208,12 +211,12 @@ export class IicpClient {
     }
   }
 
-  private async _get(url: string, timeoutMs: number): Promise<unknown> {
+  private async _get(url: string, timeoutMs: number, traceparent?: string): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
-        headers: { Accept: "application/json" },
+        headers: { Accept: "application/json", traceparent: traceparent ?? _traceparent() },
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -249,6 +252,7 @@ export class IicpClient {
     body: unknown,
     timeoutMs: number,
     extraHeaders?: Record<string, string>,
+    traceparent?: string,
   ): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -258,6 +262,7 @@ export class IicpClient {
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
+          traceparent: traceparent ?? _traceparent(),
           ...extraHeaders,
         },
         body: JSON.stringify(body),
@@ -299,4 +304,11 @@ export class IicpClient {
 
 function _sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Generate a W3C traceparent header value (SDK-06). */
+function _traceparent(): string {
+  const traceId = crypto.randomUUID().replace(/-/g, "");
+  const parentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  return `00-${traceId}-${parentId}-01`;
 }

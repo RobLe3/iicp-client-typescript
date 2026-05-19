@@ -217,3 +217,44 @@ describe("submit", () => {
     restore();
   });
 });
+
+// SDK-06: W3C traceparent propagation
+describe("SDK-06 traceparent", () => {
+  it("discover sends a valid traceparent header", async () => {
+    let capturedHeaders: Record<string, string> = {};
+    const restore = mockFetch((_url, init) => {
+      capturedHeaders = Object.fromEntries(new Headers(init?.headers).entries());
+      return jsonResponse({ nodes: [] });
+    });
+    const client = new IicpClient({ directory_url: "http://fake.test" });
+    await client.discover("urn:iicp:intent:llm:chat:v1");
+    const tp = capturedHeaders["traceparent"] ?? "";
+    const parts = tp.split("-");
+    assert.equal(parts.length, 4, `bad traceparent: ${tp}`);
+    assert.equal(parts[0], "00");
+    assert.equal(parts[1].length, 32);
+    assert.equal(parts[2].length, 16);
+    assert.equal(parts[3], "01");
+    restore();
+  });
+
+  it("submit shares trace-id between discover and node POST", async () => {
+    const captured: string[] = [];
+    const restore = mockFetch((url, init) => {
+      const u = url.toString();
+      const headers = Object.fromEntries(new Headers(init?.headers).entries());
+      captured.push(headers["traceparent"] ?? "");
+      if (u.includes("discover")) {
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://fake-node.test", score: 1, available: true, region: "eu" }] });
+      }
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "http://fake.test" });
+    await client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: {} });
+    assert.equal(captured.length, 2);
+    const traceId0 = captured[0].split("-")[1];
+    const traceId1 = captured[1].split("-")[1];
+    assert.equal(traceId0, traceId1, `trace-id mismatch: ${captured[0]} vs ${captured[1]}`);
+    restore();
+  });
+});
