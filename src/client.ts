@@ -150,36 +150,30 @@ export class IicpClient {
   }
 
   /**
-   * High-level chat helper — discover LLM node → submit OpenAI-compatible request.
-   * Implements SDK-02 (intent validation) and SDK-03 (node selection).
+   * Discover → select best LLM node → submit chat task via /v1/task (SDK-01/02).
+   * Uses submit() internally so the full discover→select→retry pipeline applies.
    */
   async chat(messages: ChatMessage[], opts?: ChatOptions): Promise<ChatResponse> {
     const o = opts ?? {};
     const intent = o.intent ?? "urn:iicp:intent:llm:chat:v1";
-    this._validateIntent(intent);
 
-    const nodes = await this.discover(intent, {
-      region: o.region ?? this.cfg.region,
-      min_reputation: o.min_reputation,
+    const resp = await this.submit({
+      intent,
+      payload: {
+        messages,
+        ...(o.model ? { model: o.model } : {}),
+        ...(o.max_tokens !== undefined ? { max_tokens: o.max_tokens } : {}),
+      },
+      constraints: {
+        timeout_ms: o.timeout_ms ?? this.cfg.timeout_ms,
+        ...(o.region ? { region: o.region } : {}),
+        ...(o.min_reputation !== undefined ? { min_reputation: o.min_reputation } : {}),
+      },
     });
 
-    if (nodes.length === 0) {
-      throw new IicpError(
-        `No chat nodes available (intent: ${intent})`,
-        "SDK-03",
-        { component: "directory" },
-      );
-    }
-
-    const node = nodes[0];
-    const data = await this._post(
-      `${node.endpoint}/v1/chat/completions`,
-      { messages, stream: false },
-      o.timeout_ms ?? this.cfg.timeout_ms,
-    );
-
-    const resp = data as Record<string, unknown>;
-    const choices = ((resp.choices as unknown[]) ?? []).map((c, i) => {
+    const result = (resp.result ?? {}) as Record<string, unknown>;
+    const rawChoices = (result.choices as unknown[]) ?? [];
+    const choices = rawChoices.map((c, i) => {
       const ch = c as Record<string, unknown>;
       const msg = ch.message as Record<string, string> | undefined;
       return {
@@ -192,11 +186,12 @@ export class IicpClient {
       };
     });
 
+    const rawUsage = result.usage as Record<string, number> | undefined;
     return {
-      id: String(resp.id ?? crypto.randomUUID()),
+      id: resp.task_id,
       choices,
-      usage: resp.usage as ChatResponse["usage"],
-      node_id: node.node_id,
+      usage: rawUsage,
+      node_id: String(result.node_id ?? ""),
     };
   }
 
