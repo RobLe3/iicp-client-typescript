@@ -3,6 +3,8 @@
  * Implements SDK-01..SDK-06 conformance rules.
  */
 
+import { randomUUID } from "node:crypto";
+
 import { IicpError } from "./errors.js";
 import type {
   ChatMessage,
@@ -100,7 +102,7 @@ export class IicpClient {
     }
 
     const node = nodes[0];
-    const taskId = req.task_id ?? crypto.randomUUID();
+    const taskId = req.task_id ?? randomUUID();
     const body = {
       task_id: taskId,
       intent: req.intent,
@@ -316,7 +318,7 @@ function _sleep(ms: number): Promise<void> {
 
 /** Generate a W3C traceparent header value (SDK-06). */
 function _traceparent(): string {
-  const traceId = crypto.randomUUID().replace(/-/g, "");
-  const parentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const traceId = randomUUID().replace(/-/g, "");
+  const parentId = randomUUID().replace(/-/g, "").slice(0, 16);
   return `00-${traceId}-${parentId}-01`;
 }
