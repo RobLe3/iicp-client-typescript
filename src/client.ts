@@ -166,6 +166,7 @@ export class IicpClient {
         messages,
         ...(o.model ? { model: o.model } : {}),
         ...(o.max_tokens !== undefined ? { max_tokens: o.max_tokens } : {}),
+        ...(o.temperature !== undefined ? { temperature: o.temperature } : {}),
       },
       constraints: {
         timeout_ms: o.timeout_ms ?? this.cfg.timeout_ms,

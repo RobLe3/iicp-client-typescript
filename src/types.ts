@@ -93,4 +93,7 @@ export interface ChatOptions {
   region?: string;
   timeout_ms?: number;
   min_reputation?: number;
+  model?: string;
+  max_tokens?: number;
+  temperature?: number;
 }
