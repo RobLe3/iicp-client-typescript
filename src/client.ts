@@ -191,10 +191,17 @@ export class IicpClient {
     });
 
     const rawUsage = result.usage as Record<string, number> | undefined;
+    const usage = rawUsage
+      ? {
+          prompt_tokens: rawUsage.prompt_tokens ?? 0,
+          completion_tokens: rawUsage.completion_tokens ?? 0,
+          total_tokens: rawUsage.total_tokens ?? 0,
+        }
+      : undefined;
     return {
       id: resp.task_id,
       choices,
-      usage: rawUsage,
+      usage,
       node_id: String(result.node_id ?? ""),
     };
   }

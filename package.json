@@ -14,7 +14,7 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "test": "node --loader tsx/esm --test tests/*.test.ts",
+    "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": ["iicp", "ai-agents", "protocol", "sdk"],
