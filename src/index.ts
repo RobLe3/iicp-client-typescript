@@ -1,5 +1,7 @@
 export { IicpClient } from "./client.js";
 export { IicpError } from "./errors.js";
+export { IicpNode } from "./node.js";
+export type { NodeConfig, ServeOptions, TaskHandler } from "./node.js";
 export type {
   ChatMessage,
   ChatOptions,

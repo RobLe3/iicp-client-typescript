@@ -1,6 +1,6 @@
 {
   "name": "iicp-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Official TypeScript/JavaScript SDK for the IICP protocol (ADR-016)",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -22,10 +22,17 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "peerDependencies": {
+    "prom-client": ">=14"
+  },
+  "peerDependenciesMeta": {
+    "prom-client": { "optional": true }
+  },
   "devDependencies": {
     "typescript": "^5.4.0",
     "@types/node": "^20.0.0",
-    "tsx": "^4.0.0"
+    "tsx": "^4.0.0",
+    "prom-client": "^15"
   },
   "files": ["dist", "README.md"]
 }
