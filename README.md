@@ -1,9 +1,9 @@
-# @iicp/client · TypeScript / JavaScript SDK
+# iicp-client · TypeScript / JavaScript SDK
 
 [![CI](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml/badge.svg)](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Protocol](https://img.shields.io/badge/IICP-v1.5-indigo.svg)](https://iicp.network/spec)
-[![npm](https://img.shields.io/badge/npm-%40iicp%2Fclient-red?logo=npm)](https://www.npmjs.com/package/@iicp/client)
+[![npm](https://img.shields.io/badge/npm-iicp--client-red?logo=npm)](https://www.npmjs.com/package/iicp-client)
 
 Official TypeScript client library for the [IICP protocol](https://iicp.network) — route AI agent tasks by intent across a self-organising mesh of provider nodes. No central broker. No hardcoded endpoints.
 
@@ -18,9 +18,9 @@ urn:iicp:intent:llm:chat:v1  →  discover  →  select  →  submit
 ## Install
 
 ```bash
-npm install @iicp/client
-# yarn add @iicp/client
-# pnpm add @iicp/client
+npm install iicp-client
+# yarn add iicp-client
+# pnpm add iicp-client
 ```
 
 ---
@@ -28,7 +28,7 @@ npm install @iicp/client
 ## Quickstart
 
 ```typescript
-import { IicpClient } from "@iicp/client";
+import { IicpClient } from "iicp-client";
 
 const client = new IicpClient({ directory_url: "https://iicp.network/api" });
 
@@ -46,7 +46,7 @@ console.log(response.choices[0].message.content);
 ## Configuration
 
 ```typescript
-import { IicpClient, ClientConfig } from "@iicp/client";
+import { IicpClient, ClientConfig } from "iicp-client";
 
 const client = new IicpClient({
   directory_url : "https://iicp.network/api",   // IICP directory
@@ -81,7 +81,7 @@ const { nodes } = await client.discover("urn:iicp:intent:llm:chat:v1", {
 ## Error handling
 
 ```typescript
-import { IicpClient, IicpError } from "@iicp/client";
+import { IicpClient, IicpError } from "iicp-client";
 
 try {
   const response = await client.submit(node, request);
@@ -105,7 +105,7 @@ Error codes match the [IICP error reference](https://iicp.network/docs/error-ref
 | SDK-03 | Intent URN pattern validation | ✓ |
 | SDK-04 | `timeout_ms` capped at 120 000 ms | ✓ |
 | SDK-05 | Retry on 429 / 503 with exponential back-off | ✓ |
-| SDK-06 | W3C `traceparent` propagation | planned |
+| SDK-06 | W3C `traceparent` propagation | ✓ |
 
 Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.network/conformance)
 
@@ -116,7 +116,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 ```bash
 npm install        # install deps
 npm run typecheck  # tsc strict
-npm test           # 16 unit tests
+npm test           # 25 unit tests
 npm run build      # emit to dist/
 ```
 

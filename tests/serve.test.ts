@@ -1,5 +1,6 @@
 /**
- * Integration tests for IicpNode server features.
+ * Integration tests for IicpNode server features — ADR-016 §2/§3.
+ * Conformance: SDK-03 (node serve), SDK-05 (error codes), SDK-06 (traceparent).
  * Binds to a free OS port, exercises all endpoints, then shuts down.
  */
 

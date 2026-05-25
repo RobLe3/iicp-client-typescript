@@ -3,22 +3,28 @@
   "version": "0.2.0",
   "description": "Official TypeScript/JavaScript SDK for the IICP protocol (ADR-016)",
   "main": "dist/index.js",
-  "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "require": "./dist/index.js",
-      "import": "./dist/index.mjs",
       "types": "./dist/index.d.ts"
     }
   },
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": ["iicp", "ai-agents", "protocol", "sdk"],
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RobLe3/iicp-client-typescript"
+  },
+  "homepage": "https://iicp.network",
+  "bugs": {
+    "url": "https://github.com/RobLe3/iicp-client-typescript/issues"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
@@ -34,5 +40,8 @@
     "tsx": "^4.0.0",
     "prom-client": "^15"
   },
-  "files": ["dist", "README.md"]
+  "files": ["dist", "README.md"],
+  "publishConfig": {
+    "access": "public"
+  }
 }
