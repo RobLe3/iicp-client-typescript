@@ -30,15 +30,25 @@ npm install iicp-client
 ```typescript
 import { IicpClient } from "iicp-client";
 
-const client = new IicpClient({ directory_url: "https://iicp.network/api" });
+const client = new IicpClient({ directory_url: "https://iicp.network" });
 
-const { nodes } = await client.discover("urn:iicp:intent:llm:chat:v1");
+// chat() discovers, selects the best node, and submits in one call
+const response = await client.chat(
+  [{ role: "user", content: "Hello from IICP!" }],
+);
+console.log(response.choices[0].message.content);
+```
+
+For more control over node selection:
+
+```typescript
+const nodes = await client.discover("urn:iicp:intent:llm:chat:v1");
 if (!nodes.length) throw new Error("No nodes available");
 
-const response = await client.chat(nodes[0], {
-  messages: [{ role: "user", content: "Hello from IICP!" }],
+const result = await client.submit({
+  intent: "urn:iicp:intent:llm:chat:v1",
+  payload: { messages: [{ role: "user", content: "Hello!" }] },
 });
-console.log(response.choices[0].message.content);
 ```
 
 ---
@@ -46,29 +56,29 @@ console.log(response.choices[0].message.content);
 ## Configuration
 
 ```typescript
-import { IicpClient, ClientConfig } from "iicp-client";
+import { IicpClient } from "iicp-client";
 
 const client = new IicpClient({
-  directory_url : "https://iicp.network/api",   // IICP directory
-  timeout_ms    : 30_000,                        // max 120 000 (SDK-04)
-  region        : "eu-central",                  // prefer nodes in region
-  node_token    : "your-token",                  // optional auth token
-} satisfies ClientConfig);
+  directory_url : "https://iicp.network",  // IICP directory
+  timeout_ms    : 30_000,                  // max 120 000 (SDK-04)
+  region        : "eu-central",            // prefer nodes in region
+  api_token     : "your-token",            // optional auth token
+});
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `directory_url` | `"https://iicp.network/api"` | IICP directory endpoint |
+| `directory_url` | `"https://iicp.network"` | IICP directory endpoint |
 | `timeout_ms` | `30000` | Request timeout — max 120 000 ms |
 | `region` | `undefined` | Preferred node region |
-| `node_token` | `undefined` | Bearer token for authenticated nodes |
+| `api_token` | `undefined` | Bearer token for authenticated nodes |
 
 ---
 
 ## Discover options
 
 ```typescript
-const { nodes } = await client.discover("urn:iicp:intent:llm:chat:v1", {
+const nodes = await client.discover("urn:iicp:intent:llm:chat:v1", {
   region        : "eu-central",
   model         : "phi3:mini",
   min_reputation: 0.7,
@@ -83,11 +93,12 @@ const { nodes } = await client.discover("urn:iicp:intent:llm:chat:v1", {
 ```typescript
 import { IicpClient, IicpError } from "iicp-client";
 
+const client = new IicpClient();
 try {
-  const response = await client.submit(node, request);
+  const response = await client.chat([{ role: "user", content: "hi" }]);
 } catch (e) {
   if (e instanceof IicpError) {
-    console.error(`[${e.code}] ${e.message}  (HTTP ${e.status})`);
+    console.error(`[${e.code}] ${e.message}  (HTTP ${e.status_code})`);
   }
 }
 ```
