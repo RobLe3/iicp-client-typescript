@@ -4,6 +4,8 @@ export { IicpNode } from "./node.js";
 export type { NodeConfig, ServeOptions, TaskHandler } from "./node.js";
 export {
   IicpTcpServer,
+  IicpTcpClient,
+  IicpTcpClientError,
   MsgType,
   FRAMING_VERSION,
   FRAME_HEADER_LEN,
@@ -14,6 +16,7 @@ export {
 export type {
   IicpFrame,
   IicpTcpServerOptions,
+  IicpTcpClientOptions,
   TcpTaskHandler,
   DiscoverLookup,
 } from "./iicp_tcp.js";

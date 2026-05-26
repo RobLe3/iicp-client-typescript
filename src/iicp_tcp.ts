@@ -473,3 +473,239 @@ export class IicpTcpServer {
     return true;
   }
 }
+
+// ── Client ────────────────────────────────────────────────────────────────────
+
+/** Raised when an IICP TCP RPC fails (wrong response type, server error, timeout). */
+export class IicpTcpClientError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IicpTcpClientError";
+  }
+}
+
+export interface IicpTcpClientOptions {
+  host: string;
+  port?: number;
+  timeoutMs?: number;
+}
+
+/**
+ * Native IICP TCP client (consumer side). Symmetric counterpart to
+ * IicpTcpServer: connect, handshake, then issue PING/DISCOVER/CALL requests.
+ *
+ * Usage:
+ *   const client = new IicpTcpClient({ host: "203.0.113.5", port: 9484 });
+ *   await client.connect();
+ *   await client.handshake();
+ *   const nodes = await client.discover("urn:iicp:intent:llm:chat:v1");
+ *   const result = await client.call("urn:iicp:intent:llm:chat:v1", { messages: [...] });
+ *   await client.close();
+ *   await client.disconnect();
+ */
+export class IicpTcpClient {
+  private readonly _host: string;
+  private readonly _port: number;
+  private readonly _timeoutMs: number;
+  private _socket: net.Socket | null = null;
+  private _buf: Buffer = Buffer.alloc(0);
+  private _waiters: Array<(value: Buffer | null) => void> = [];
+  private _closed = false;
+  /** node_id from the server's ACK payload (populated by handshake). */
+  public peerNodeId: string | null = null;
+  /** framing_version negotiated in the INIT/ACK (populated by handshake). */
+  public framingVersion: number | null = null;
+
+  constructor(opts: IicpTcpClientOptions) {
+    this._host = opts.host;
+    this._port = opts.port ?? 9484;
+    this._timeoutMs = opts.timeoutMs ?? 10_000;
+  }
+
+  async connect(): Promise<void> {
+    // Validate cbor-x is importable before we open the socket.
+    await getCbor();
+    return new Promise((resolve, reject) => {
+      const sock = net.connect(this._port, this._host);
+      const t = setTimeout(() => {
+        sock.destroy();
+        reject(new IicpTcpClientError(`connect timeout to ${this._host}:${this._port}`));
+      }, this._timeoutMs);
+      sock.once("connect", () => {
+        clearTimeout(t);
+        this._socket = sock;
+        sock.on("data", (chunk) => this._onData(chunk));
+        sock.on("close", () => this._onClose());
+        sock.on("error", () => this._onClose());
+        resolve();
+      });
+      sock.once("error", (err) => {
+        clearTimeout(t);
+        reject(new IicpTcpClientError(`connect failed: ${err.message}`));
+      });
+    });
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this._socket) return;
+    return new Promise((resolve) => {
+      this._socket!.once("close", () => resolve());
+      this._socket!.destroy();
+    });
+  }
+
+  async handshake(): Promise<void> {
+    if (!this._socket) throw new IicpTcpClientError("not connected");
+    const initPayload = await encodeCbor({ 1: FRAMING_VERSION });
+    this._socket.write(encodeFrame(MsgType.INIT, initPayload));
+    const { msgType, payload } = await this._readFrame();
+    if (msgType !== MsgType.ACK) {
+      throw new IicpTcpClientError(`expected ACK (0x02), got 0x${msgType.toString(16)}`);
+    }
+    if (payload.length) {
+      const body = (await decodeCbor(payload)) as Record<number, unknown>;
+      const v = body?.[1];
+      if (typeof v === "number") this.framingVersion = v;
+      const id = body?.[2];
+      if (typeof id === "string") this.peerNodeId = id;
+    }
+  }
+
+  /** Send PING; return echoed bytes from PONG (or null if not echoed). */
+  async ping(echo?: Buffer): Promise<Buffer | null> {
+    if (!this._socket) throw new IicpTcpClientError("not connected");
+    const payload = echo ? await encodeCbor({ 1: echo }) : await encodeCbor({});
+    this._socket.write(encodeFrame(MsgType.PING, payload));
+    const { msgType, payload: respPayload } = await this._readFrame();
+    if (msgType !== MsgType.PONG) {
+      throw new IicpTcpClientError(`expected PONG (0x0a), got 0x${msgType.toString(16)}`);
+    }
+    if (!respPayload.length) return null;
+    const body = (await decodeCbor(respPayload)) as Record<number, unknown>;
+    const v = body?.[1];
+    if (Buffer.isBuffer(v)) return v;
+    if (v instanceof Uint8Array) return Buffer.from(v);
+    return null;
+  }
+
+  /** Send DISCOVER for `intent`; return the nodes list from the RESPONSE. */
+  async discover(intent: string, sessionId = "discover-1"): Promise<Record<string, unknown>[]> {
+    if (!this._socket) throw new IicpTcpClientError("not connected");
+    const payload = await encodeCbor({ 2: sessionId, 3: intent });
+    this._socket.write(encodeFrame(MsgType.DISCOVER, payload));
+    const { msgType, payload: respPayload } = await this._readFrame();
+    if (msgType !== MsgType.RESPONSE) {
+      throw new IicpTcpClientError(`expected RESPONSE (0x06), got 0x${msgType.toString(16)}`);
+    }
+    const body = (await decodeCbor(respPayload)) as Record<number, unknown>;
+    const nodes = body?.[20];
+    return Array.isArray(nodes) ? (nodes as Record<string, unknown>[]) : [];
+  }
+
+  /** Send CALL with JSON payload; return the CBOR-decoded result object. */
+  async call(
+    intent: string,
+    payload: Record<string, unknown>,
+    opts: { sessionId?: string; callId?: string; timeoutMs?: number } = {}
+  ): Promise<Record<string, unknown>> {
+    if (!this._socket) throw new IicpTcpClientError("not connected");
+    const body: Record<number, unknown> = {
+      2: opts.sessionId ?? "call-1",
+      3: intent,
+      5: Buffer.from(JSON.stringify(payload)),
+    };
+    if (opts.callId !== undefined) body[15] = opts.callId;
+    this._socket.write(encodeFrame(MsgType.CALL, await encodeCbor(body)));
+    const { msgType, payload: respPayload } = await this._readFrame(opts.timeoutMs);
+    if (msgType !== MsgType.RESPONSE) {
+      throw new IicpTcpClientError(`expected RESPONSE (0x06), got 0x${msgType.toString(16)}`);
+    }
+    const resp = (await decodeCbor(respPayload)) as Record<number, unknown>;
+    if (resp?.[100] !== undefined) {
+      throw new IicpTcpClientError(`server error ${resp[100]}: ${String(resp[101] ?? "")}`);
+    }
+    const resultBytes = resp?.[5];
+    if (resultBytes === undefined || resultBytes === null) return {};
+    if (Buffer.isBuffer(resultBytes) || resultBytes instanceof Uint8Array) {
+      const decoded = await decodeCbor(Buffer.from(resultBytes as Uint8Array));
+      return decoded && typeof decoded === "object" ? (decoded as Record<string, unknown>) : { value: decoded };
+    }
+    if (typeof resultBytes === "object") return resultBytes as Record<string, unknown>;
+    return { value: resultBytes };
+  }
+
+  /** Send CLOSE (graceful teardown). Server hangs up; caller should disconnect. */
+  async close(): Promise<void> {
+    if (!this._socket || this._socket.destroyed) return;
+    this._socket.write(encodeFrame(MsgType.CLOSE, Buffer.alloc(0)));
+  }
+
+  // ── internal ──────────────────────────────────────────────────────────────
+
+  private _onData(chunk: Buffer): void {
+    // Append the new data; do NOT clear the buffer. The consumer (_readFrame)
+    // owns slicing/consuming bytes off `_buf` once it has parsed a full frame.
+    this._buf = Buffer.concat([this._buf, chunk]);
+    // Wake every waiter — each one re-checks the buffer itself.
+    while (this._waiters.length) {
+      const w = this._waiters.shift()!;
+      w(this._buf);
+    }
+  }
+
+  private _onClose(): void {
+    this._closed = true;
+    while (this._waiters.length) {
+      const w = this._waiters.shift()!;
+      w(null);
+    }
+  }
+
+  private async _readFrame(timeoutMs?: number): Promise<{ msgType: number; payload: Buffer }> {
+    const limit = timeoutMs ?? this._timeoutMs;
+    const deadline = Date.now() + limit;
+
+    // Wait for header
+    while (this._buf.length < FRAME_HEADER_LEN) {
+      if (this._closed) throw new IicpTcpClientError("connection closed");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new IicpTcpClientError("read timeout (header)");
+      await this._waitForData(remaining);
+    }
+    if (!this._buf.subarray(0, 4).equals(IICP_MAGIC)) {
+      throw new IicpTcpClientError(`bad magic in response: ${this._buf.subarray(0, 4).toString("hex")}`);
+    }
+    const msgType = this._buf.readUInt8(5);
+    const payloadLen = this._buf.readUInt32BE(8);
+    const total = FRAME_HEADER_LEN + payloadLen;
+    while (this._buf.length < total) {
+      if (this._closed) throw new IicpTcpClientError("connection closed mid-frame");
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new IicpTcpClientError("read timeout (payload)");
+      await this._waitForData(remaining);
+    }
+    const payload = Buffer.from(this._buf.subarray(FRAME_HEADER_LEN, total));
+    this._buf = Buffer.from(this._buf.subarray(total));
+    return { msgType, payload };
+  }
+
+  private _waitForData(maxWaitMs: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const t = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = this._waiters.indexOf(resolver);
+        if (idx >= 0) this._waiters.splice(idx, 1);
+        reject(new IicpTcpClientError("read timeout"));
+      }, maxWaitMs);
+      const resolver = (_buf: Buffer | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(t);
+        resolve();
+      };
+      this._waiters.push(resolver);
+    });
+  }
+}

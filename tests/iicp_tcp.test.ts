@@ -13,6 +13,8 @@ import * as net from "node:net";
 import { encode as cborEncode, decode as cborDecode } from "cbor-x";
 
 import {
+  IicpTcpClient,
+  IicpTcpClientError,
   IicpTcpServer,
   IICP_MAGIC,
   FRAMING_VERSION,
@@ -262,5 +264,143 @@ describe("IicpTcpServer", () => {
     assert.equal(f1.msgType, MsgType.ACK);
     assert.equal(f2.msgType, MsgType.PONG);
     sock.destroy();
+  });
+});
+
+// ── IicpTcpClient round-trip tests against the server fixture ───────────────
+
+describe("IicpTcpClient", () => {
+  let server: IicpTcpServer;
+  let port: number;
+
+  before(async () => {
+    port = await freePort();
+    server = new IicpTcpServer({
+      host: HOST,
+      port,
+      nodeId: "client-test-node",
+      handler: async (task) => ({ result: { echo: task.payload } }),
+      discoverLookup: async (intent) => [
+        { node_id: "fake-c1", endpoint: "http://fake.example:8080", intent },
+        { node_id: "fake-c2", endpoint: "http://fake.example:8080", intent },
+      ],
+    });
+    await server.start();
+  });
+
+  after(async () => {
+    await server.stop();
+  });
+
+  it("iter-1418: connect + handshake populates peerNodeId and framingVersion", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await client.handshake();
+      assert.equal(client.framingVersion, FRAMING_VERSION);
+      assert.equal(client.peerNodeId, "client-test-node");
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("iter-1418: ping with echo returns echoed bytes", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await client.handshake();
+      const echo = Buffer.from("ts-client-ping-2026");
+      const got = await client.ping(echo);
+      assert.ok(got);
+      assert.deepEqual(got, echo);
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("iter-1418: ping empty returns null", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await client.handshake();
+      const got = await client.ping();
+      assert.equal(got, null);
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("iter-1418: discover returns the lookup's nodes array", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await client.handshake();
+      const nodes = await client.discover("urn:iicp:intent:llm:chat:v1");
+      assert.equal(nodes.length, 2);
+      assert.equal(nodes[0].node_id, "fake-c1");
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("iter-1418: call returns handler result (CBOR-encoded JSON round-trip)", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await client.handshake();
+      const result = await client.call(
+        "urn:iicp:intent:llm:chat:v1",
+        { messages: [{ role: "user", content: "hi from ts client" }] },
+        { callId: "call-ts-1" }
+      );
+      const echo = result.echo as Record<string, unknown>;
+      const messages = echo.messages as Array<Record<string, unknown>>;
+      assert.equal(messages[0].content, "hi from ts client");
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("iter-1418: call raises IicpTcpClientError on server error_code", async () => {
+    const port2 = await freePort();
+    const noHandlerServer = new IicpTcpServer({ host: HOST, port: port2, nodeId: "no-handler" });
+    await noHandlerServer.start();
+    try {
+      const client = new IicpTcpClient({ host: HOST, port: port2 });
+      await client.connect();
+      try {
+        await client.handshake();
+        let threw = false;
+        try {
+          await client.call("urn:iicp:intent:llm:chat:v1", {});
+        } catch (e) {
+          threw = true;
+          assert.ok(e instanceof IicpTcpClientError);
+          assert.match((e as Error).message, /503/);
+        }
+        assert.ok(threw, "expected IicpTcpClientError on no-handler server");
+      } finally {
+        await client.disconnect();
+      }
+    } finally {
+      await noHandlerServer.stop();
+    }
+  });
+
+  it("iter-1418: full session — handshake + ping + discover + call + close", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await client.handshake();
+      assert.deepEqual(await client.ping(Buffer.from("x")), Buffer.from("x"));
+      const nodes = await client.discover("urn:iicp:intent:llm:chat:v1");
+      assert.equal(nodes.length, 2);
+      const result = await client.call("urn:iicp:intent:llm:chat:v1", { k: "v" }, { callId: "c1" });
+      const echo = result.echo as Record<string, unknown>;
+      assert.equal(echo.k, "v");
+      await client.close();
+    } finally {
+      await client.disconnect();
+    }
   });
 });
