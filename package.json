@@ -1,6 +1,6 @@
 {
   "name": "@iicp/client",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Official TypeScript/JavaScript SDK for the IICP protocol (ADR-016)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +15,12 @@
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["iicp", "ai-agents", "protocol", "sdk"],
+  "keywords": [
+    "iicp",
+    "ai-agents",
+    "protocol",
+    "sdk"
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -29,18 +34,27 @@
     "node": ">=18.0.0"
   },
   "peerDependencies": {
+    "cbor-x": "^1.6.4",
     "prom-client": ">=14"
   },
   "peerDependenciesMeta": {
-    "prom-client": { "optional": true }
+    "prom-client": {
+      "optional": true
+    },
+    "cbor-x": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
     "@types/node": "^20.0.0",
+    "prom-client": "^15",
     "tsx": "^4.0.0",
-    "prom-client": "^15"
+    "typescript": "^5.4.0"
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
