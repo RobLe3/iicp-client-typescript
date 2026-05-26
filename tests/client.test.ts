@@ -7,6 +7,7 @@ import { describe, it, mock, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { IicpClient } from "../src/client.js";
 import { IicpError } from "../src/errors.js";
+import { IicpNode } from "../src/node.js";
 
 // Helper: mock globalThis.fetch for a test
 function mockFetch(handler: (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>) {
@@ -236,6 +237,81 @@ describe("SDK-06 traceparent", () => {
     assert.equal(parts[2].length, 16);
     assert.equal(parts[3], "01");
     restore();
+  });
+
+  it("iter-1412: node.register sends spec-compliant payload (capabilities array of objects)", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-1", node_id: "n-1" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-1",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      region: "eu-central",
+      directoryUrl: "https://iicp.test",
+      maxConcurrent: 2,
+      tokensPerMin: 2000,
+      maxTokens: 8192,
+    });
+    await node.register();
+    restore();
+    assert.ok(captured, "no register payload captured");
+    const body = captured as Record<string, unknown>;
+    assert.equal(body.endpoint, "https://provider.example.com:8080");
+    assert.equal(body.region, "eu-central");
+    assert.deepEqual(body.limits, { max_concurrent: 2, tokens_per_min: 2000 });
+    assert.deepEqual(body.capabilities, [{
+      intent: "urn:iicp:intent:llm:chat:v1",
+      models: ["llama-3-8b"],
+      max_tokens: 8192,
+    }]);
+    assert.equal(body.transport_endpoint, undefined, "transport_endpoint should be absent when not configured");
+    assert.equal(body.intent, undefined, "flat intent must NOT appear at top level (spec violation)");
+  });
+
+  it("iter-1412: node.register includes transport_endpoint when configured (spec v0.7.0)", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-2", node_id: "n-2" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-2",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "qwen2.5:0.5b",
+      directoryUrl: "https://iicp.test",
+      transportEndpoint: "iicp://provider.example.com:9484",
+    });
+    await node.register();
+    restore();
+    assert.ok(captured);
+    assert.equal((captured as Record<string, unknown>).transport_endpoint, "iicp://provider.example.com:9484");
+  });
+
+  it("iter-1412: node.register folds legacy capabilities[] into models array", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-3", node_id: "n-3" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-3",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      capabilities: ["mistral-7b", "phi-3-mini"],
+      directoryUrl: "https://iicp.test",
+    });
+    await node.register();
+    restore();
+    assert.ok(captured);
+    const caps = (captured as Record<string, unknown>).capabilities as Array<{ models: string[] }>;
+    const models = caps[0].models.sort();
+    assert.deepEqual(models, ["llama-3-8b", "mistral-7b", "phi-3-mini"]);
   });
 
   it("submit shares trace-id between discover and node POST", async () => {

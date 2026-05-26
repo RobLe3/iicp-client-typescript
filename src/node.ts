@@ -34,6 +34,17 @@ export interface NodeConfig {
   timeoutMs?: number;
   /** Maximum concurrent tasks; excess → 429 IICP-E021. Default: 4. */
   maxConcurrent?: number;
+  /** Tokens per minute capacity declared to directory (REGISTER `limits.tokens_per_min`). Default: 10000. */
+  tokensPerMin?: number;
+  /** Max tokens per request, declared on the capability object (REGISTER `capabilities[].max_tokens`). Default: 8192. */
+  maxTokens?: number;
+  /**
+   * Optional native IICP binary endpoint (spec/iicp-dir.md v0.7.0).
+   * Scheme MUST be `iicp://` (plaintext) or `iicpsec://` (TLS).
+   * Default IICP port is 9484 (ADR-040). When set, the directory persists it
+   * and clients SHOULD prefer it over `endpoint` for task CALLs.
+   */
+  transportEndpoint?: string;
 }
 
 export interface ServeOptions {
@@ -47,10 +58,11 @@ export type TaskHandler = (task: Record<string, unknown>) => Promise<Record<stri
 // ── IicpNode ──────────────────────────────────────────────────────────────────
 
 export class IicpNode {
-  private readonly _cfg: Required<Omit<NodeConfig, "model" | "region" | "capabilities">> & {
+  private readonly _cfg: Required<Omit<NodeConfig, "model" | "region" | "capabilities" | "transportEndpoint">> & {
     model: string | undefined;
     region: string | undefined;
     capabilities: string[];
+    transportEndpoint: string | undefined;
   };
 
   private _activeTasks = 0;
@@ -72,20 +84,41 @@ export class IicpNode {
       directoryUrl: config.directoryUrl ?? DEFAULT_DIRECTORY,
       timeoutMs: config.timeoutMs ?? 5_000,
       maxConcurrent: config.maxConcurrent ?? 4,
+      tokensPerMin: config.tokensPerMin ?? 10_000,
+      maxTokens: config.maxTokens ?? 8192,
+      transportEndpoint: config.transportEndpoint,
     };
   }
 
   // ── Directory operations ───────────────────────────────────────────────────
 
   async register(): Promise<string> {
+    // spec/iicp-dir.md §3.1 REGISTER + v0.7.0 dual-endpoint extension.
+    // Pre-iter-1412 sent a non-spec flat-`intent` shape that the production
+    // directory rejects with 422; fixed below.
+    const models = this._cfg.model ? [this._cfg.model] : [];
+    if (this._cfg.capabilities.length) {
+      // Legacy flat capabilities list → fold into the models array.
+      for (const m of this._cfg.capabilities) {
+        if (!models.includes(m)) models.push(m);
+      }
+    }
     const body: Record<string, unknown> = {
-      node_id: this._cfg.nodeId,
       endpoint: this._cfg.endpoint,
-      intent: this._cfg.intent,
+      region: this._cfg.region ?? "eu-central",
+      capabilities: [{
+        intent: this._cfg.intent,
+        models,
+        max_tokens: this._cfg.maxTokens,
+      }],
+      limits: {
+        max_concurrent: this._cfg.maxConcurrent,
+        tokens_per_min: this._cfg.tokensPerMin,
+      },
     };
-    if (this._cfg.model) body.model = this._cfg.model;
-    if (this._cfg.region) body.region = this._cfg.region;
-    if (this._cfg.capabilities.length) body.capabilities = this._cfg.capabilities;
+    if (this._cfg.nodeId) body.node_id = this._cfg.nodeId;
+    // spec v0.7.0 — native IICP binary endpoint
+    if (this._cfg.transportEndpoint) body.transport_endpoint = this._cfg.transportEndpoint;
 
     const resp = await fetch(
       `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,
