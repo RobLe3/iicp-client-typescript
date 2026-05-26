@@ -20,6 +20,14 @@ export type {
   TcpTaskHandler,
   DiscoverLookup,
 } from "./iicp_tcp.js";
+export {
+  detectNat,
+  looksRoutable,
+  detectCgnat,
+  probeExternalIp,
+  tryUpnpMapping,
+} from "./nat_detection.js";
+export type { NatProfile, DetectNatOptions, UpnpResult } from "./nat_detection.js";
 export type {
   ChatMessage,
   ChatOptions,

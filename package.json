@@ -1,6 +1,6 @@
 {
   "name": "@iicp/client",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Official TypeScript/JavaScript SDK for the IICP protocol (ADR-016)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -35,13 +35,17 @@
   },
   "peerDependencies": {
     "cbor-x": "^1.6.4",
-    "prom-client": ">=14"
+    "prom-client": ">=14",
+    "nat-upnp": ">=1.1"
   },
   "peerDependenciesMeta": {
     "prom-client": {
       "optional": true
     },
     "cbor-x": {
+      "optional": true
+    },
+    "nat-upnp": {
       "optional": true
     }
   },
