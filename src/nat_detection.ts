@@ -30,7 +30,7 @@ import * as net from "node:net";
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
-/** ADR-043 §4 — IPv6 qualification result (#342). */
+/** ADR-043 §4 — IPv6 qualification result (#342, #343). */
 export interface Ipv6Profile {
   globalV6Available: boolean;
   stableV6Available: boolean;
@@ -39,6 +39,14 @@ export interface Ipv6Profile {
   listenerV6Ok: boolean;
   /** Outbound v6 connectivity test result (does NOT prove inbound). */
   externalV6Reachable: boolean;
+  /** ADR-043 §5 — true iff router accepted WANIPv6FirewallControl::AddPinhole. */
+  pinholeActive?: boolean;
+  /** UPnP UniqueID returned by AddPinhole — pass to deleteIpv6Pinhole() on shutdown. */
+  pinholeUniqueId?: number;
+  /** Granted lease (seconds). 0 = permanent / refresh required by spec. */
+  pinholeLeaseSeconds?: number;
+  /** Echoes GetFirewallStatus::InboundPinholeAllowed. */
+  pinholeInboundAllowed?: boolean;
   error?: string;
 }
 
@@ -182,7 +190,7 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     if (cgnatWarning) {
       profile.detectionLog.push(`tier-1: ${cgnatWarning}`);
       // ADR-043 §10 — CGNAT IPv4 unreachable, but advertise IPv6 GUA if usable.
-      const v6 = tryIpv6Fallback(profile, bindPort, transportPort);
+      const v6 = await tryIpv6Fallback(profile, bindPort, transportPort);
       if (v6) return v6;
       profile.operatorGuidance =
         `WARNING: your WAN IP ${upnp.externalIp} appears to be inside a carrier-grade ` +
@@ -224,7 +232,7 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
   }
 
   // ADR-043 §10 — IPv6 fallback when no v4 path is usable.
-  const v6 = tryIpv6Fallback(profile, bindPort, transportPort);
+  const v6 = await tryIpv6Fallback(profile, bindPort, transportPort);
   if (v6) return v6;
 
   profile.operatorGuidance =
@@ -337,11 +345,11 @@ function isPrivacyV6(addr: string): boolean {
   return !addr.toLowerCase().includes("ff:fe");
 }
 
-function tryIpv6Fallback(
+async function tryIpv6Fallback(
   profile: NatProfile,
   bindPort: number,
   transportPort: number | undefined,
-): NatProfile | null {
+): Promise<NatProfile | null> {
   if (!profile.ipv6) return null;
   if (!profile.ipv6.globalV6Available || !profile.ipv6.externalV6Reachable) return null;
   const v6Addr = profile.ipv6.addresses[0];
@@ -351,18 +359,44 @@ function tryIpv6Fallback(
     transportUrl = `iicp://[${v6Addr}]:${transportPort}`;
   }
   profile.detectionLog.push(
-    `tier-1-ipv6: advertising ${publicUrl} (verified outbound v6; router firewall pinhole still required — covered by #343)`,
+    `tier-1-ipv6: advertising ${publicUrl} (verified outbound v6; attempting UPnP IGDv2 pinhole — #343)`,
   );
+
+  // ADR-043 §5 / #343 — attempt UPnP IPv6 firewall pinhole.
+  try {
+    const pin = await tryUpnpIpv6Pinhole(v6Addr, bindPort, { leaseSeconds: 3600 });
+    if (pin) {
+      profile.ipv6.pinholeActive = true;
+      profile.ipv6.pinholeUniqueId = pin.uniqueId;
+      profile.ipv6.pinholeLeaseSeconds = pin.leaseSeconds;
+      profile.ipv6.pinholeInboundAllowed = pin.inboundAllowed;
+      profile.detectionLog.push(
+        `tier-1-ipv6: AddPinhole OK — uid=${pin.uniqueId} lease=${pin.leaseSeconds}s`,
+      );
+    } else {
+      profile.ipv6.pinholeActive = false;
+      profile.detectionLog.push(
+        `tier-1-ipv6: AddPinhole declined or no WANIPv6FirewallControl IGD found — operator must open inbound TCP/${bindPort} manually`,
+      );
+    }
+  } catch (exc) {
+    profile.ipv6.pinholeActive = false;
+    const msg = exc instanceof Error ? exc.message : String(exc);
+    profile.detectionLog.push(`tier-1-ipv6: pinhole attempt error: ${msg}`);
+  }
+
   const result = newProfile(1, "direct");
   result.publicEndpoint = publicUrl;
   result.transportEndpoint = transportUrl;
   result.internalEndpoint = profile.internalEndpoint;
   result.detectionLog = profile.detectionLog;
   result.ipv6 = profile.ipv6;
+  const pinholeNote = profile.ipv6.pinholeActive
+    ? `UPnP IPv6 pinhole opened (uid=${profile.ipv6.pinholeUniqueId}). `
+    : `Router firewall pinhole not opened — manual rule may be required. `;
   result.operatorGuidance =
     `Advertising IPv6 GUA ${v6Addr}. Inbound IPv4 isn't available (no UPnP success / CGNAT), ` +
-    `but your IPv6 surface is routable. For external clients to reach this node over IPv6, ` +
-    `ensure your router's firewall allows inbound TCP on port ${bindPort} → ${v6Addr}. ` +
+    `but your IPv6 surface is routable. ${pinholeNote}` +
     `The directory will Layer-2 dial-back to verify.`;
   return result;
 }
@@ -592,4 +626,175 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
       }
     );
   });
+}
+
+// ── #343 / ADR-043 §5 — UPnP IPv6 firewall pinhole ─────────────────────────
+
+interface SsdpHit {
+  location: string;
+  st: string;
+}
+
+async function ssdpDiscover(serviceType: string, timeoutMs = 3000): Promise<SsdpHit[]> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const dgram = require("node:dgram") as typeof import("node:dgram");
+  const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+  const hits: SsdpHit[] = [];
+  const msg = Buffer.from(
+    `M-SEARCH * HTTP/1.1\r\n` +
+      `HOST: 239.255.255.250:1900\r\n` +
+      `MAN: "ssdp:discover"\r\n` +
+      `MX: 2\r\n` +
+      `ST: ${serviceType}\r\n\r\n`,
+  );
+  return new Promise<SsdpHit[]>((resolve) => {
+    sock.on("message", (data) => {
+      const text = data.toString("utf-8");
+      const locMatch = text.match(/LOCATION:\s*(\S+)/i);
+      const stMatch = text.match(/^ST:\s*(\S+)/im);
+      if (locMatch && stMatch) {
+        hits.push({ location: locMatch[1], st: stMatch[1] });
+      }
+    });
+    sock.on("error", () => {
+      sock.close();
+      resolve(hits);
+    });
+    sock.bind(0, () => {
+      sock.setBroadcast(true);
+      sock.send(msg, 1900, "239.255.255.250", () => undefined);
+    });
+    setTimeout(() => {
+      try { sock.close(); } catch { /* no-op */ }
+      resolve(hits);
+    }, timeoutMs);
+  });
+}
+
+interface FirewallService {
+  controlURL: string;
+  serviceType: string;
+}
+
+async function fetchFirewallService(deviceUrl: string, timeoutMs = 3000): Promise<FirewallService | null> {
+  let xml: string;
+  try {
+    const r = await fetch(deviceUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) return null;
+    xml = await r.text();
+  } catch {
+    return null;
+  }
+  // Crude regex match — full XML parsing not worth the dep here.
+  const services: Array<{ type: string; control: string }> = [];
+  const re = /<service>([\s\S]*?)<\/service>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const block = m[1];
+    const typeM = block.match(/<serviceType>([^<]+)<\/serviceType>/i);
+    const ctrlM = block.match(/<controlURL>([^<]+)<\/controlURL>/i);
+    if (typeM && ctrlM) services.push({ type: typeM[1].trim(), control: ctrlM[1].trim() });
+  }
+  const v6 = services.find((s) => s.type.includes("WANIPv6FirewallControl"));
+  if (!v6) return null;
+  // controlURL may be relative
+  let controlURL = v6.control;
+  if (!/^https?:\/\//i.test(controlURL)) {
+    const base = new URL(deviceUrl);
+    controlURL = new URL(controlURL, `${base.protocol}//${base.host}`).toString();
+  }
+  return { controlURL, serviceType: v6.type };
+}
+
+async function soapCall(
+  controlURL: string,
+  serviceType: string,
+  action: string,
+  args: Record<string, string | number>,
+  timeoutMs = 5000,
+): Promise<Record<string, string> | null> {
+  const argXml = Object.entries(args)
+    .map(([k, v]) => `<${k}>${String(v)}</${k}>`)
+    .join("");
+  const body =
+    `<?xml version="1.0"?>\n` +
+    `<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ` +
+    `s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">` +
+    `<s:Body>` +
+    `<u:${action} xmlns:u="${serviceType}">${argXml}</u:${action}>` +
+    `</s:Body></s:Envelope>`;
+  try {
+    const r = await fetch(controlURL, {
+      method: "POST",
+      headers: {
+        "Content-Type": 'text/xml; charset="utf-8"',
+        SOAPACTION: `"${serviceType}#${action}"`,
+      },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!r.ok) return null;
+    const text = await r.text();
+    const out: Record<string, string> = {};
+    const re = /<([A-Za-z][A-Za-z0-9_]*)>([^<]*)<\/\1>/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+      // Skip envelope/body wrappers
+      if (["Envelope", "Body"].includes(m[1])) continue;
+      out[m[1]] = m[2];
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * ADR-043 §5 (#343) — open an inbound IPv6 firewall pinhole on the IGD.
+ * Returns `{ uniqueId, leaseSeconds, inboundAllowed }` on success, null otherwise.
+ *
+ * Operators close the pinhole on shutdown via `deleteIpv6Pinhole(uniqueId)`.
+ */
+export async function tryUpnpIpv6Pinhole(
+  internalV6: string,
+  internalPort: number,
+  opts: { leaseSeconds?: number; protocol?: number; timeoutMs?: number } = {},
+): Promise<{ uniqueId: number; leaseSeconds: number; inboundAllowed: boolean } | null> {
+  const lease = opts.leaseSeconds ?? 3600;
+  const protocol = opts.protocol ?? 6; // TCP
+  const timeout = opts.timeoutMs ?? 5000;
+  const hits = await ssdpDiscover("urn:schemas-upnp-org:service:WANIPv6FirewallControl:1", timeout);
+  for (const hit of hits) {
+    const svc = await fetchFirewallService(hit.location, timeout);
+    if (!svc) continue;
+    const status = await soapCall(svc.controlURL, svc.serviceType, "GetFirewallStatus", {}, timeout);
+    const inboundAllowed = (status?.InboundPinholeAllowed ?? "0") === "1";
+    if (!inboundAllowed) return null;
+    const result = await soapCall(svc.controlURL, svc.serviceType, "AddPinhole", {
+      RemoteHost: "",
+      RemotePort: 0,
+      InternalClient: internalV6,
+      InternalPort: internalPort,
+      Protocol: protocol,
+      LeaseTime: lease,
+    }, timeout);
+    if (!result) return null;
+    const uid = parseInt(result.UniqueID ?? "0", 10);
+    return { uniqueId: uid, leaseSeconds: lease, inboundAllowed: true };
+  }
+  return null;
+}
+
+/** ADR-043 §5 — close a previously-opened IPv6 pinhole. Best-effort. */
+export async function deleteIpv6Pinhole(uniqueId: number, timeoutMs = 5000): Promise<boolean> {
+  const hits = await ssdpDiscover("urn:schemas-upnp-org:service:WANIPv6FirewallControl:1", timeoutMs);
+  for (const hit of hits) {
+    const svc = await fetchFirewallService(hit.location, timeoutMs);
+    if (!svc) continue;
+    const result = await soapCall(svc.controlURL, svc.serviceType, "DeletePinhole", {
+      UniqueID: uniqueId,
+    }, timeoutMs);
+    if (result !== null) return true;
+  }
+  return false;
 }

@@ -104,6 +104,8 @@ export class IicpNode {
     nodeHmacKey: string;
   };
   private _runtimeHmacKey: string = "";
+  /** #343 — UPnP IPv6 pinhole UID captured by applyNatProfile, revoked on shutdown. */
+  private _pinholeUid: number | null = null;
 
   private _activeTasks = 0;
   private _nonces = new Map<string, number>(); // nonce → expiry timestamp (ms)
@@ -159,6 +161,10 @@ export class IicpNode {
     transportEndpoint?: string;
     detectionLog?: string[];
     isReachable(): boolean;
+    ipv6?: {
+      pinholeActive?: boolean;
+      pinholeUniqueId?: number;
+    };
   }): void {
     if (profile.isReachable() && profile.publicEndpoint) {
       this._cfg.endpoint = profile.publicEndpoint;
@@ -175,6 +181,23 @@ export class IicpNode {
       tier: profile.tier,
       detection_log_tail: log.slice(-1),
     };
+    // #343 — capture the IPv6 firewall pinhole UID so we can revoke it on shutdown.
+    if (profile.ipv6?.pinholeActive && typeof profile.ipv6.pinholeUniqueId === "number") {
+      this._pinholeUid = profile.ipv6.pinholeUniqueId;
+    }
+  }
+
+  /** #343 — close the UPnP IPv6 firewall pinhole if one is tracked. Best-effort. */
+  async revokePinhole(): Promise<void> {
+    const uid = this._pinholeUid;
+    if (uid == null) return;
+    this._pinholeUid = null;
+    try {
+      const { deleteIpv6Pinhole } = await import("./nat_detection.js");
+      await deleteIpv6Pinhole(uid);
+    } catch {
+      // Best-effort — leases auto-expire.
+    }
   }
 
   // ── Directory operations ───────────────────────────────────────────────────
@@ -275,6 +298,31 @@ export class IicpNode {
       }
     );
     if (!resp.ok) throw new Error(`Heartbeat failed: ${resp.status}`);
+  }
+
+  /**
+   * Tell the directory this node is going away.
+   *
+   * Mirrors iicp_client.IicpNode.deregister (Python iter-1471). Best-effort:
+   * shutdown paths swallow failures so a flaky directory connection doesn't
+   * block process exit.
+   */
+  async deregister(nodeToken: string): Promise<void> {
+    const resp = await fetch(
+      `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          node_id: this._cfg.nodeId,
+          node_token: nodeToken,
+        }),
+        signal: AbortSignal.timeout(this._cfg.timeoutMs),
+      }
+    );
+    if (!resp.ok && resp.status !== 404) {
+      throw new Error(`Deregister failed: ${resp.status}`);
+    }
   }
 
   // ── Nonce replay protection ────────────────────────────────────────────────

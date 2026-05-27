@@ -5,18 +5,35 @@
  *
  * Usage:
  *   iicp-node serve --model qwen2.5:0.5b --backend-url http://localhost:11434
+ *   iicp-node init                 # interactive wizard
+ *   iicp-node list                 # list saved node configs
  *
  * All flags also read from env (IICP_BACKEND_URL, IICP_BACKEND_MODEL,
  * IICP_PUBLIC_ENDPOINT, IICP_DIRECTORY_URL, IICP_REGION,
- * IICP_MAX_CONCURRENT, IICP_NODE_ID, IICP_INTENT, IICP_PORT, IICP_HOST).
+ * IICP_MAX_CONCURRENT, IICP_NODE_ID, IICP_INTENT, IICP_PORT, IICP_HOST,
+ * IICP_NODE_NAME, IICP_AUTO_DETECT_NAT, IICP_EXTERNAL_IP_PROBE_URL).
  *
  * Mirrors iicp_client.cli (Python) so operators choosing TypeScript get the
  * same one-liner setup path.
  */
 import { parseArgs } from "node:util";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { execSync } from "node:child_process";
+import * as readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
 import { IicpNode } from "./node.js";
 import { openaiCompatHandler } from "./backends/openai_compat.js";
+import {
+  configDir,
+  generateNode,
+  generateOperator,
+  listNodes,
+  loadNode,
+  loadOperator,
+  saveNode,
+  saveOperator,
+  type NodeIdentity,
+} from "./identity.js";
 
 interface ServeOpts {
   backendUrl: string;
@@ -30,6 +47,9 @@ interface ServeOpts {
   port: number;
   host: string;
   skipRegistration: boolean;
+  autoDetectNat: boolean;
+  externalIpProbeUrl: string;
+  node: string;
 }
 
 function envOr(name: string, fallback?: string): string | undefined {
@@ -44,30 +64,267 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function envBool(name: string, fallback = false): boolean {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  return v.toLowerCase() === "true" || v === "1";
+}
+
 function printHelp(): void {
   process.stdout.write(
-    `usage: iicp-node serve [options]\n\n` +
+    `usage: iicp-node <command> [options]\n\n` +
+      `Commands:\n` +
+      `  init                       Interactive wizard — set up operator + first node config\n` +
+      `  list                       List node configs saved under ~/.iicp/nodes/\n` +
+      `  serve                      Register and serve a node\n\n` +
       `Run an IICP provider node backed by an OpenAI-compatible server.\n\n` +
-      `Required (flag or env):\n` +
-      `  --backend-url URL         IICP_BACKEND_URL — Ollama / vLLM / LM Studio endpoint\n` +
-      `  --model NAME              IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n\n` +
-      `Optional:\n` +
-      `  --public-endpoint URL     IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
-      `  --directory-url URL       IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
-      `  --region REGION           IICP_REGION (default eu-central)\n` +
-      `  --intent URN              IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
-      `  --max-concurrent N        IICP_MAX_CONCURRENT (default 4)\n` +
-      `  --node-id ID              IICP_NODE_ID (auto-generated if absent)\n` +
-      `  --port N                  IICP_PORT (default 8020)\n` +
-      `  --host HOST               IICP_HOST (default 0.0.0.0)\n` +
-      `  --skip-registration       IICP_SKIP_REGISTRATION — register-free dev mode\n`,
+      `serve required (flag or env):\n` +
+      `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio endpoint\n` +
+      `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
+      `  (or --node NAME            load both from ~/.iicp/nodes/<NAME>.json after \`iicp-node init\`)\n\n` +
+      `serve optional:\n` +
+      `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
+      `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
+      `  --region REGION            IICP_REGION (default eu-central)\n` +
+      `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
+      `  --max-concurrent N         IICP_MAX_CONCURRENT (default 4)\n` +
+      `  --node-id ID               IICP_NODE_ID (auto-generated if absent)\n` +
+      `  --port N                   IICP_PORT (default 8020)\n` +
+      `  --host HOST                IICP_HOST (default 0.0.0.0)\n` +
+      `  --skip-registration        IICP_SKIP_REGISTRATION — register-free dev mode\n` +
+      `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup\n` +
+      `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n`,
   );
 }
 
+// ── #346 — dependency checker + auto-install ────────────────────────────────
+
+interface DepIssue {
+  name: string;
+  severity: "ok" | "warn" | "missing";
+  message: string;
+  installable: boolean;
+  npmExtra: string;
+}
+
+async function checkDependencies(backendUrl: string): Promise<DepIssue[]> {
+  const out: DepIssue[] = [];
+
+  // 1) Backend reachability
+  try {
+    const u = backendUrl.replace(/\/$/, "") + "/api/tags";
+    const r = await fetch(u, { signal: AbortSignal.timeout(2000) });
+    if (r.ok) {
+      out.push({ name: "backend", severity: "ok", message: `reachable at ${backendUrl}`, installable: false, npmExtra: "" });
+    } else {
+      out.push({ name: "backend", severity: "warn", message: `backend HTTP ${r.status}`, installable: false, npmExtra: "" });
+    }
+  } catch (exc) {
+    const msg = exc instanceof Error ? exc.message : String(exc);
+    out.push({ name: "backend", severity: "warn", message: `${backendUrl} unreachable: ${msg}`, installable: false, npmExtra: "" });
+  }
+
+  // 2) Optional Node deps mapped to npm peerDependencies
+  const optional: Array<[string, string, string]> = [
+    ["cbor-x", "cbor-x", "native IICP TCP transport (port 9484)"],
+    ["nat-upnp", "nat-upnp", "UPnP NAT detection + IPv6 firewall pinhole"],
+    ["prom-client", "prom-client", "/metrics endpoint"],
+  ];
+  for (const [mod, npmName, purpose] of optional) {
+    try {
+      // dynamic import — failure throws ERR_MODULE_NOT_FOUND
+      await import(mod);
+      out.push({ name: mod, severity: "ok", message: purpose, installable: false, npmExtra: "" });
+    } catch {
+      out.push({ name: mod, severity: "missing", message: `${purpose} (not installed)`, installable: true, npmExtra: npmName });
+    }
+  }
+
+  // 3) IPv6 routing surface (advisory)
+  try {
+    const { detectIpv6 } = await import("./nat_detection.js");
+    const v6 = await detectIpv6(0, { timeoutMs: 1500 });
+    if (v6.globalV6Available) {
+      let msg = `${v6.addresses.length} global IPv6 address(es)`;
+      if (v6.externalV6Reachable) msg += "; outbound v6 reachable";
+      out.push({ name: "ipv6", severity: "ok", message: msg, installable: false, npmExtra: "" });
+    } else {
+      out.push({ name: "ipv6", severity: "warn", message: "no global IPv6 — direct hosting will require IPv4 + tunnel", installable: false, npmExtra: "" });
+    }
+  } catch {
+    // detect_ipv6 not yet available — skip silently
+  }
+
+  return out;
+}
+
+function printDepStatus(issues: DepIssue[]): void {
+  const glyph: Record<string, string> = { ok: "  ✓", warn: "  !", missing: "  ✗" };
+  for (const i of issues) {
+    process.stdout.write(`${glyph[i.severity] ?? "  ?"} ${i.name.padEnd(18)}  ${i.message}\n`);
+  }
+}
+
+function installMissing(issues: DepIssue[]): void {
+  const extras = Array.from(
+    new Set(
+      issues
+        .filter((i) => i.severity === "missing" && i.installable && i.npmExtra)
+        .map((i) => i.npmExtra),
+    ),
+  ).sort();
+  if (extras.length === 0) return;
+  process.stdout.write(`\n  → npm install --no-save ${extras.join(" ")}\n`);
+  try {
+    execSync(`npm install --no-save ${extras.join(" ")}`, { stdio: "inherit" });
+    process.stdout.write("  ✓ done\n");
+  } catch (exc) {
+    process.stderr.write(`  ✗ npm install failed: ${exc instanceof Error ? exc.message : exc}\n`);
+  }
+}
+
+// ── init / list subcommands ─────────────────────────────────────────────────
+
+async function ask(rl: readline.Interface, prompt: string, fallback = ""): Promise<string> {
+  const suffix = fallback ? ` [${fallback}]` : "";
+  const a = (await rl.question(`${prompt}${suffix}: `)).trim();
+  return a || fallback;
+}
+
+async function runInit(): Promise<number> {
+  const rl = readline.createInterface({ input, output });
+  try {
+    process.stdout.write(`iicp-node init — IICP TypeScript SDK\n`);
+    process.stdout.write(`Config dir: ${configDir()}\n\n`);
+
+    // Operator
+    let op = loadOperator();
+    if (op) {
+      process.stdout.write(`Found existing operator: ${op.operator_id} (created ${op.created_at})\n`);
+    } else {
+      process.stdout.write(`No operator identity yet — creating one.\n`);
+      const display = await ask(rl, "Display name (optional)");
+      const contact = await ask(rl, "Contact email or @handle (optional)");
+      op = generateOperator({ display_name: display, contact });
+      const p = saveOperator(op);
+      process.stdout.write(`  ✓ saved ${p}\n`);
+    }
+    process.stdout.write("\n");
+
+    // Node
+    const name = await ask(rl, "Node name (used as filename stem, lowercase)", "default");
+    const existing = loadNode(name);
+    if (existing) {
+      process.stdout.write(`  ! ~/.iicp/nodes/${name}.json already exists. `);
+      const yn = (await ask(rl, "Overwrite? [y/N]", "n")).toLowerCase();
+      if (yn !== "y" && yn !== "yes") return 1;
+    }
+
+    const backend = await ask(rl, "Backend URL (Ollama / vLLM / LM Studio)", "http://localhost:11434");
+    const model = await ask(rl, "Backend model", "qwen2.5:0.5b");
+    const directory = await ask(rl, "IICP directory URL", "https://iicp.network/api");
+    const region = await ask(rl, "Region tag", "eu-central");
+    const intent = await ask(rl, "Intent URN", "urn:iicp:intent:llm:chat:v1");
+    const portStr = await ask(rl, "Listen port", "8020");
+    const port = parseInt(portStr, 10) || 8020;
+    const host = await ask(rl, "Bind host", "0.0.0.0");
+    const publicEndpoint = await ask(rl, "Public endpoint URL (blank = dev mode)");
+    const autoDetectNatStr = (await ask(rl, "Auto-detect NAT via UPnP/STUN? [y/N]", "n")).toLowerCase();
+    const autoDetectNat = autoDetectNatStr === "y" || autoDetectNatStr === "yes";
+    const externalIpProbeUrl = autoDetectNat
+      ? await ask(rl, "External IPv4 probe URL (optional fallback)", "https://api.ipify.org")
+      : "";
+
+    const node = generateNode({
+      operator_id: op.operator_id,
+      name,
+      backend_url: backend,
+      model,
+      directory_url: directory,
+      region,
+      intent,
+      port,
+      host,
+      public_endpoint: publicEndpoint,
+      auto_detect_nat: autoDetectNat,
+      external_ip_probe_url: externalIpProbeUrl,
+    });
+    const p = saveNode(node);
+    process.stdout.write(`\n  ✓ saved ${p}  (node_id=${node.node_id})\n\n`);
+
+    // Dependency check + optional auto-install (#346 parity with Python)
+    process.stdout.write(`Checking dependencies …\n`);
+    const issues = await checkDependencies(backend);
+    printDepStatus(issues);
+    const missingCount = issues.filter((i) => i.severity === "missing" && i.installable).length;
+    if (missingCount > 0) {
+      const yn = (await ask(rl, `\nInstall ${missingCount} missing optional package(s)? [Y/n]`, "y")).toLowerCase();
+      if (yn === "" || yn === "y" || yn === "yes") {
+        installMissing(issues);
+      } else {
+        process.stdout.write(`  ! skipping — install later with: npm install <pkg>\n`);
+      }
+    }
+
+    process.stdout.write(`\nDocumentation:\n`);
+    process.stdout.write(`  Docs:       https://iicp.network/docs/sdk-quickstart-docker\n`);
+    process.stdout.write(`  Reference:  iicp-node --help\n`);
+    process.stdout.write(`  Spec:       https://iicp.network/spec\n`);
+    process.stdout.write(`\nRun: iicp-node serve --node ${name}\n`);
+    return 0;
+  } finally {
+    rl.close();
+  }
+}
+
+function runList(): number {
+  const nodes = listNodes();
+  if (nodes.length === 0) {
+    process.stdout.write(`No saved node configs. Run \`iicp-node init\` first.\n`);
+    return 0;
+  }
+  process.stdout.write(`Saved nodes (${configDir()}/nodes):\n`);
+  for (const n of nodes) {
+    process.stdout.write(`  - ${n.name.padEnd(20)}  ${n.model.padEnd(24)}  ${n.public_endpoint || "(dev)"}\n`);
+  }
+  return 0;
+}
+
+// ── serve ───────────────────────────────────────────────────────────────────
+
+function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
+  return {
+    ...opts,
+    backendUrl: opts.backendUrl || saved.backend_url,
+    model: opts.model || saved.model,
+    publicEndpoint: opts.publicEndpoint || saved.public_endpoint,
+    directoryUrl: opts.directoryUrl || saved.directory_url,
+    region: opts.region || saved.region,
+    intent: opts.intent || saved.intent,
+    nodeId: opts.nodeId || saved.node_id,
+    maxConcurrent: opts.maxConcurrent === 4 ? saved.max_concurrent : opts.maxConcurrent,
+    port: opts.port === 8020 ? saved.port : opts.port,
+    host: opts.host === "0.0.0.0" ? saved.host : opts.host,
+    autoDetectNat: opts.autoDetectNat || saved.auto_detect_nat,
+    externalIpProbeUrl: opts.externalIpProbeUrl || saved.external_ip_probe_url,
+  };
+}
+
 async function runServe(opts: ServeOpts): Promise<number> {
+  if (opts.node) {
+    const saved = loadNode(opts.node);
+    if (!saved) {
+      process.stderr.write(
+        `ERROR: no saved config at ~/.iicp/nodes/${opts.node}.json. Run \`iicp-node init\` first.\n`,
+      );
+      return 2;
+    }
+    opts = applySavedNode(opts, saved);
+  }
+
   if (!opts.backendUrl || !opts.model) {
     process.stderr.write(
-      "ERROR: --backend-url and --model are required (or IICP_BACKEND_URL / IICP_BACKEND_MODEL).\n",
+      "ERROR: --backend-url and --model are required (or IICP_BACKEND_URL / IICP_BACKEND_MODEL, or --node NAME).\n",
     );
     return 2;
   }
@@ -85,6 +342,30 @@ async function runServe(opts: ServeOpts): Promise<number> {
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
   });
+
+  // ADR-041 / #343 — optional NAT auto-detection prior to register
+  if (opts.autoDetectNat) {
+    try {
+      const { detectNat } = await import("./nat_detection.js");
+      const profile = await detectNat({
+        bindHost: opts.host,
+        bindPort: opts.port,
+        operatorPublicEndpoint: opts.publicEndpoint || undefined,
+        externalIpProbeUrl: opts.externalIpProbeUrl || undefined,
+      });
+      node.applyNatProfile(profile);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[iicp-node] NAT auto-detect: tier=${profile.tier} method=${profile.transportMethod} ` +
+          `public=${profile.publicEndpoint ?? "<none>"} ipv6_pinhole=${profile.ipv6?.pinholeActive ?? false}`,
+      );
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      // eslint-disable-next-line no-console
+      console.warn(`[iicp-node] NAT auto-detect failed: ${msg} — continuing with configured endpoint`);
+    }
+  }
+
   const handler = openaiCompatHandler({
     baseUrl: opts.backendUrl,
     model: opts.model,
@@ -112,15 +393,31 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // SIGINT/SIGTERM to terminate.
   const stop = node.serve(handler, { host: opts.host, port: opts.port, nodeToken: token });
   await new Promise<void>((resolve) => {
-    const shutdown = (sig: string) => {
+    const shutdown = async (sig: string) => {
       // eslint-disable-next-line no-console
       console.log(`[iicp-node] ${sig} received — shutting down`);
+      try {
+        await node.revokePinhole();
+      } catch (exc) {
+        // eslint-disable-next-line no-console
+        console.warn(`[iicp-node] pinhole revoke failed: ${exc instanceof Error ? exc.message : exc}`);
+      }
+      try {
+        if (token) {
+          await node.deregister(token);
+        }
+      } catch (exc) {
+        // eslint-disable-next-line no-console
+        console.warn(`[iicp-node] deregister failed: ${exc instanceof Error ? exc.message : exc}`);
+      }
       stop();
       resolve();
     };
-    process.once("SIGINT", () => shutdown("SIGINT"));
-    process.once("SIGTERM", () => shutdown("SIGTERM"));
+    process.once("SIGINT", () => void shutdown("SIGINT"));
+    process.once("SIGTERM", () => void shutdown("SIGTERM"));
   });
+  // generate unused nodeId silently to keep the helper imported in --help-only paths
+  void randomUUID;
   return 0;
 }
 
@@ -129,14 +426,20 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     printHelp();
     return argv.length === 0 ? 2 : 0;
   }
-  if (argv[0] !== "serve") {
-    process.stderr.write(`unknown command: ${argv[0]}\n`);
+
+  const cmd = argv[0];
+  if (cmd === "init") return runInit();
+  if (cmd === "list") return runList();
+  if (cmd !== "serve") {
+    process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();
     return 2;
   }
+
   const { values } = parseArgs({
     args: argv.slice(1),
     options: {
+      node: { type: "string" },
       "backend-url": { type: "string" },
       model: { type: "string" },
       "public-endpoint": { type: "string" },
@@ -148,6 +451,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       port: { type: "string" },
       host: { type: "string" },
       "skip-registration": { type: "boolean" },
+      "auto-detect-nat": { type: "boolean" },
+      "external-ip-probe-url": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -157,6 +462,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   }
   const opts: ServeOpts = {
+    node: (values.node as string | undefined) ?? envOr("IICP_NODE_NAME") ?? "",
     backendUrl: (values["backend-url"] as string | undefined) ?? envOr("IICP_BACKEND_URL") ?? "",
     model: (values.model as string | undefined) ?? envOr("IICP_BACKEND_MODEL") ?? "",
     publicEndpoint:
@@ -177,8 +483,11 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         : envInt("IICP_PORT", 8020),
     host: (values.host as string | undefined) ?? envOr("IICP_HOST", "0.0.0.0")!,
     skipRegistration:
-      Boolean(values["skip-registration"]) ||
-      (envOr("IICP_SKIP_REGISTRATION", "false") ?? "").toLowerCase() === "true",
+      Boolean(values["skip-registration"]) || envBool("IICP_SKIP_REGISTRATION"),
+    autoDetectNat:
+      Boolean(values["auto-detect-nat"]) || envBool("IICP_AUTO_DETECT_NAT"),
+    externalIpProbeUrl:
+      (values["external-ip-probe-url"] as string | undefined) ?? envOr("IICP_EXTERNAL_IP_PROBE_URL") ?? "",
   };
   return runServe(opts);
 }
