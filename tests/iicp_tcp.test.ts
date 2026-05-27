@@ -42,63 +42,104 @@ interface ReadFrame {
   payload: Buffer;
 }
 
+// Per-socket persistent buffer + waiter, so multiple readFrame() calls on the
+// same socket correctly carry leftover bytes between calls. Prior approach
+// used socket.unshift() which doesn't reliably fire a 'data' event for the
+// next listener (the leftover sits in the readable queue but the new
+// readFrame's onData handler never sees it). Fixed by owning the buffer
+// + a persistent data listener attached on first use.
+interface SocketState {
+  buf: Buffer;
+  waiters: Array<(value: void | null) => void>;
+  closed: boolean;
+  listenerAttached: boolean;
+}
+const _socketStates = new WeakMap<net.Socket, SocketState>();
+
+function stateFor(socket: net.Socket): SocketState {
+  let st = _socketStates.get(socket);
+  if (!st) {
+    st = { buf: Buffer.alloc(0), waiters: [], closed: false, listenerAttached: false };
+    _socketStates.set(socket, st);
+  }
+  if (!st.listenerAttached) {
+    st.listenerAttached = true;
+    const cur = st;
+    socket.on("data", (chunk: Buffer) => {
+      cur.buf = Buffer.concat([cur.buf, chunk]);
+      while (cur.waiters.length) {
+        const w = cur.waiters.shift()!;
+        w();
+      }
+    });
+    socket.on("close", () => {
+      cur.closed = true;
+      while (cur.waiters.length) {
+        const w = cur.waiters.shift()!;
+        w(null);
+      }
+    });
+  }
+  return st;
+}
+
 function connectAndCollect(host: string, port: number) {
   return new Promise<net.Socket>((resolve, reject) => {
     const s = net.connect(port, host);
-    s.once("connect", () => resolve(s));
+    s.once("connect", () => {
+      stateFor(s); // attach data listener immediately so no bytes get lost
+      resolve(s);
+    });
     s.once("error", reject);
   });
 }
 
 async function readFrame(socket: net.Socket): Promise<ReadFrame> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let needed = FRAME_HEADER_LEN;
-    let mode: "header" | "payload" = "header";
-    let payloadLen = 0;
-    const timer = setTimeout(() => {
-      socket.off("data", onData);
-      reject(new Error("readFrame timeout"));
-    }, TIMEOUT_MS);
+  const st = stateFor(socket);
+  const deadline = Date.now() + TIMEOUT_MS;
 
-    const onData = (chunk: Buffer) => {
-      chunks.push(chunk);
-      const total = Buffer.concat(chunks);
-      if (mode === "header" && total.length >= FRAME_HEADER_LEN) {
-        if (!total.subarray(0, 4).equals(IICP_MAGIC)) {
-          clearTimeout(timer);
-          socket.off("data", onData);
-          reject(new Error(`bad magic: ${total.subarray(0, 4).toString("hex")}`));
-          return;
-        }
-        const msgType = total.readUInt8(5);
-        payloadLen = total.readUInt32BE(8);
-        if (total.length >= FRAME_HEADER_LEN + payloadLen) {
-          clearTimeout(timer);
-          socket.off("data", onData);
-          // Stash leftover bytes for next read
-          const leftover = total.subarray(FRAME_HEADER_LEN + payloadLen);
-          if (leftover.length) socket.unshift(leftover);
-          resolve({ msgType, payload: Buffer.from(total.subarray(FRAME_HEADER_LEN, FRAME_HEADER_LEN + payloadLen)) });
-          return;
-        }
-        mode = "payload";
-        needed = FRAME_HEADER_LEN + payloadLen;
+  const waitForBytes = () =>
+    new Promise<void>((resolve, reject) => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        reject(new Error("readFrame timeout"));
+        return;
       }
-      if (mode === "payload" && total.length >= needed) {
-        clearTimeout(timer);
-        socket.off("data", onData);
-        const msgType = total.readUInt8(5);
-        const leftover = total.subarray(needed);
-        if (leftover.length) socket.unshift(leftover);
-        resolve({
-          msgType,
-          payload: Buffer.from(total.subarray(FRAME_HEADER_LEN, needed)),
-        });
-      }
-    };
-    socket.on("data", onData);
-  });
+      let settled = false;
+      const t = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const idx = st.waiters.indexOf(resolver as () => void);
+        if (idx >= 0) st.waiters.splice(idx, 1);
+        reject(new Error("readFrame timeout"));
+      }, remaining);
+      const resolver = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(t);
+        resolve();
+      };
+      st.waiters.push(resolver);
+    });
+
+  // Wait for header
+  while (st.buf.length < FRAME_HEADER_LEN) {
+    if (st.closed) throw new Error("socket closed before header");
+    await waitForBytes();
+  }
+  if (!st.buf.subarray(0, 4).equals(IICP_MAGIC)) {
+    throw new Error(`bad magic: ${st.buf.subarray(0, 4).toString("hex")}`);
+  }
+  const msgType = st.buf.readUInt8(5);
+  const payloadLen = st.buf.readUInt32BE(8);
+  const total = FRAME_HEADER_LEN + payloadLen;
+  while (st.buf.length < total) {
+    if (st.closed) throw new Error("socket closed mid-frame");
+    await waitForBytes();
+  }
+  const payload = Buffer.from(st.buf.subarray(FRAME_HEADER_LEN, total));
+  st.buf = Buffer.from(st.buf.subarray(total));
+  return { msgType, payload };
 }
 
 // ── Shared server fixture ─────────────────────────────────────────────────────

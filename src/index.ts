@@ -34,6 +34,12 @@ export type {
   TaskHandlerInput,
   TaskHandlerOutput,
 } from "./backends/openai_compat.js";
+export {
+  CooperativeInferencePolicy,
+  configureCipPolicy,
+  getCipPolicy,
+} from "./cip_policy.js";
+export type { CooperativeInferencePolicyOptions } from "./cip_policy.js";
 export type {
   ChatMessage,
   ChatOptions,

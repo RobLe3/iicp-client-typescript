@@ -56,6 +56,11 @@ export interface NodeConfig {
     | "unknown";
   natType?: "full_cone" | "restricted_cone" | "port_restricted" | "symmetric" | "unknown";
   transportMetadata?: Record<string, unknown>;
+  /** S.12 §2.1 CIP policy block (CIP-D1) surfaced to the directory register.
+   * Pass a CooperativeInferencePolicy instance; when undefined the SDK falls
+   * back to the module-level getCipPolicy(). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  cipPolicy?: any;
 }
 
 export interface ServeOptions {
@@ -72,7 +77,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata"
+      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy"
     >
   > & {
     model: string | undefined;
@@ -82,6 +87,8 @@ export class IicpNode {
     transportMethod: NodeConfig["transportMethod"];
     natType: NodeConfig["natType"];
     transportMetadata: Record<string, unknown> | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    cipPolicy: any | undefined;
   };
 
   private _activeTasks = 0;
@@ -109,6 +116,7 @@ export class IicpNode {
       transportMethod: config.transportMethod,
       natType: config.natType,
       transportMetadata: config.transportMetadata,
+      cipPolicy: config.cipPolicy,
     };
   }
 
@@ -181,6 +189,15 @@ export class IicpNode {
     if (this._cfg.transportMethod) body.transport_method = this._cfg.transportMethod;
     if (this._cfg.natType) body.nat_type = this._cfg.natType;
     if (this._cfg.transportMetadata) body.transport_metadata = this._cfg.transportMetadata;
+
+    // S.12 §2.1 — CIP-D1 policy block. Use the per-config policy if set,
+    // otherwise fall back to module-level getCipPolicy().
+    const { getCipPolicy, CooperativeInferencePolicy } = await import("./cip_policy.js");
+    const policy = this._cfg.cipPolicy ?? getCipPolicy();
+    if (policy instanceof CooperativeInferencePolicy) {
+      const block = policy.asRegisterPolicyBlock();
+      if (Object.keys(block).length > 0) body.policy = block;
+    }
 
     const resp = await fetch(
       `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,
