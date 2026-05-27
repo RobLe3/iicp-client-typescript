@@ -81,7 +81,7 @@ async function checkHealthSchema(localPort: number): Promise<ProbeResult> {
         latencyMs,
       };
     }
-    const body = await resp.json();
+    const body = (await resp.json()) as Record<string, unknown>;
     const missing = [...REQUIRED_HEALTH_FIELDS].filter((k) => !(k in body));
     if (missing.length) {
       return {
@@ -162,7 +162,7 @@ async function checkReachability(node: NodeLike): Promise<ProbeResult> {
         latencyMs,
       };
     }
-    const body = await resp.json();
+    const body = (await resp.json()) as { reachable?: boolean; error?: string };
     if (body.reachable) {
       return {
         testId: "CONF-REACH-01",
@@ -215,7 +215,7 @@ async function checkDiscoverSelf(node: NodeLike): Promise<ProbeResult> {
         latencyMs,
       };
     }
-    const body = await resp.json();
+    const body = (await resp.json()) as { nodes?: Array<{ node_id?: string }> };
     const nodes: Array<{ node_id?: string }> = body.nodes ?? [];
     if (nodes.some((n) => n.node_id === nodeId)) {
       return {

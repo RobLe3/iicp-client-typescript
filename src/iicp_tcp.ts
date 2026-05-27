@@ -102,7 +102,17 @@ async function getCbor(): Promise<CborApi> {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const mod = (await import("cbor-x")) as any;
-    _cbor = { encode: mod.encode, decode: mod.decode };
+    // Use Encoder instance with useRecords:false so encode(Map) emits a plain
+    // CBOR map (a2 ...) with integer keys (instead of a tagged Map d9 01 03)
+    // AND encode({k: v}) emits standard text-keyed maps (instead of the
+    // cbor-x "Record" optimization tags 57343/57344 which Python/Rust peers
+    // cannot decode). IICP wire protocol headers use integer-keyed CBOR maps;
+    // application payloads use text-keyed maps.
+    const enc = new mod.Encoder({ useRecords: false, mapsAsObjects: false });
+    _cbor = {
+      encode: (obj: unknown) => enc.encode(obj),
+      decode: mod.decode,
+    };
     return _cbor;
   } catch (exc) {
     throw new Error(
@@ -124,15 +134,16 @@ export async function decodeCbor(data: Buffer): Promise<unknown> {
 }
 
 export async function encodeAck(framingVersion = FRAMING_VERSION, nodeId?: string): Promise<Buffer> {
-  const payload: Record<number, unknown> = { 1: framingVersion };
-  if (nodeId !== undefined) payload[2] = nodeId;
-  return encodeCbor(payload);
+  const m = new Map<number, unknown>();
+  m.set(1, framingVersion);
+  if (nodeId !== undefined) m.set(2, nodeId);
+  return encodeCbor(m);
 }
 
 export async function encodePong(echo?: Buffer): Promise<Buffer> {
-  const payload: Record<number, unknown> = {};
-  if (echo) payload[1] = echo;
-  return encodeCbor(payload);
+  const m = new Map<number, unknown>();
+  if (echo) m.set(1, echo);
+  return encodeCbor(m);
 }
 
 export async function encodeResponse(args: {
@@ -142,14 +153,15 @@ export async function encodeResponse(args: {
   errorCode?: number;
   errorMessage?: string;
 }): Promise<Buffer> {
-  const payload: Record<number, unknown> = { 2: args.sessionId };
-  if (args.callId !== undefined) payload[15] = args.callId;
+  const m = new Map<number, unknown>();
+  m.set(2, args.sessionId);
+  if (args.callId !== undefined) m.set(15, args.callId);
   if (args.result !== undefined && args.result !== null) {
-    payload[5] = typeof args.result === "string" ? Buffer.from(args.result) : args.result;
+    m.set(5, typeof args.result === "string" ? Buffer.from(args.result) : args.result);
   }
-  if (args.errorCode !== undefined) payload[100] = args.errorCode;
-  if (args.errorMessage !== undefined) payload[101] = args.errorMessage;
-  return encodeCbor(payload);
+  if (args.errorCode !== undefined) m.set(100, args.errorCode);
+  if (args.errorMessage !== undefined) m.set(101, args.errorMessage);
+  return encodeCbor(m);
 }
 
 export async function encodeDiscoverResponse(
@@ -157,7 +169,11 @@ export async function encodeDiscoverResponse(
   intent: string,
   nodes: Record<string, unknown>[]
 ): Promise<Buffer> {
-  return encodeCbor({ 2: sessionId, 3: intent, 20: nodes });
+  const m = new Map<number, unknown>();
+  m.set(2, sessionId);
+  m.set(3, intent);
+  m.set(20, nodes);
+  return encodeCbor(m);
 }
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -587,7 +603,7 @@ export class IicpTcpClient {
 
   async handshake(): Promise<void> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
-    const initPayload = await encodeCbor({ 1: FRAMING_VERSION });
+    const initPayload = await encodeCbor(new Map<number, unknown>([[1, FRAMING_VERSION]]));
     this._socket.write(encodeFrame(MsgType.INIT, initPayload));
     const { msgType, payload } = await this._readFrame();
     if (msgType !== MsgType.ACK) {
@@ -605,7 +621,9 @@ export class IicpTcpClient {
   /** Send PING; return echoed bytes from PONG (or null if not echoed). */
   async ping(echo?: Buffer): Promise<Buffer | null> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
-    const payload = echo ? await encodeCbor({ 1: echo }) : await encodeCbor({});
+    const pingMap = new Map<number, unknown>();
+    if (echo) pingMap.set(1, echo);
+    const payload = await encodeCbor(pingMap);
     this._socket.write(encodeFrame(MsgType.PING, payload));
     const { msgType, payload: respPayload } = await this._readFrame();
     if (msgType !== MsgType.PONG) {
@@ -622,7 +640,10 @@ export class IicpTcpClient {
   /** Send DISCOVER for `intent`; return the nodes list from the RESPONSE. */
   async discover(intent: string, sessionId = "discover-1"): Promise<Record<string, unknown>[]> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
-    const payload = await encodeCbor({ 2: sessionId, 3: intent });
+    const discMap = new Map<number, unknown>();
+    discMap.set(2, sessionId);
+    discMap.set(3, intent);
+    const payload = await encodeCbor(discMap);
     this._socket.write(encodeFrame(MsgType.DISCOVER, payload));
     const { msgType, payload: respPayload } = await this._readFrame();
     if (msgType !== MsgType.RESPONSE) {
@@ -640,12 +661,11 @@ export class IicpTcpClient {
     opts: { sessionId?: string; callId?: string; timeoutMs?: number } = {}
   ): Promise<Record<string, unknown>> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
-    const body: Record<number, unknown> = {
-      2: opts.sessionId ?? "call-1",
-      3: intent,
-      5: Buffer.from(JSON.stringify(payload)),
-    };
-    if (opts.callId !== undefined) body[15] = opts.callId;
+    const body = new Map<number, unknown>();
+    body.set(2, opts.sessionId ?? "call-1");
+    body.set(3, intent);
+    body.set(5, Buffer.from(JSON.stringify(payload)));
+    if (opts.callId !== undefined) body.set(15, opts.callId);
     this._socket.write(encodeFrame(MsgType.CALL, await encodeCbor(body)));
     const { msgType, payload: respPayload } = await this._readFrame(opts.timeoutMs);
     if (msgType !== MsgType.RESPONSE) {

@@ -232,8 +232,13 @@ export async function tryUpnpMapping(
 
   let createClient: () => NatUpnpClient;
   try {
+    // nat-upnp is an optional peer dep and ships no @types. Use string-form
+    // dynamic import + Function indirection so tsc doesn't try to resolve it
+    // at build time when the operator hasn't installed the [nat] extra.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, no-new-func
+    const dynImport = new Function("p", "return import(p)") as (p: string) => Promise<any>;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mod = (await import("nat-upnp")) as any;
+    const mod = (await dynImport("nat-upnp")) as any;
     // nat-upnp exports `createClient` (factory) or default; handle both.
     createClient = typeof mod.createClient === "function" ? mod.createClient : mod.default?.createClient;
     if (typeof createClient !== "function") {
