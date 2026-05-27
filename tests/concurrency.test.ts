@@ -1,3 +1,4 @@
+// ADR-016: IICP client SDK conformance
 /**
  * Unit tests for ConcurrencyGate + its IicpTcpServer wiring. TS port of the
  * Python test_concurrency.py matrix.

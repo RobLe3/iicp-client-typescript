@@ -1,3 +1,4 @@
+// ADR-016: IICP client SDK conformance
 /**
  * IicpTcpServer integration tests — TypeScript port of iicp-client-python's
  * tests/test_iicp_tcp.py. Same protocol matrix as the adapter's

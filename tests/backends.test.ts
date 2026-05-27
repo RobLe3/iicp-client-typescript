@@ -1,3 +1,4 @@
+// ADR-016: IICP client SDK conformance
 /**
  * Unit tests for the openai_compat backend handler. fetch is monkey-patched
  * per test so we exercise the routing + error mapping logic without a real

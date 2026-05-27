@@ -1,3 +1,4 @@
+// ADR-016: IICP client SDK conformance
 /**
  * Unit tests for ADR-019 pricing + HMAC. TS port of the Python pricing
  * test matrix. The wire-compat check is critical: PHP json_encode(1.0) → "1"

@@ -1,3 +1,4 @@
+// ADR-016: IICP client SDK conformance
 /**
  * Unit tests for cip_policy — S.12 §2.2 worker-role gate. TS port of the
  * Python tests/test_cip_policy.py matrix.
