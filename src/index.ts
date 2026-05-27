@@ -40,6 +40,13 @@ export {
   getCipPolicy,
 } from "./cip_policy.js";
 export type { CooperativeInferencePolicyOptions } from "./cip_policy.js";
+export {
+  buildPricingBlock,
+  phpCanonicalSignBody,
+  signBody,
+  verifySignature,
+} from "./pricing.js";
+export type { PricingConfig } from "./pricing.js";
 export type {
   ChatMessage,
   ChatOptions,

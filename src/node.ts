@@ -61,6 +61,13 @@ export interface NodeConfig {
    * back to the module-level getCipPolicy(). */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   cipPolicy?: any;
+  /** ADR-019 declarative pricing block. When undefined, the SDK does not
+   * advertise pricing and the directory defaults to 1.0 multiplier. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  pricing?: any;
+  /** Operator-provisioned HMAC key for ADR-019 signing. If empty, the SDK
+   * falls back to the directory-issued key returned in the register response. */
+  nodeHmacKey?: string;
 }
 
 export interface ServeOptions {
@@ -77,7 +84,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy"
+      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy" | "pricing" | "nodeHmacKey"
     >
   > & {
     model: string | undefined;
@@ -89,7 +96,11 @@ export class IicpNode {
     transportMetadata: Record<string, unknown> | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     cipPolicy: any | undefined;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    pricing: any | undefined;
+    nodeHmacKey: string;
   };
+  private _runtimeHmacKey: string = "";
 
   private _activeTasks = 0;
   private _nonces = new Map<string, number>(); // nonce → expiry timestamp (ms)
@@ -117,7 +128,15 @@ export class IicpNode {
       natType: config.natType,
       transportMetadata: config.transportMetadata,
       cipPolicy: config.cipPolicy,
+      pricing: config.pricing,
+      nodeHmacKey: config.nodeHmacKey ?? "",
     };
+    this._runtimeHmacKey = config.nodeHmacKey ?? "";
+  }
+
+  /** The HMAC key in use for ADR-019 pricing signatures. */
+  get nodeHmacKey(): string {
+    return this._runtimeHmacKey;
   }
 
   /**
@@ -199,6 +218,15 @@ export class IicpNode {
       if (Object.keys(block).length > 0) body.policy = block;
     }
 
+    // ADR-019 — declarative pricing. Operator opt-in.
+    if (this._cfg.pricing) {
+      const { buildPricingBlock } = await import("./pricing.js");
+      body.pricing = buildPricingBlock(this._cfg.pricing, this._runtimeHmacKey);
+    }
+    if (this._cfg.nodeHmacKey) {
+      body.node_hmac_key = this._cfg.nodeHmacKey;
+    }
+
     const resp = await fetch(
       `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,
       {
@@ -212,6 +240,14 @@ export class IicpNode {
     const data = (await resp.json()) as Record<string, unknown>;
     const token = (data.node_token ?? data.token) as string | undefined;
     if (!token) throw new Error(`Directory did not return node_token: ${JSON.stringify(data)}`);
+    // ADR-019: capture the directory-issued HMAC key for subsequent pricing
+    // signatures. Operator-provisioned key wins when set.
+    if (!this._runtimeHmacKey) {
+      const dirKey = data.node_hmac_key;
+      if (typeof dirKey === "string" && dirKey.length > 0) {
+        this._runtimeHmacKey = dirKey;
+      }
+    }
     return token;
   }
 
