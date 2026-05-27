@@ -30,6 +30,18 @@ import * as net from "node:net";
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
+/** ADR-043 §4 — IPv6 qualification result (#342). */
+export interface Ipv6Profile {
+  globalV6Available: boolean;
+  stableV6Available: boolean;
+  addresses: string[];
+  /** Can the SDK bind a v6 socket on the requested port? */
+  listenerV6Ok: boolean;
+  /** Outbound v6 connectivity test result (does NOT prove inbound). */
+  externalV6Reachable: boolean;
+  error?: string;
+}
+
 export interface NatProfile {
   tier: number; // 0..4 per ADR-041
   transportMethod:
@@ -44,6 +56,8 @@ export interface NatProfile {
   internalEndpoint?: string;
   operatorGuidance?: string;
   detectionLog: string[];
+  /** ADR-043 §4 — populated when detectNat is called with detectV6: true. */
+  ipv6?: Ipv6Profile;
   isReachable(): boolean;
 }
 
@@ -66,6 +80,8 @@ export interface DetectNatOptions {
   timeoutMs?: number;
   externalIpProbeUrl?: string;
   transportPort?: number;
+  /** ADR-043 §4 — run detectIpv6() in parallel. Default true. */
+  detectV6?: boolean;
 }
 
 // ── Public entry point ───────────────────────────────────────────────────────
@@ -79,10 +95,25 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     timeoutMs = 5000,
     externalIpProbeUrl,
     transportPort,
+    detectV6 = true,
   } = opts;
 
   const profile = newProfile(4, "unreachable");
   profile.internalEndpoint = `http://${bindHost}:${bindPort}`;
+
+  // ADR-043 §4 — IPv6 qualification runs in parallel to the v4 path.
+  if (detectV6) {
+    try {
+      profile.ipv6 = await detectIpv6(bindPort, { timeoutMs: Math.min(timeoutMs, 3000) });
+      profile.detectionLog.push(
+        `ipv6: global=${profile.ipv6.globalV6Available} stable=${profile.ipv6.stableV6Available} ` +
+          `listener=${profile.ipv6.listenerV6Ok} reachable_out=${profile.ipv6.externalV6Reachable}`,
+      );
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      profile.detectionLog.push(`ipv6: probe error — ${msg}`);
+    }
+  }
 
   // Tier 0
   if (operatorPublicEndpoint) {
@@ -150,6 +181,9 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     const cgnatWarning = await detectCgnat(upnp.externalIp);
     if (cgnatWarning) {
       profile.detectionLog.push(`tier-1: ${cgnatWarning}`);
+      // ADR-043 §10 — CGNAT IPv4 unreachable, but advertise IPv6 GUA if usable.
+      const v6 = tryIpv6Fallback(profile, bindPort, transportPort);
+      if (v6) return v6;
       profile.operatorGuidance =
         `WARNING: your WAN IP ${upnp.externalIp} appears to be inside a carrier-grade ` +
         `NAT pool (reverse-DNS suggests CGNAT). UPnP-mapped ports are typically not ` +
@@ -189,6 +223,10 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     profile.detectionLog.push(`tier-1: IGD found (${upnp.igdDevice}) but mapping refused — ${upnp.error}`);
   }
 
+  // ADR-043 §10 — IPv6 fallback when no v4 path is usable.
+  const v6 = tryIpv6Fallback(profile, bindPort, transportPort);
+  if (v6) return v6;
+
   profile.operatorGuidance =
     "No automatic port mapping available. Options:\n" +
     "  1. Configure your router to forward an external port to this host\n" +
@@ -196,6 +234,137 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     "  3. Use an external tunnel (Cloudflare Tunnel, ngrok, tailscale funnel)\n" +
     "See iicp.network/docs/nat-aware-adapter-setup.md for the details.";
   return profile;
+}
+
+/**
+ * ADR-043 §4 — IPv6 qualification probe (#342).
+ *
+ * Returns `globalV6Available` only when at least one local interface has a
+ * GUA (2000::/3). `listenerV6Ok` checks that a v6 socket can be bound on the
+ * requested port. `externalV6Reachable` performs an outbound probe of an
+ * IPv6-only host (default https://api6.ipify.org).
+ */
+export async function detectIpv6(
+  bindPort: number,
+  opts: { probeUrl?: string; timeoutMs?: number } = {},
+): Promise<Ipv6Profile> {
+  const probeUrl = opts.probeUrl ?? "https://api6.ipify.org";
+  const timeoutMs = opts.timeoutMs ?? 3000;
+
+  const out: Ipv6Profile = {
+    globalV6Available: false,
+    stableV6Available: false,
+    addresses: [],
+    listenerV6Ok: false,
+    externalV6Reachable: false,
+  };
+
+  out.addresses = listGlobalIpv6Addresses();
+  out.globalV6Available = out.addresses.length > 0;
+  out.stableV6Available = out.addresses.some((a) => !isPrivacyV6(a));
+
+  // Listener bind test
+  await new Promise<void>((resolve) => {
+    // Lazy import — node:net is fine to require, but the test must not throw
+    // synchronously if creating a server fails (some hardened sandboxes).
+    let server: import("node:net").Server | null = null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const net = require("node:net") as typeof import("node:net");
+      server = net.createServer();
+      server.once("error", (err) => {
+        out.listenerV6Ok = false;
+        out.error = `v6 bind failed: ${err.message}`;
+        server?.close();
+        resolve();
+      });
+      server.listen({ host: "::", port: bindPort, exclusive: true }, () => {
+        out.listenerV6Ok = true;
+        server?.close();
+        resolve();
+      });
+    } catch (exc) {
+      out.error = `v6 bind exception: ${exc instanceof Error ? exc.message : String(exc)}`;
+      resolve();
+    }
+  });
+
+  // Outbound v6 reachability test
+  if (out.globalV6Available) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      const resp = await fetch(probeUrl, { signal: ctrl.signal });
+      clearTimeout(t);
+      out.externalV6Reachable = resp.status === 200;
+    } catch {
+      out.externalV6Reachable = false;
+    }
+  }
+
+  return out;
+}
+
+function listGlobalIpv6Addresses(): string[] {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const os = require("node:os") as typeof import("node:os");
+  const out: string[] = [];
+  const ifs = os.networkInterfaces();
+  for (const list of Object.values(ifs)) {
+    if (!list) continue;
+    for (const ent of list) {
+      if (ent.family !== "IPv6") continue;
+      const addr = ent.address.split("%")[0];
+      // Filter to GUA (2000::/3). Node's `internal` flag covers loopback ::1.
+      if (ent.internal) continue;
+      const first = parseInt(addr.split(":")[0] ?? "0", 16);
+      // 2000..3fff is the GUA range (first hextet upper bits 001x)
+      if ((first & 0xe000) === 0x2000) {
+        out.push(addr);
+      }
+    }
+  }
+  return Array.from(new Set(out)).sort();
+}
+
+function isPrivacyV6(addr: string): boolean {
+  // Heuristic — EUI-64 places `ff:fe` in the middle 16 bits of the interface ID.
+  // RFC 4941 privacy addresses use a random interface ID without this marker.
+  const groups = addr.split(":");
+  if (groups.length < 4) return false;
+  const ifaceMid = (groups[groups.length - 3] ?? "").toLowerCase();
+  // Crude: privacy addresses don't have 'ff:fe' anywhere in the last 4 hextets
+  return !addr.toLowerCase().includes("ff:fe");
+}
+
+function tryIpv6Fallback(
+  profile: NatProfile,
+  bindPort: number,
+  transportPort: number | undefined,
+): NatProfile | null {
+  if (!profile.ipv6) return null;
+  if (!profile.ipv6.globalV6Available || !profile.ipv6.externalV6Reachable) return null;
+  const v6Addr = profile.ipv6.addresses[0];
+  const publicUrl = `http://[${v6Addr}]:${bindPort}`;
+  let transportUrl: string | undefined;
+  if (transportPort && transportPort !== bindPort) {
+    transportUrl = `iicp://[${v6Addr}]:${transportPort}`;
+  }
+  profile.detectionLog.push(
+    `tier-1-ipv6: advertising ${publicUrl} (verified outbound v6; router firewall pinhole still required — covered by #343)`,
+  );
+  const result = newProfile(1, "direct");
+  result.publicEndpoint = publicUrl;
+  result.transportEndpoint = transportUrl;
+  result.internalEndpoint = profile.internalEndpoint;
+  result.detectionLog = profile.detectionLog;
+  result.ipv6 = profile.ipv6;
+  result.operatorGuidance =
+    `Advertising IPv6 GUA ${v6Addr}. Inbound IPv4 isn't available (no UPnP success / CGNAT), ` +
+    `but your IPv6 surface is routable. For external clients to reach this node over IPv6, ` +
+    `ensure your router's firewall allows inbound TCP on port ${bindPort} → ${v6Addr}. ` +
+    `The directory will Layer-2 dial-back to verify.`;
+  return result;
 }
 
 // ── UPnP helpers ─────────────────────────────────────────────────────────────

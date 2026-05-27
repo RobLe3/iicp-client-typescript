@@ -146,11 +146,15 @@ describe("detectNat tier 0", () => {
   });
 
   it("falls through to tier 1 when operator endpoint is non-routable", async () => {
-    // tier 1 fails because nat-upnp isn't installed in CI → tier 4
+    // tier 1 fails because nat-upnp isn't installed in CI → tier 4.
+    // detectV6: false isolates the v4 path — ADR-043 §10 IPv6 fallback
+    // (iter-1468) would otherwise upgrade this to tier-1 on any host with
+    // a working IPv6 GUA.
     const p = await nat.detectNat({
       bindHost: "0.0.0.0",
       bindPort: 8080,
       operatorPublicEndpoint: "http://localhost:8080",
+      detectV6: false,
     });
     assert.equal(p.tier, 4);
     assert.equal(p.transportMethod, "unreachable");
@@ -158,7 +162,7 @@ describe("detectNat tier 0", () => {
   });
 
   it("runs tier 1 when no operator endpoint provided", async () => {
-    const p = await nat.detectNat({ bindHost: "0.0.0.0", bindPort: 8080 });
+    const p = await nat.detectNat({ bindHost: "0.0.0.0", bindPort: 8080, detectV6: false });
     assert.equal(p.tier, 4); // nat-upnp not installed in CI
     assert.ok(p.operatorGuidance);
   });
