@@ -549,7 +549,11 @@ export class IicpNode {
       const qos = (constraints?.qos_class as string | undefined) ?? "best_effort";
       const taskId = (task.task_id as string | undefined) ?? "";
 
-      handler(task)
+      // ADR-014 — OTel validate span (nonce + auth check already done above; span marks boundary)
+      import("./otel_tracer.js").then(({ withTaskValidateSpan, withTaskExecuteSpan }) => {
+        withTaskValidateSpan(taskId, () => undefined);
+        return withTaskExecuteSpan(taskId, intent, () => handler(task));
+      }).catch(() => handler(task))
         .then((result) => {
           this._activeTasks--;
           const latencyMs = Date.now() - t0;
