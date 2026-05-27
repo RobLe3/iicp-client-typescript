@@ -201,15 +201,23 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
       return profile; // tier 4
     }
 
-    const publicUrl = `http://${upnp.externalIp}:${bindPort}`;
+    // ADR-041 §3 — advertise the EXTERNAL ports the IGD actually assigned.
+    // With AddAnyPortMapping fallback the external can differ from the
+    // internal (typical when another LAN host owns 9484 already).
+    const extBind = upnp.portMapping?.[bindPort] ?? bindPort;
+    const publicUrl = `http://${upnp.externalIp}:${extBind}`;
     let transportUrl: string | undefined;
     if (transportPort && upnp.mappedPorts.includes(transportPort) && transportPort !== bindPort) {
-      transportUrl = `iicp://${upnp.externalIp}:${transportPort}`;
+      const extTransport = upnp.portMapping?.[transportPort] ?? transportPort;
+      transportUrl = `iicp://${upnp.externalIp}:${extTransport}`;
       profile.detectionLog.push(
-        `tier-1: UPnP mapped ${bindPort} → ${publicUrl} AND ${transportPort} → ${transportUrl} (spec v0.7.0 dual-endpoint)`
+        `tier-1: UPnP mapped ${bindPort}→${extBind} (${publicUrl}) AND ${transportPort}→${extTransport} (${transportUrl}) ` +
+          `(spec v0.7.0 dual-endpoint; AddAnyPortMapping used if ext≠internal)`
       );
     } else {
-      profile.detectionLog.push(`tier-1: UPnP mapped ${bindPort} → ${publicUrl}`);
+      profile.detectionLog.push(
+        `tier-1: UPnP mapped ${bindPort}→${extBind} (${publicUrl})`
+      );
     }
 
     const result = newProfile(1, "upnp_mapped");
@@ -335,6 +343,48 @@ function listGlobalIpv6Addresses(): string[] {
   return Array.from(new Set(out)).sort();
 }
 
+/**
+ * Enumerate local GUAs ranked by likelihood-of-being-pinhole-accepted.
+ *
+ * macOS only has the "secured" vs "temporary" vs "deprecated" flag distinction
+ * via `ifconfig` (node:os doesn't expose it). On Linux we fall back to first-
+ * GUA-per-interface. AVM FRITZ!Box only authorises AddPinhole for the
+ * **current temporary** RFC 4941 address, so on Mac we put those first.
+ */
+export function rankedGlobalIpv6Candidates(): string[] {
+  const platform = process.platform;
+  if (platform === "darwin") {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { execSync } = require("node:child_process") as typeof import("node:child_process");
+      const out = execSync("ifconfig", { encoding: "utf-8" });
+      const currentTemp: string[] = [];
+      const secured: string[] = [];
+      const other: string[] = [];
+      for (const raw of out.split("\n")) {
+        const line = raw.trim();
+        if (!line.startsWith("inet6 ")) continue;
+        const parts = line.split(/\s+/);
+        if (parts.length < 2) continue;
+        const addr = (parts[1] ?? "").split("%")[0];
+        if (!addr) continue;
+        const first = parseInt(addr.split(":")[0] ?? "0", 16);
+        if ((first & 0xe000) !== 0x2000) continue; // GUA only
+        const flags = parts.slice(2).join(" ").toLowerCase();
+        if (flags.includes("deprecated")) other.push(addr);
+        else if (flags.includes("secured")) secured.push(addr);
+        else if (flags.includes("temporary") || flags.includes("autoconf")) currentTemp.push(addr);
+        else other.push(addr);
+      }
+      const ranked = [...currentTemp, ...secured, ...other];
+      return Array.from(new Set(ranked));
+    } catch {
+      return listGlobalIpv6Addresses();
+    }
+  }
+  return listGlobalIpv6Addresses();
+}
+
 function isPrivacyV6(addr: string): boolean {
   // Heuristic — EUI-64 places `ff:fe` in the middle 16 bits of the interface ID.
   // RFC 4941 privacy addresses use a random interface ID without this marker.
@@ -406,8 +456,13 @@ async function tryIpv6Fallback(
 export interface UpnpResult {
   success: boolean;
   externalIp?: string;
+  /** Primary external port the IGD actually assigned. Differs from the
+   *  internal when AddAnyPortMapping was used after a 1:1 conflict. */
   externalPort?: number;
+  /** All internal ports we successfully mapped to SOME external port. */
   mappedPorts: number[];
+  /** internal_port → assigned_external_port. */
+  portMapping?: Record<number, number>;
   igdDevice?: string;
   error?: string;
 }
@@ -462,46 +517,171 @@ export async function tryUpnpMapping(
     return { success: false, mappedPorts: [], error: `externalIp failed: ${msg}` };
   }
 
-  try {
-    await client.portMapping({
-      public: primary,
-      private: primary,
-      ttl: leaseSeconds,
-      description: `iicp-client (ADR-041 tier-1) ${primary}`,
-      protocol: "tcp",
-    });
-  } catch (exc) {
-    const msg = exc instanceof Error ? exc.message : String(exc);
+  // Map a single port — try 1:1 portMapping first, fall back to a raw-SOAP
+  // AddAnyPortMapping call (IGDv2 §2.5.13) when the IGD reports conflict.
+  // nat-upnp doesn't expose AddAnyPortMapping directly, so we hit the
+  // WANIPConnection service via the same SSDP+SOAP plumbing the v6 pinhole
+  // path uses.
+  async function mapOne(internal: number): Promise<number | null> {
+    const desc = `iicp-client (ADR-041 tier-1) ${internal}`;
+    try {
+      await client.portMapping({
+        public: internal,
+        private: internal,
+        ttl: leaseSeconds,
+        description: desc,
+        protocol: "tcp",
+      });
+      return internal;
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      // eslint-disable-next-line no-console
+      console.warn(`UPnP: portMapping ${internal} failed (${msg}); trying AddAnyPortMapping`);
+    }
+    const assigned = await tryAddAnyPortMapping(internal, desc, leaseSeconds);
+    if (assigned !== null) {
+      // eslint-disable-next-line no-console
+      console.log(`UPnP: AddAnyPortMapping assigned external ${assigned} for internal ${internal}`);
+    }
+    return assigned;
+  }
+
+  const assignedPrimary = await mapOne(primary);
+  if (assignedPrimary === null) {
     if (client.close) client.close();
     return {
       success: false,
       externalIp,
       mappedPorts: [],
-      error: `AddPortMapping failed for primary port ${primary}: ${msg}`,
+      error: `portMapping + AddAnyPortMapping both failed for primary port ${primary}`,
     };
   }
 
   const mapped: number[] = [primary];
+  const portMapping: Record<number, number> = { [primary]: assignedPrimary };
   for (const extra of internalPorts.slice(1)) {
-    try {
-      await client.portMapping({
-        public: extra,
-        private: extra,
-        ttl: leaseSeconds,
-        description: `iicp-client (ADR-041 tier-1) ${extra}`,
-        protocol: "tcp",
-      });
+    const assigned = await mapOne(extra);
+    if (assigned !== null) {
       mapped.push(extra);
-    } catch (exc) {
-      const msg = exc instanceof Error ? exc.message : String(exc);
-      // Best-effort — log via detection_log path; primary already succeeded.
+      portMapping[extra] = assigned;
+    } else {
       // eslint-disable-next-line no-console
-      console.warn(`UPnP: failed to map additional port ${extra} (primary ${primary} ok): ${msg}`);
+      console.warn(`UPnP: failed to map additional port ${extra} (primary ${primary}→${assignedPrimary} ok)`);
     }
   }
   if (client.close) client.close();
 
-  return { success: true, externalIp, externalPort: primary, mappedPorts: mapped };
+  return {
+    success: true,
+    externalIp,
+    externalPort: assignedPrimary,
+    mappedPorts: mapped,
+    portMapping,
+  };
+}
+
+/**
+ * Raw-SOAP AddAnyPortMapping (IGDv2 §2.5.13) for the WANIPConnection /
+ * WANPPPConnection service. Used as a fallback when nat-upnp's 1:1
+ * portMapping fails on conflict.
+ */
+async function tryAddAnyPortMapping(
+  internalPort: number,
+  description: string,
+  leaseSeconds: number,
+): Promise<number | null> {
+  // Discover WANIPConnection / WANPPPConnection
+  const STypes = [
+    "urn:schemas-upnp-org:service:WANIPConnection:2",
+    "urn:schemas-upnp-org:service:WANIPConnection:1",
+    "urn:schemas-upnp-org:service:WANPPPConnection:1",
+  ];
+  for (const st of STypes) {
+    const hits = await ssdpDiscover(st, 3000);
+    for (const hit of hits) {
+      const svc = await fetchWanConnectionService(hit.location, st, 3000);
+      if (!svc) continue;
+      // We need the LAN IP that's on the IGD's subnet — reuse the picked
+      // local IP. nat-upnp normally figures that out; here we let the IGD
+      // resolve it via the request source IP (NewInternalClient set below).
+      const localV4 = pickLocalV4ForGateway(hit.location);
+      if (!localV4) continue;
+      const result = await soapCall(
+        svc.controlURL,
+        svc.serviceType,
+        "AddAnyPortMapping",
+        {
+          NewRemoteHost: "",
+          NewExternalPort: internalPort,
+          NewProtocol: "TCP",
+          NewInternalPort: internalPort,
+          NewInternalClient: localV4,
+          NewEnabled: 1,
+          NewPortMappingDescription: description,
+          NewLeaseDuration: leaseSeconds,
+        },
+        5000,
+      );
+      const assigned = result ? parseInt(result.NewReservedPort ?? "0", 10) : 0;
+      if (assigned > 0) return assigned;
+    }
+  }
+  return null;
+}
+
+async function fetchWanConnectionService(
+  deviceUrl: string,
+  expectedType: string,
+  timeoutMs: number,
+): Promise<FirewallService | null> {
+  let xml: string;
+  try {
+    const r = await fetch(deviceUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) return null;
+    xml = await r.text();
+  } catch {
+    return null;
+  }
+  const re = /<service>([\s\S]*?)<\/service>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const block = m[1];
+    const typeM = block.match(/<serviceType>([^<]+)<\/serviceType>/i);
+    const ctrlM = block.match(/<controlURL>([^<]+)<\/controlURL>/i);
+    if (typeM && ctrlM && typeM[1].trim() === expectedType) {
+      let controlURL = ctrlM[1].trim();
+      if (!/^https?:\/\//i.test(controlURL)) {
+        const base = new URL(deviceUrl);
+        controlURL = new URL(controlURL, `${base.protocol}//${base.host}`).toString();
+      }
+      return { controlURL, serviceType: expectedType };
+    }
+  }
+  return null;
+}
+
+function pickLocalV4ForGateway(deviceUrl: string): string | null {
+  try {
+    const base = new URL(deviceUrl);
+    const gwHost = base.hostname;
+    const m = gwHost.match(/^(\d+\.\d+\.\d+)\./);
+    if (!m) return null;
+    const prefix = m[1];
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const os = require("node:os") as typeof import("node:os");
+    const ifs = os.networkInterfaces();
+    for (const list of Object.values(ifs)) {
+      if (!list) continue;
+      for (const ent of list) {
+        if (ent.family === "IPv4" && !ent.internal && ent.address.startsWith(prefix + ".")) {
+          return ent.address;
+        }
+      }
+    }
+  } catch {
+    /* no-op */
+  }
+  return null;
 }
 
 // ── External-IP probe + routability helpers ──────────────────────────────────
@@ -783,6 +963,83 @@ export async function tryUpnpIpv6Pinhole(
     return { uniqueId: uid, leaseSeconds: lease, inboundAllowed: true };
   }
   return null;
+}
+
+/**
+ * Tier-0 helper — given a (possibly bracketed-IPv6) public endpoint URL,
+ * attempt to open an inbound UPnP firewall pinhole on the matching IGD.
+ *
+ * Ranked-retry behaviour (FRITZ!Box compatibility): if the initial v6 in
+ * the URL gets a UPnP error 606, iterate through this host's other GUAs
+ * (ranked current-temporary → secured → deprecated) and retry. On success
+ * the returned object includes a `rewrittenEndpoint` if a different GUA
+ * was needed, so the caller can advertise the actually-pinhole'd address.
+ */
+export interface PinholeOpenResult {
+  pinholeActive: boolean;
+  pinholeUniqueId?: number;
+  pinholeLeaseSeconds?: number;
+  pinholeInboundAllowed?: boolean;
+  rewrittenEndpoint?: string;
+  detectionLog: string[];
+}
+
+export async function tryOpenV6PinholeForEndpoint(
+  endpoint: string,
+  bindPort: number,
+): Promise<PinholeOpenResult> {
+  const log: string[] = [];
+  const m = endpoint.match(/^(https?):\/\/\[([0-9a-fA-F:]+)\](?::(\d+))?/);
+  if (!m) return { pinholeActive: false, detectionLog: log };
+  const scheme = m[1];
+  const v6Host = m[2];
+  const portInUrl = m[3] ? parseInt(m[3], 10) : bindPort;
+  // GUA range check
+  const first = parseInt(v6Host.split(":")[0] ?? "0", 16);
+  if ((first & 0xe000) !== 0x2000) {
+    log.push(`v6 pinhole: skip — ${v6Host} is not a GUA (2000::/3 required)`);
+    return { pinholeActive: false, detectionLog: log };
+  }
+  const candidates = [v6Host, ...rankedGlobalIpv6Candidates().filter((c) => c !== v6Host)];
+  let chosen: string | null = null;
+  let chosenResult: { uniqueId: number; leaseSeconds: number; inboundAllowed: boolean } | null = null;
+  for (const cand of candidates) {
+    log.push(`v6 pinhole: attempting AddPinhole for [${cand}]:${portInUrl}`);
+    const r = await tryUpnpIpv6Pinhole(cand, portInUrl, { leaseSeconds: 3600 });
+    if (r) {
+      chosen = cand;
+      chosenResult = r;
+      break;
+    }
+  }
+  if (!chosen || !chosenResult) {
+    log.push(
+      "v6 pinhole: not opened on any local GUA — if your router is a " +
+        "FRITZ!Box, enable 'Internet → Filters → IPv6 → Selbständige " +
+        "Portfreigaben durch das Gerät erlauben' (or equivalent). Error 606 " +
+        "from the IGD = router-side ACL block, NOT a SOAP problem.",
+    );
+    return { pinholeActive: false, detectionLog: log };
+  }
+  const out: PinholeOpenResult = {
+    pinholeActive: true,
+    pinholeUniqueId: chosenResult.uniqueId,
+    pinholeLeaseSeconds: chosenResult.leaseSeconds,
+    pinholeInboundAllowed: chosenResult.inboundAllowed,
+    detectionLog: log,
+  };
+  log.push(
+    `v6 pinhole: AddPinhole OK — uid=${chosenResult.uniqueId} lease=${chosenResult.leaseSeconds}s on [${chosen}]`,
+  );
+  if (chosen !== v6Host) {
+    const rewritten = `${scheme}://[${chosen}]:${portInUrl}`;
+    log.push(
+      `v6 pinhole: rewriting public_endpoint ${endpoint} → ${rewritten} ` +
+        `(original v6 rejected by IGD, pinhole opened on different local GUA)`,
+    );
+    out.rewrittenEndpoint = rewritten;
+  }
+  return out;
 }
 
 /** ADR-043 §5 — close a previously-opened IPv6 pinhole. Best-effort. */

@@ -22,6 +22,7 @@ import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { IicpNode } from "./node.js";
+import { configureCipPolicy } from "./cip_policy.js";
 import { openaiCompatHandler } from "./backends/openai_compat.js";
 import {
   configDir,
@@ -311,6 +312,16 @@ function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
 }
 
 async function runServe(opts: ServeOpts): Promise<number> {
+  // CIP toggle via env var — keeps the SDK opt-out by default (safe) but
+  // lets operators advertise as a CIP worker by exporting one env var.
+  if (envBool("IICP_CIP_ALLOW_WORKER")) {
+    configureCipPolicy({
+      enabled: true,
+      allowWorker: true,
+      allowCoordinator: true,
+    });
+  }
+
   if (opts.node) {
     const saved = loadNode(opts.node);
     if (!saved) {
@@ -331,7 +342,38 @@ async function runServe(opts: ServeOpts): Promise<number> {
   const nodeId =
     opts.nodeId ||
     `sdk-${opts.model.replace(/:/g, "-")}-${randomBytes(4).toString("hex")}`;
-  const publicEndpoint = opts.publicEndpoint || `http://localhost:${opts.port}`;
+  let publicEndpoint = opts.publicEndpoint || `http://localhost:${opts.port}`;
+
+  // ADR-043 §5 / #343 — Tier-0 IPv6 pinhole attempt. Runs unconditionally
+  // when the operator's public_endpoint is bracketed-IPv6, even without
+  // --auto-detect-nat. Mirrors Python's cli.py path: try AddPinhole on
+  // each local GUA (ranked: current-temp → secured → deprecated), rewrite
+  // the endpoint URL if a different GUA was the one the router accepted.
+  let tier0Pinhole: {
+    pinholeActive: boolean;
+    pinholeUniqueId?: number;
+    pinholeLeaseSeconds?: number;
+    pinholeInboundAllowed?: boolean;
+    detectionLog: string[];
+  } | null = null;
+  if (!opts.autoDetectNat && publicEndpoint.includes("[")) {
+    try {
+      const { tryOpenV6PinholeForEndpoint } = await import("./nat_detection.js");
+      const r = await tryOpenV6PinholeForEndpoint(publicEndpoint, opts.port);
+      for (const line of r.detectionLog) {
+        // eslint-disable-next-line no-console
+        console.log(`[iicp-node] v6: ${line}`);
+      }
+      if (r.rewrittenEndpoint) {
+        publicEndpoint = r.rewrittenEndpoint;
+      }
+      tier0Pinhole = r;
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      // eslint-disable-next-line no-console
+      console.warn(`[iicp-node] v6 pinhole attempt failed: ${msg}`);
+    }
+  }
 
   const node = new IicpNode({
     nodeId,
@@ -342,6 +384,21 @@ async function runServe(opts: ServeOpts): Promise<number> {
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
   });
+
+  // Surface tier-0 declaration to the directory so it doesn't run dial-back.
+  if (tier0Pinhole && !opts.autoDetectNat) {
+    node.applyNatProfile({
+      tier: 0,
+      transportMethod: "direct",
+      publicEndpoint,
+      detectionLog: tier0Pinhole.detectionLog,
+      isReachable: () => true,
+      ipv6: {
+        pinholeActive: tier0Pinhole.pinholeActive,
+        pinholeUniqueId: tier0Pinhole.pinholeUniqueId,
+      },
+    });
+  }
 
   // ADR-041 / #343 — optional NAT auto-detection prior to register
   if (opts.autoDetectNat) {
