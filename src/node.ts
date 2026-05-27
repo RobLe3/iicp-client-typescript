@@ -45,6 +45,17 @@ export interface NodeConfig {
    * and clients SHOULD prefer it over `endpoint` for task CALLs.
    */
   transportEndpoint?: string;
+  /** #331 Phase A.1 / ADR-041 — NAT-traversal observability surfaced to the
+   * directory in the register payload. Set manually or via applyNatProfile(). */
+  transportMethod?:
+    | "direct"
+    | "upnp_mapped"
+    | "stun_hole_punch"
+    | "turn_relay"
+    | "external_tunnel"
+    | "unknown";
+  natType?: "full_cone" | "restricted_cone" | "port_restricted" | "symmetric" | "unknown";
+  transportMetadata?: Record<string, unknown>;
 }
 
 export interface ServeOptions {
@@ -58,11 +69,19 @@ export type TaskHandler = (task: Record<string, unknown>) => Promise<Record<stri
 // ── IicpNode ──────────────────────────────────────────────────────────────────
 
 export class IicpNode {
-  private readonly _cfg: Required<Omit<NodeConfig, "model" | "region" | "capabilities" | "transportEndpoint">> & {
+  private readonly _cfg: Required<
+    Omit<
+      NodeConfig,
+      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata"
+    >
+  > & {
     model: string | undefined;
     region: string | undefined;
     capabilities: string[];
     transportEndpoint: string | undefined;
+    transportMethod: NodeConfig["transportMethod"];
+    natType: NodeConfig["natType"];
+    transportMetadata: Record<string, unknown> | undefined;
   };
 
   private _activeTasks = 0;
@@ -87,6 +106,44 @@ export class IicpNode {
       tokensPerMin: config.tokensPerMin ?? 10_000,
       maxTokens: config.maxTokens ?? 8192,
       transportEndpoint: config.transportEndpoint,
+      transportMethod: config.transportMethod,
+      natType: config.natType,
+      transportMetadata: config.transportMetadata,
+    };
+  }
+
+  /**
+   * Populate transport_endpoint + NAT observability fields from a
+   * detectNat() result. Operators typically call this right after detectNat()
+   * and before register() so the directory receives the discovered public
+   * endpoint + observability fields in the same payload.
+   *
+   * Defensive: tier-4 (unreachable) profiles do NOT overwrite a manually-set
+   * endpoint, and transport_method "unreachable" is filtered out before
+   * register.
+   */
+  applyNatProfile(profile: {
+    tier: number;
+    transportMethod: string;
+    publicEndpoint?: string;
+    transportEndpoint?: string;
+    detectionLog?: string[];
+    isReachable(): boolean;
+  }): void {
+    if (profile.isReachable() && profile.publicEndpoint) {
+      this._cfg.endpoint = profile.publicEndpoint;
+    }
+    if (profile.transportEndpoint) {
+      this._cfg.transportEndpoint = profile.transportEndpoint;
+    }
+    if (profile.transportMethod && profile.transportMethod !== "unreachable") {
+      this._cfg.transportMethod = profile.transportMethod as NodeConfig["transportMethod"];
+    }
+    this._cfg.natType = this._cfg.natType ?? "unknown";
+    const log = profile.detectionLog ?? [];
+    this._cfg.transportMetadata = {
+      tier: profile.tier,
+      detection_log_tail: log.slice(-1),
     };
   }
 
@@ -119,6 +176,11 @@ export class IicpNode {
     if (this._cfg.nodeId) body.node_id = this._cfg.nodeId;
     // spec v0.7.0 — native IICP binary endpoint
     if (this._cfg.transportEndpoint) body.transport_endpoint = this._cfg.transportEndpoint;
+    // #331 / ADR-041 — NAT-traversal observability (set manually or via
+    // applyNatProfile after detectNat)
+    if (this._cfg.transportMethod) body.transport_method = this._cfg.transportMethod;
+    if (this._cfg.natType) body.nat_type = this._cfg.natType;
+    if (this._cfg.transportMetadata) body.transport_metadata = this._cfg.transportMetadata;
 
     const resp = await fetch(
       `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,

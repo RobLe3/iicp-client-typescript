@@ -314,6 +314,97 @@ describe("SDK-06 traceparent", () => {
     assert.deepEqual(models, ["llama-3-8b", "mistral-7b", "phi-3-mini"]);
   });
 
+  it("iter-1427: node.register includes NAT observability when set on NodeConfig", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-nat", node_id: "n-nat" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-nat",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "qwen2.5:0.5b",
+      directoryUrl: "https://iicp.test",
+      transportEndpoint: "iicp://provider.example.com:9484",
+      transportMethod: "upnp_mapped",
+      natType: "full_cone",
+      transportMetadata: { tier: 1, detection_log_tail: ["upnp ok"] },
+    });
+    await node.register();
+    restore();
+    assert.ok(captured);
+    const body = captured as Record<string, unknown>;
+    assert.equal(body.transport_method, "upnp_mapped");
+    assert.equal(body.nat_type, "full_cone");
+    assert.deepEqual(body.transport_metadata, { tier: 1, detection_log_tail: ["upnp ok"] });
+  });
+
+  it("iter-1427: applyNatProfile populates fields + overrides endpoint when reachable", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-applied", node_id: "n-applied" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-applied",
+      endpoint: "http://placeholder.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "q",
+      directoryUrl: "https://iicp.test",
+    });
+    node.applyNatProfile({
+      tier: 1,
+      transportMethod: "upnp_mapped",
+      publicEndpoint: "http://203.0.113.5:8080",
+      transportEndpoint: "iicp://203.0.113.5:9484",
+      detectionLog: ["tier-1: UPnP mapped 8080"],
+      isReachable() {
+        return true;
+      },
+    });
+    await node.register();
+    restore();
+    assert.ok(captured);
+    const body = captured as Record<string, unknown>;
+    assert.equal(body.endpoint, "http://203.0.113.5:8080");
+    assert.equal(body.transport_endpoint, "iicp://203.0.113.5:9484");
+    assert.equal(body.transport_method, "upnp_mapped");
+    assert.equal(body.nat_type, "unknown"); // helper-defaulted
+    const meta = body.transport_metadata as Record<string, unknown>;
+    assert.equal(meta.tier, 1);
+    assert.deepEqual(meta.detection_log_tail, ["tier-1: UPnP mapped 8080"]);
+  });
+
+  it("iter-1427: applyNatProfile on tier-4 unreachable does NOT overwrite endpoint", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-keep", node_id: "n-keep" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-keep",
+      endpoint: "https://manual-endpoint.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "q",
+      directoryUrl: "https://iicp.test",
+    });
+    node.applyNatProfile({
+      tier: 4,
+      transportMethod: "unreachable",
+      publicEndpoint: undefined,
+      isReachable() {
+        return false;
+      },
+    });
+    await node.register();
+    restore();
+    assert.ok(captured);
+    const body = captured as Record<string, unknown>;
+    assert.equal(body.endpoint, "https://manual-endpoint.example.com:8080");
+    assert.equal(body.transport_method, undefined, "unreachable should not surface");
+  });
+
   it("submit shares trace-id between discover and node POST", async () => {
     const captured: string[] = [];
     const restore = mockFetch((url, init) => {
