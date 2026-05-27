@@ -1182,3 +1182,20 @@ export async function deleteIpv6Pinhole(uniqueId: number, timeoutMs = 5000): Pro
   }
   return false;
 }
+
+/** Extend a previously-opened IPv6 pinhole via WANIPv6FirewallControl::UpdatePinhole (#343).
+ *  Returns true on success; silently returns false when the IGD is unreachable or does not
+ *  support UpdatePinhole — existing lease runs to expiry and the renewal loop retries. */
+export async function renewIpv6Pinhole(uniqueId: number, newLeaseSeconds = 3600, timeoutMs = 5000): Promise<boolean> {
+  const hits = await ssdpDiscover("urn:schemas-upnp-org:service:WANIPv6FirewallControl:1", timeoutMs);
+  for (const hit of hits) {
+    const svc = await fetchFirewallService(hit.location, timeoutMs);
+    if (!svc) continue;
+    const result = await soapCall(svc.controlURL, svc.serviceType, "UpdatePinhole", {
+      UniqueID: uniqueId,
+      NewLeaseTime: newLeaseSeconds,
+    }, timeoutMs);
+    if (result !== null) return true;
+  }
+  return false;
+}

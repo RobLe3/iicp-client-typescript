@@ -106,6 +106,8 @@ export class IicpNode {
   private _runtimeHmacKey: string = "";
   /** #343 — UPnP IPv6 pinhole UID captured by applyNatProfile, revoked on shutdown. */
   private _pinholeUid: number | null = null;
+  private _pinholeLeaseSeconds = 3600;
+  private _pinholeRenewalTimer: ReturnType<typeof setTimeout> | null = null;
 
   private _activeTasks = 0;
   private _nonces = new Map<string, number>(); // nonce → expiry timestamp (ms)
@@ -164,6 +166,7 @@ export class IicpNode {
     ipv6?: {
       pinholeActive?: boolean;
       pinholeUniqueId?: number;
+      pinholeLeaseSeconds?: number;
     };
   }): void {
     if (profile.isReachable() && profile.publicEndpoint) {
@@ -184,11 +187,42 @@ export class IicpNode {
     // #343 — capture the IPv6 firewall pinhole UID so we can revoke it on shutdown.
     if (profile.ipv6?.pinholeActive && typeof profile.ipv6.pinholeUniqueId === "number") {
       this._pinholeUid = profile.ipv6.pinholeUniqueId;
+      if (typeof profile.ipv6.pinholeLeaseSeconds === "number" && profile.ipv6.pinholeLeaseSeconds > 0) {
+        this._pinholeLeaseSeconds = profile.ipv6.pinholeLeaseSeconds;
+      }
+      this._schedulePinholeRenewal();
     }
+  }
+
+  /** #343 — Schedule pinhole renewal at lease/2 interval using UpdatePinhole. */
+  private _schedulePinholeRenewal(): void {
+    if (this._pinholeRenewalTimer !== null) clearTimeout(this._pinholeRenewalTimer);
+    const delayMs = Math.max(this._pinholeLeaseSeconds / 2, 60) * 1000;
+    this._pinholeRenewalTimer = setTimeout(async () => {
+      const uid = this._pinholeUid;
+      if (uid == null) return;
+      try {
+        const { renewIpv6Pinhole } = await import("./nat_detection.js");
+        const ok = await renewIpv6Pinhole(uid, this._pinholeLeaseSeconds);
+        if (ok) {
+          this._schedulePinholeRenewal(); // schedule next renewal
+        } else {
+          // Retry sooner — IGD may be temporarily unreachable.
+          this._pinholeLeaseSeconds = Math.max(this._pinholeLeaseSeconds, 120);
+          this._schedulePinholeRenewal();
+        }
+      } catch {
+        this._schedulePinholeRenewal();
+      }
+    }, delayMs);
   }
 
   /** #343 — close the UPnP IPv6 firewall pinhole if one is tracked. Best-effort. */
   async revokePinhole(): Promise<void> {
+    if (this._pinholeRenewalTimer !== null) {
+      clearTimeout(this._pinholeRenewalTimer);
+      this._pinholeRenewalTimer = null;
+    }
     const uid = this._pinholeUid;
     if (uid == null) return;
     this._pinholeUid = null;
@@ -285,10 +319,19 @@ export class IicpNode {
 
   async heartbeat(nodeToken: string): Promise<void> {
     const resp = await fetch(
-      `${this._cfg.directoryUrl.replace(/\/$/, "")}/api/v1/heartbeat`,
+      // /v1/heartbeat (NOT /api/v1/heartbeat) — default directoryUrl
+      // already ends in /api; doubling produced 404s and prevented
+      // last_seen updates, so nodes vanished from /v1/stats.
+      `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/heartbeat`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // NodeTokenAuth middleware on the directory side requires
+          // Bearer auth; the body token is kept for back-compat with
+          // older directory builds.
+          Authorization: `Bearer ${nodeToken}`,
+        },
         body: JSON.stringify({
           node_id: this._cfg.nodeId,
           node_token: nodeToken,
@@ -412,6 +455,10 @@ export class IicpNode {
   private _handleHealth(res: http.ServerResponse): void {
     const active = this._activeTasks;
     const max = this._cfg.maxConcurrent;
+    const uid = this._pinholeUid;
+    const pinholeState = uid != null
+      ? { active: true, unique_id: uid, lease_seconds: this._pinholeLeaseSeconds }
+      : { active: false };
     const body = JSON.stringify({
       status: "ok",
       node_id: this._cfg.nodeId,
@@ -422,6 +469,7 @@ export class IicpNode {
       available: active < max,
       model: this._cfg.model ?? "",
       intent: this._cfg.intent,
+      pinhole_state: pinholeState,
     });
     res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
     res.end(body);

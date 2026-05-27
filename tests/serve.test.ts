@@ -95,7 +95,7 @@ describe("IicpNode server", () => {
 
   // ── GET /iicp/health ────────────────────────────────────────────────────────
 
-  it("health returns 200 with required fields", async () => {
+  it("health returns 200 with required fields including pinhole_state", async () => {
     const { status, body } = await jsonReq("GET", port, "/iicp/health");
     assert.equal(status, 200);
     const b = body as Record<string, unknown>;
@@ -106,6 +106,10 @@ describe("IicpNode server", () => {
     assert.equal(typeof b.active_jobs, "number");
     assert.equal(typeof b.available, "boolean");
     assert.equal(typeof b.load, "number");
+    // #343 — pinhole_state always surfaced (active: false when no pinhole opened)
+    const ps = b.pinhole_state as Record<string, unknown>;
+    assert.equal(typeof ps, "object");
+    assert.equal(ps.active, false);
   });
 
   it("unknown GET path → 404", async () => {
