@@ -47,6 +47,8 @@ export {
   verifySignature,
 } from "./pricing.js";
 export type { PricingConfig } from "./pricing.js";
+export { runConformanceChecks } from "./conformance.js";
+export type { ConformanceReport, ProbeResult } from "./conformance.js";
 export type {
   ChatMessage,
   ChatOptions,
