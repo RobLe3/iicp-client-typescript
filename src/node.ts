@@ -14,6 +14,9 @@ import * as http from "node:http";
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
+// SDK version reported in register payload sdk_version. Update on package
+// version bumps; checked by tests against package.json.
+const SDK_VERSION = "0.5.4";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -208,6 +211,12 @@ export class IicpNode {
     if (this._cfg.transportMethod) body.transport_method = this._cfg.transportMethod;
     if (this._cfg.natType) body.nat_type = this._cfg.natType;
     if (this._cfg.transportMetadata) body.transport_metadata = this._cfg.transportMetadata;
+
+    // SDK self-identification — directory surfaces these on /v1/discover
+    // so dashboards can render a language badge. Free-form so future SDKs
+    // (Go / Java / C / WASM) can self-tag without a directory change.
+    body.sdk_language = "typescript";
+    body.sdk_version = SDK_VERSION;
 
     // S.12 §2.1 — CIP-D1 policy block. Use the per-config policy if set,
     // otherwise fall back to module-level getCipPolicy().
