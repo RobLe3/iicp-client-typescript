@@ -176,6 +176,10 @@ export interface IicpTcpServerOptions {
   nodeId?: string;
   handler?: TcpTaskHandler;
   discoverLookup?: DiscoverLookup;
+  /** Optional ConcurrencyGate. When set, every CALL acquires a slot first;
+   * CapacityExceededError → RESPONSE error_code=429 (IICP-E021). */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  concurrencyGate?: any;
 }
 
 export class IicpTcpServer {
@@ -184,6 +188,8 @@ export class IicpTcpServer {
   private readonly _nodeId: string | undefined;
   private readonly _handler: TcpTaskHandler | undefined;
   private readonly _discoverLookup: DiscoverLookup | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly _gate: any | undefined;
   private _server: net.Server | null = null;
 
   constructor(opts: IicpTcpServerOptions = {}) {
@@ -192,6 +198,7 @@ export class IicpTcpServer {
     this._nodeId = opts.nodeId;
     this._handler = opts.handler;
     this._discoverLookup = opts.discoverLookup;
+    this._gate = opts.concurrencyGate;
   }
 
   async start(): Promise<void> {
@@ -453,18 +460,42 @@ export class IicpTcpServer {
       errorMessage = "no handler configured";
     } else {
       const task = { task_id: callId ?? sessionId, intent, payload: payloadObj };
-      try {
-        const handlerResult = await this._handler(task);
-        if (handlerResult && typeof handlerResult === "object" && "error_code" in handlerResult) {
-          errorCode = Number((handlerResult as Record<string, unknown>).error_code);
-          errorMessage = String((handlerResult as Record<string, unknown>).error_message ?? "handler error");
-        } else {
-          const out = (handlerResult as Record<string, unknown>).result ?? handlerResult;
-          result = await encodeCbor(out);
+      const runHandler = async (): Promise<void> => {
+        try {
+          const handlerResult = await this._handler!(task);
+          if (handlerResult && typeof handlerResult === "object" && "error_code" in handlerResult) {
+            errorCode = Number((handlerResult as Record<string, unknown>).error_code);
+            errorMessage = String((handlerResult as Record<string, unknown>).error_message ?? "handler error");
+          } else {
+            const out = (handlerResult as Record<string, unknown>).result ?? handlerResult;
+            result = await encodeCbor(out);
+          }
+        } catch {
+          errorCode = 500;
+          errorMessage = "handler raised exception";
         }
-      } catch {
-        errorCode = 500;
-        errorMessage = "handler raised exception";
+      };
+      // Tier 2 Item 5: optional ConcurrencyGate. CapacityExceededError →
+      // RESPONSE error_code=429 IICP-E021 so the directory's NodeScorer
+      // sees back-pressure consistently across HTTP + native IICP transports.
+      if (this._gate && typeof this._gate.acquire === "function") {
+        try {
+          this._gate.acquire();
+        } catch (exc) {
+          const max = (exc as { maxConcurrent?: number }).maxConcurrent ?? 0;
+          errorCode = 429;
+          errorMessage = `IICP-E021: max_concurrent=${max} reached`;
+          const resp = await encodeResponse({ sessionId, callId, result, errorCode, errorMessage });
+          socket.write(encodeFrame(MsgType.RESPONSE, resp));
+          return true;
+        }
+        try {
+          await runHandler();
+        } finally {
+          this._gate.release();
+        }
+      } else {
+        await runHandler();
       }
     }
 

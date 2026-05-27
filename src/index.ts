@@ -49,6 +49,7 @@ export {
 export type { PricingConfig } from "./pricing.js";
 export { runConformanceChecks } from "./conformance.js";
 export type { ConformanceReport, ProbeResult } from "./conformance.js";
+export { CapacityExceededError, ConcurrencyGate } from "./concurrency.js";
 export type {
   ChatMessage,
   ChatOptions,
