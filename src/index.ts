@@ -28,6 +28,12 @@ export {
   tryUpnpMapping,
 } from "./nat_detection.js";
 export type { NatProfile, DetectNatOptions, UpnpResult } from "./nat_detection.js";
+export { openaiCompatHandler } from "./backends/openai_compat.js";
+export type {
+  OpenAiCompatOptions,
+  TaskHandlerInput,
+  TaskHandlerOutput,
+} from "./backends/openai_compat.js";
 export type {
   ChatMessage,
   ChatOptions,
