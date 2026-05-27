@@ -178,6 +178,29 @@ describe("IicpTcpServer", () => {
     sock.destroy();
   });
 
+  // Regression: 0.5.3 wire-compat fix. Earlier 0.5.x releases emitted CBOR
+  // text-string keys ("1", "2") instead of integer keys, and wrapped Map
+  // output in cbor-x tag 259 (d9 01 03). Python and Rust peers cannot read
+  // either dialect. This test asserts the FIRST BYTE of the ACK payload is
+  // the standard CBOR map-with-2-integer-keys header (0xa2). If a future
+  // contributor reverts to plain object encoding, this test will catch it
+  // before the constellation harness does.
+  it("ACK frame is standard CBOR (integer-keyed map header 0xa2)", async () => {
+    const sock = await connectAndCollect(HOST, port);
+    sock.write(encodeFrame(MsgType.INIT, Buffer.from(cborEncode({ 1: FRAMING_VERSION }))));
+    const f = await readFrame(sock);
+    assert.equal(f.msgType, MsgType.ACK);
+    assert.ok(f.payload.length > 0, "ACK payload must not be empty");
+    // 0xa2 = CBOR major-type 5 (map), short-form length 2 → "{1: ..., 2: ...}"
+    // Must NOT be 0xb9 00 02 (map with text-string keys) or 0xd9 01 03 (tag 259).
+    assert.equal(
+      f.payload[0], 0xa2,
+      `ACK CBOR must start with 0xa2 (standard integer-keyed map); got 0x${f.payload[0].toString(16).padStart(2, "0")}` +
+      ` — full hex: ${f.payload.toString("hex").slice(0, 32)}…`,
+    );
+    sock.destroy();
+  });
+
   it("PING with echo → PONG round-trips bytes", async () => {
     const sock = await connectAndCollect(HOST, port);
     sock.write(encodeFrame(MsgType.INIT, Buffer.from(cborEncode({ 1: FRAMING_VERSION }))));
