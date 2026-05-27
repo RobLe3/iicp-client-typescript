@@ -140,6 +140,21 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     );
   }
 
+  // Tier 0 auto-detect — cloud VM with a public IPv4 directly on a local interface.
+  const autoV4 = detectPublicV4OnInterfaces();
+  if (autoV4) {
+    const autoUrl = `http://${autoV4}:${bindPort}`;
+    profile.detectionLog.push(
+      `tier-0: auto-detected public IPv4 on local interface → ${JSON.stringify(autoUrl)}`
+    );
+    const t0 = newProfile(0, "direct");
+    t0.publicEndpoint = autoUrl;
+    t0.internalEndpoint = profile.internalEndpoint;
+    t0.detectionLog = profile.detectionLog;
+    t0.ipv6 = profile.ipv6;
+    return t0;
+  }
+
   // Tier 1 — UPnP
   const portsToMap: number[] = [bindPort];
   if (transportPort && transportPort !== bindPort) portsToMap.push(transportPort);
@@ -680,6 +695,26 @@ function pickLocalV4ForGateway(deviceUrl: string): string | null {
     }
   } catch {
     /* no-op */
+  }
+  return null;
+}
+
+/**
+ * Cloud-VM auto-detect: returns the first public-routable IPv4 found on a
+ * local network interface. Covers bare-metal VPS scenarios (Hetzner,
+ * DigitalOcean, Vultr) where the public IP is assigned directly to an
+ * interface. On AWS/GCP (private IP only visible) returns null.
+ */
+function detectPublicV4OnInterfaces(): string | null {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeOs = require("node:os") as typeof import("node:os");
+  const ifs = nodeOs.networkInterfaces();
+  for (const list of Object.values(ifs) as import("node:os").NetworkInterfaceInfo[][]) {
+    if (!list) continue;
+    for (const ent of list) {
+      if (ent.family !== "IPv4" || ent.internal) continue;
+      if (!isNonPublicIpv4(ent.address)) return ent.address;
+    }
   }
   return null;
 }
