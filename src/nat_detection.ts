@@ -258,13 +258,105 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
   const v6 = await tryIpv6Fallback(profile, bindPort, transportPort);
   if (v6) return v6;
 
+  // Tier 4 external tunnel auto-detect: ngrok, tailscale funnel, env-var override.
+  const tunnelUrl = await detectExternalTunnel(bindPort, Math.min(timeoutMs, 3000));
+  if (tunnelUrl) {
+    profile.detectionLog.push(`tier-4: external tunnel auto-detected → ${JSON.stringify(tunnelUrl)}`);
+    const t4 = newProfile(1, "external_tunnel");
+    t4.publicEndpoint = tunnelUrl;
+    t4.internalEndpoint = profile.internalEndpoint;
+    t4.detectionLog = profile.detectionLog;
+    return t4;
+  }
+
   profile.operatorGuidance =
     "No automatic port mapping available. Options:\n" +
     "  1. Configure your router to forward an external port to this host\n" +
     "  2. Set publicEndpoint to your real external URL\n" +
-    "  3. Use an external tunnel (Cloudflare Tunnel, ngrok, tailscale funnel)\n" +
+    "  3. Run `ngrok http <port>` or `cloudflared tunnel --url http://localhost:<port>` " +
+    "and export IICP_TUNNEL_URL=<the https URL>\n" +
     "See iicp.network/docs/nat-aware-adapter-setup.md for the details.";
   return profile;
+}
+
+// ── External tunnel auto-detect ──────────────────────────────────────────────
+
+/**
+ * Detect a running external tunnel daemon and return its public HTTPS URL.
+ *
+ * Checks in order:
+ *   1. IICP_TUNNEL_URL / TUNNEL_URL / CLOUDFLARE_TUNNEL_URL env vars
+ *   2. ngrok — local REST API at http://127.0.0.1:4040/api/tunnels
+ *   3. tailscale funnel — `tailscale serve status --json` CLI
+ */
+async function detectExternalTunnel(bindPort: number, timeoutMs = 3000): Promise<string | null> {
+  // env-var override (cloudflared Quick Tunnels, any custom setup)
+  for (const envVar of ["IICP_TUNNEL_URL", "TUNNEL_URL", "CLOUDFLARE_TUNNEL_URL"]) {
+    const url = process.env[envVar] ?? "";
+    if (url.startsWith("https://")) return url;
+  }
+
+  const ngrok = await detectNgrokTunnel(bindPort, timeoutMs);
+  if (ngrok) return ngrok;
+
+  return detectTailscaleFunnel(bindPort, timeoutMs);
+}
+
+async function detectNgrokTunnel(bindPort: number, timeoutMs = 3000): Promise<string | null> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), Math.min(timeoutMs, 2000));
+  try {
+    const resp = await fetch("http://127.0.0.1:4040/api/tunnels", { signal: ctrl.signal });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { tunnels?: Array<{ public_url?: string; config?: { addr?: string } }> };
+    let firstHttps: string | null = null;
+    for (const tunnel of data.tunnels ?? []) {
+      const pubUrl = tunnel.public_url ?? "";
+      if (!pubUrl.startsWith("https://")) continue;
+      const cfgAddr = tunnel.config?.addr ?? "";
+      if (cfgAddr.includes(`:${bindPort}`)) return pubUrl;
+      if (!firstHttps) firstHttps = pubUrl;
+    }
+    return firstHttps;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function detectTailscaleFunnel(bindPort: number, timeoutMs = 3000): Promise<string | null> {
+  const { execFile } = await import("node:child_process").catch(() => ({ execFile: null }));
+  if (!execFile) return null;
+
+  const run = (cmd: string, args: string[]): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+      execFile(cmd, args, (err, stdout) => {
+        clearTimeout(timer);
+        if (err) reject(err);
+        else resolve(stdout);
+      });
+    });
+
+  try {
+    const statusJson = await run("tailscale", ["status", "--json"]);
+    const status = JSON.parse(statusJson) as { Self?: { DNSName?: string } };
+    const dnsName = (status.Self?.DNSName ?? "").replace(/\.$/, "");
+    if (!dnsName) return null;
+
+    const serveJson = await run("tailscale", ["serve", "status", "--json"]);
+    const serve = JSON.parse(serveJson) as { TCP?: Record<string, { Funnel?: boolean }> };
+    for (const [src, cfg] of Object.entries(serve.TCP ?? {})) {
+      if (cfg.Funnel && src.includes(`:${bindPort}`)) {
+        const portSuffix = bindPort !== 443 && bindPort !== 80 ? `:${bindPort}` : "";
+        return `https://${dnsName}${portSuffix}`;
+      }
+    }
+  } catch {
+    /* not running or not installed */
+  }
+  return null;
 }
 
 /**
