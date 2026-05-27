@@ -23,6 +23,12 @@ npm install iicp-client
 # pnpm add iicp-client
 ```
 
+> **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
+> TCP transport on port 9484, upgrade to `^0.5.3`. Releases 0.5.0–0.5.2
+> emitted a non-standard CBOR dialect that does not interoperate with the
+> Python or Rust SDK on the binary transport. The HTTP `/v1/task` path is
+> unaffected. See [`CHANGELOG.md`](./CHANGELOG.md) for details.
+
 ---
 
 ## Quickstart
