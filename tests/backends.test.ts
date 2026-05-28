@@ -8,6 +8,9 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { openaiCompatHandler } from "../src/backends/openai_compat.js";
+import { vllmHandler } from "../src/backends/vllm.js";
+import { llamacppHandler } from "../src/backends/llamacpp.js";
+import { getBackendHandler, BACKEND_TYPES } from "../src/backends/index.js";
 
 let originalFetch: typeof globalThis.fetch;
 let lastRequest: { url: string; init: RequestInit | undefined } | null = null;
@@ -162,5 +165,54 @@ describe("openaiCompatHandler", () => {
       payload: { messages: [] },
     });
     assert.equal(lastRequest!.url, "http://localhost:11434/v1/chat/completions");
+  });
+});
+
+// ── Dedicated backends (vLLM / llama.cpp) + selector — parity Block B ────────
+
+describe("dedicated backends", () => {
+  it("vllmHandler defaults to port 8000", async () => {
+    mockFetchJson({ choices: [] });
+    const handler = vllmHandler({ model: "mistral-7b" });
+    const result = await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [] },
+    });
+    assert.equal((result as { error_code?: number }).error_code, undefined);
+    assert.equal(lastRequest!.url, "http://localhost:8000/v1/chat/completions");
+  });
+
+  it("llamacppHandler defaults to port 8080", async () => {
+    mockFetchJson({ choices: [] });
+    const handler = llamacppHandler({ model: "gguf" });
+    const result = await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [] },
+    });
+    assert.equal((result as { error_code?: number }).error_code, undefined);
+    assert.equal(lastRequest!.url, "http://localhost:8080/v1/chat/completions");
+  });
+
+  it("vllm error messages use the vllm engine label", async () => {
+    const handler = vllmHandler({ model: "m" });
+    const result = await handler({ intent: "urn:iicp:intent:bogus:v1", payload: {} });
+    assert.equal((result as { error_code: number }).error_code, 400);
+    assert.match((result as { error_message: string }).error_message, /^vllm:/);
+  });
+});
+
+describe("getBackendHandler selector", () => {
+  it("BACKEND_TYPES lists all three", () => {
+    assert.deepEqual([...BACKEND_TYPES].sort(), ["llamacpp", "openai_compat", "vllm"]);
+  });
+
+  it("returns a callable for each type", () => {
+    for (const t of BACKEND_TYPES) {
+      assert.equal(typeof getBackendHandler(t, { model: "m" }), "function");
+    }
+  });
+
+  it("throws on unknown type", () => {
+    assert.throws(() => getBackendHandler("nope", { model: "m" }), /unknown backend_type/);
   });
 });

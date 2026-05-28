@@ -10,13 +10,17 @@
  */
 
 import * as http from "node:http";
+import { isQueueEligible, QUEUE_WAIT_MS } from "./scheduler.js";
+import { AvailabilityEvaluator, type Window } from "./availability.js";
+import { IdempotencyGuard } from "./idempotency.js";
+import { PeerManager } from "./peer_manager.js";
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.5.6";
+const SDK_VERSION = "0.6.0";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -71,6 +75,18 @@ export interface NodeConfig {
   /** Operator-provisioned HMAC key for ADR-019 signing. If empty, the SDK
    * falls back to the directory-issued key returned in the register response. */
   nodeHmacKey?: string;
+  /** Phase 3+ availability windows (ADR-006). Each: {start,end:"HH:MM", share:0-1}
+   * in local time. Shapes effective capacity advertised + gated. Empty → full. */
+  availabilityWindows?: Window[];
+  /** ADR-010 task_id idempotency. Off by default to preserve the pre-0.6 contract.
+   * When true, a duplicate task_id within 5 min is rejected with IICP-E010. */
+  enableIdempotency?: boolean;
+  /** Phase 2 mesh (ADR-009/022). When true, serve() gossips peers and exposes
+   * POST /v1/peers. Default false. */
+  enableMesh?: boolean;
+  /** When true, serve() exposes POST /v1/relay to forward tasks to peers learned
+   * via gossip (ADR-022). Requires enableMesh. Default false. */
+  relayCapable?: boolean;
 }
 
 export interface ServeOptions {
@@ -87,7 +103,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy" | "pricing" | "nodeHmacKey"
+      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable"
     >
   > & {
     model: string | undefined;
@@ -102,7 +118,14 @@ export class IicpNode {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     pricing: any | undefined;
     nodeHmacKey: string;
+    availabilityWindows: Window[];
+    enableIdempotency: boolean;
+    enableMesh: boolean;
+    relayCapable: boolean;
   };
+  private readonly _availability: AvailabilityEvaluator;
+  private readonly _idempotency = new IdempotencyGuard();
+  private readonly _peerManager: PeerManager;
   private _runtimeHmacKey: string = "";
   /** #343 — UPnP IPv6 pinhole UID captured by applyNatProfile, revoked on shutdown. */
   private _pinholeUid: number | null = null;
@@ -137,8 +160,19 @@ export class IicpNode {
       cipPolicy: config.cipPolicy,
       pricing: config.pricing,
       nodeHmacKey: config.nodeHmacKey ?? "",
+      availabilityWindows: config.availabilityWindows ?? [],
+      enableIdempotency: config.enableIdempotency ?? false,
+      enableMesh: config.enableMesh ?? false,
+      relayCapable: config.relayCapable ?? false,
     };
     this._runtimeHmacKey = config.nodeHmacKey ?? "";
+    this._availability = new AvailabilityEvaluator(this._cfg.availabilityWindows);
+    this._peerManager = new PeerManager(this._cfg.directoryUrl, config.nodeHmacKey ?? "");
+  }
+
+  /** Effective concurrency cap after applying availability windows (ADR-006). */
+  private _effectiveMaxConcurrent(): number {
+    return this._availability.effectiveMaxConcurrent(this._cfg.maxConcurrent);
   }
 
   /** The HMAC key in use for ADR-019 pricing signatures. */
@@ -336,6 +370,8 @@ export class IicpNode {
           node_id: this._cfg.nodeId,
           node_token: nodeToken,
           status: "available",
+          // Live capacity after availability shaping (ADR-006).
+          max_concurrent: this._effectiveMaxConcurrent(),
         }),
         signal: AbortSignal.timeout(this._cfg.timeoutMs),
       }
@@ -428,6 +464,10 @@ export class IicpNode {
         this._handleMetrics(res);
       } else if (req.method === "POST" && req.url === "/v1/task") {
         this._handleTask(req, res, handler);
+      } else if (req.method === "POST" && req.url === "/v1/peers" && this._cfg.enableMesh) {
+        this._handlePeers(req, res);
+      } else if (req.method === "POST" && req.url === "/v1/relay" && this._cfg.relayCapable) {
+        this._handleRelay(req, res);
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "not_found" }));
@@ -442,12 +482,92 @@ export class IicpNode {
         this.heartbeat(nodeToken).catch(() => undefined);
       }, HEARTBEAT_INTERVAL_MS);
     }
+    if (this._cfg.enableMesh) {
+      // Phase 2 mesh: bootstrap then gossip every 30s (managed inside PeerManager).
+      void this._peerManager.start(this._cfg.nodeId);
+    }
 
     return () => {
       if (hbTimer) clearInterval(hbTimer);
+      this._peerManager.stop();
       (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
       server.close();
     };
+  }
+
+  // ── POST /v1/peers (ADR-009 gossip exchange) ────────────────────────────────
+
+  private _handlePeers(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString() || "{}";
+      const sig = req.headers["x-iicp-signature"] as string | undefined;
+      if (!this._peerManager.verifyExchange(raw, sig)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "IICP-E012", message: "invalid_signature" } }));
+        return;
+      }
+      try {
+        const body = JSON.parse(raw) as { known_peers?: unknown[] };
+        const incoming = (body.known_peers ?? []).filter(
+          (p): p is Record<string, unknown> => typeof p === "object" && p !== null
+        );
+        this._peerManager.mergePeers(incoming as never[]);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "IICP-E000", message: "invalid JSON" } }));
+        return;
+      }
+      const out = JSON.stringify({ peers: this._peerManager.getPeers() });
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(out) });
+      res.end(out);
+    });
+  }
+
+  // ── POST /v1/relay (ADR-022 mesh relay) ─────────────────────────────────────
+
+  private _handleRelay(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", async () => {
+      let payload: { target_node_id?: string; task?: unknown };
+      try {
+        payload = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "IICP-E000", message: "invalid JSON" } }));
+        return;
+      }
+      const targetId = payload.target_node_id ?? "";
+      const task = payload.task;
+      if (!targetId || !task) {
+        res.writeHead(422, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "IICP-E000", message: "target_node_id and task required" } }));
+        return;
+      }
+      const target = this._peerManager.relayTarget(targetId);
+      if (!target) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "IICP-E030", message: "target not in peer list" } }));
+        return;
+      }
+      try {
+        const resp = await fetch(`${target.endpoint.replace(/\/$/, "")}/v1/task`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(task),
+          signal: AbortSignal.timeout(120_000),
+        });
+        const text = await resp.text();
+        res.writeHead(resp.status, { "Content-Type": "application/json" });
+        res.end(text);
+      } catch (exc) {
+        const msg = exc instanceof Error ? exc.message : String(exc);
+        res.writeHead(502, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "IICP-E031", message: `relay failed: ${msg}` } }));
+      }
+    });
   }
 
   // ── GET /iicp/health ───────────────────────────────────────────────────────
@@ -455,6 +575,7 @@ export class IicpNode {
   private _handleHealth(res: http.ServerResponse): void {
     const active = this._activeTasks;
     const max = this._cfg.maxConcurrent;
+    const effMax = this._effectiveMaxConcurrent();
     const uid = this._pinholeUid;
     const pinholeState = uid != null
       ? { active: true, unique_id: uid, lease_seconds: this._pinholeLeaseSeconds }
@@ -466,7 +587,8 @@ export class IicpNode {
       load: max > 0 ? active / max : 0,
       active_jobs: active,
       max_concurrent: max,
-      available: active < max,
+      effective_max_concurrent: effMax,
+      available: active < effMax,
       model: this._cfg.model ?? "",
       intent: this._cfg.intent,
       pinhole_state: pinholeState,
@@ -496,28 +618,31 @@ export class IicpNode {
 
   // ── POST /v1/task ──────────────────────────────────────────────────────────
 
+  /**
+   * QoS-aware admission. Resolves true once a slot is free, false if capacity
+   * stays full. realtime/interactive wait up to QUEUE_WAIT_MS; other tiers fail
+   * fast. The check-then-increment is non-atomic but safe in the single-threaded
+   * event loop (advisory back-pressure, matching the prior counter gate).
+   */
+  private async _admit(qos: string): Promise<boolean> {
+    // Effective cap folds in availability windows (ADR-006): a reduced/closed
+    // window lowers capacity below maxConcurrent.
+    const cap = this._effectiveMaxConcurrent();
+    if (this._activeTasks < cap) return true;
+    if (!isQueueEligible(qos)) return false;
+    const deadline = Date.now() + QUEUE_WAIT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (this._activeTasks < this._effectiveMaxConcurrent()) return true;
+    }
+    return false;
+  }
+
   private _handleTask(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     handler: TaskHandler
   ): void {
-    // Concurrency gate — IICP-E021
-    if (this._activeTasks >= this._cfg.maxConcurrent) {
-      const body = JSON.stringify({
-        error: { code: "IICP-E021", message: "capacity_exceeded", retry_after_ms: 2000 },
-      });
-      res.writeHead(429, {
-        "Content-Type": "application/json",
-        "Retry-After": "2",
-        "Content-Length": Buffer.byteLength(body),
-      });
-      res.end(body);
-      return;
-    }
-
-    this._activeTasks++;
-    const t0 = Date.now();
-
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
@@ -525,29 +650,65 @@ export class IicpNode {
       try {
         task = JSON.parse(Buffer.concat(chunks).toString() || "{}") as Record<string, unknown>;
       } catch {
-        this._activeTasks--;
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { code: "IICP-E000", message: "invalid JSON" } }));
         return;
       }
 
-      // Nonce replay — IICP-E011
-      if (!this._checkNonce(task.nonce as string | undefined)) {
-        this._activeTasks--;
-        const body = JSON.stringify({ error: { code: "IICP-E011", message: "replay_detected" } });
-        res.writeHead(409, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
-        res.end(body);
-        return;
-      }
-
-      // W3C traceparent propagation
-      const tp = req.headers["traceparent"] as string | undefined;
-      if (tp) (task as Record<string, unknown>)._trace = { traceparent: tp };
-
       const intent = (task.intent as string | undefined) ?? this._cfg.intent;
       const constraints = task.constraints as Record<string, unknown> | undefined;
       const qos = (constraints?.qos_class as string | undefined) ?? "best_effort";
       const taskId = (task.task_id as string | undefined) ?? "";
+
+      // QoS-aware admission — IICP-E021. realtime/interactive wait briefly for a
+      // slot; batch/best-effort/unspecified fail fast (ADR-006; see scheduler.ts).
+      void this._admit(qos).then((admitted) => {
+        if (!admitted) {
+          const body = JSON.stringify({
+            error: {
+              code: "IICP-E021",
+              message: "capacity_exceeded",
+              qos_class: qos,
+              retry_after_ms: 2000,
+            },
+          });
+          res.writeHead(429, {
+            "Content-Type": "application/json",
+            "Retry-After": "2",
+            "Content-Length": Buffer.byteLength(body),
+          });
+          res.end(body);
+          return;
+        }
+
+        this._activeTasks++;
+        const t0 = Date.now();
+
+        // Nonce replay — IICP-E011
+        if (!this._checkNonce(task.nonce as string | undefined)) {
+          this._activeTasks--;
+          const body = JSON.stringify({ error: { code: "IICP-E011", message: "replay_detected" } });
+          res.writeHead(409, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
+          res.end(body);
+          return;
+        }
+
+        // Idempotency — duplicate task_id within the retry window (ADR-010). Opt-in
+        // (enableIdempotency) to preserve the pre-0.6 contract.
+        if (
+          this._cfg.enableIdempotency &&
+          !this._idempotency.checkAndRegister(task.task_id as string | undefined)
+        ) {
+          this._activeTasks--;
+          const body = JSON.stringify({ error: { code: "IICP-E010", message: "duplicate_task" } });
+          res.writeHead(409, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
+          res.end(body);
+          return;
+        }
+
+        // W3C traceparent propagation
+        const tp = req.headers["traceparent"] as string | undefined;
+        if (tp) (task as Record<string, unknown>)._trace = { traceparent: tp };
 
       // ADR-014 — OTel validate span (nonce + auth check already done above; span marks boundary)
       import("./otel_tracer.js").then(({ withTaskValidateSpan, withTaskExecuteSpan }) => {
@@ -583,6 +744,7 @@ export class IicpNode {
           res.writeHead(500, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
           res.end(body);
         });
+      });
     });
   }
 }

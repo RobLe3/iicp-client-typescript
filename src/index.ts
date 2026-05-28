@@ -34,6 +34,22 @@ export type {
   TaskHandlerInput,
   TaskHandlerOutput,
 } from "./backends/openai_compat.js";
+export { vllmHandler } from "./backends/vllm.js";
+export type { VllmOptions } from "./backends/vllm.js";
+export { llamacppHandler } from "./backends/llamacpp.js";
+export type { LlamaCppOptions } from "./backends/llamacpp.js";
+export { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
+export type { BackendType } from "./backends/index.js";
+export type { BackendHandler, BackendOptions } from "./backends/base.js";
+export { qosPriority, isQueueEligible, QOS_PRIORITY, QUEUE_ELIGIBLE, QUEUE_WAIT_MS } from "./scheduler.js";
+export { AvailabilityEvaluator } from "./availability.js";
+export type { Window } from "./availability.js";
+export { TokenValidator } from "./token_validator.js";
+export { IdempotencyGuard } from "./idempotency.js";
+export { runAuditPass, modelsDiverge } from "./trust_auditor.js";
+export type { AuditReport, NodeAuditResult } from "./trust_auditor.js";
+export { PeerManager } from "./peer_manager.js";
+export type { PeerInfo } from "./peer_manager.js";
 export {
   CooperativeInferencePolicy,
   configureCipPolicy,

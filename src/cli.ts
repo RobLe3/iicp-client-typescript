@@ -23,7 +23,7 @@ import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { IicpNode } from "./node.js";
 import { configureCipPolicy } from "./cip_policy.js";
-import { openaiCompatHandler } from "./backends/openai_compat.js";
+import { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 import {
   configDir,
   generateNode,
@@ -38,6 +38,7 @@ import {
 
 interface ServeOpts {
   backendUrl: string;
+  backendType: string;
   model: string;
   publicEndpoint: string;
   directoryUrl: string;
@@ -84,6 +85,7 @@ function printHelp(): void {
       `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
       `  (or --node NAME            load both from ~/.iicp/nodes/<NAME>.json after \`iicp-node init\`)\n\n` +
       `serve optional:\n` +
+      `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp (default openai_compat)\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --region REGION            IICP_REGION (default eu-central)\n` +
@@ -339,6 +341,12 @@ async function runServe(opts: ServeOpts): Promise<number> {
     );
     return 2;
   }
+  if (!(BACKEND_TYPES as readonly string[]).includes(opts.backendType)) {
+    process.stderr.write(
+      `ERROR: --backend-type must be one of ${JSON.stringify(BACKEND_TYPES)}.\n`,
+    );
+    return 2;
+  }
   const nodeId =
     opts.nodeId ||
     `sdk-${opts.model.replace(/:/g, "-")}-${randomBytes(4).toString("hex")}`;
@@ -423,7 +431,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     }
   }
 
-  const handler = openaiCompatHandler({
+  const handler = getBackendHandler(opts.backendType, {
     baseUrl: opts.backendUrl,
     model: opts.model,
   });
@@ -498,6 +506,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     options: {
       node: { type: "string" },
       "backend-url": { type: "string" },
+      "backend-type": { type: "string" },
       model: { type: "string" },
       "public-endpoint": { type: "string" },
       "directory-url": { type: "string" },
@@ -521,6 +530,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const opts: ServeOpts = {
     node: (values.node as string | undefined) ?? envOr("IICP_NODE_NAME") ?? "",
     backendUrl: (values["backend-url"] as string | undefined) ?? envOr("IICP_BACKEND_URL") ?? "",
+    backendType:
+      (values["backend-type"] as string | undefined) ??
+      envOr("IICP_BACKEND_TYPE", "openai_compat")!,
     model: (values.model as string | undefined) ?? envOr("IICP_BACKEND_MODEL") ?? "",
     publicEndpoint:
       (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? "",
