@@ -184,7 +184,10 @@ export class IicpNode {
     };
     this._runtimeHmacKey = config.nodeHmacKey ?? "";
     this._availability = new AvailabilityEvaluator(this._cfg.availabilityWindows);
-    this._peerManager = new PeerManager(this._cfg.directoryUrl, config.nodeHmacKey ?? "");
+    this._peerManager = new PeerManager(this._cfg.directoryUrl, config.nodeHmacKey ?? "", {
+      relayCapable: config.relayCapable ?? false,
+      relayAcceptPort: config.relayAcceptPort ?? 9485,
+    });
   }
 
   /** Effective concurrency cap after applying availability windows (ADR-006). */
@@ -509,7 +512,7 @@ export class IicpNode {
     }
     if (this._cfg.enableMesh) {
       // Phase 2 mesh: bootstrap then gossip every 30s (managed inside PeerManager).
-      void this._peerManager.start(this._cfg.nodeId);
+      void this._peerManager.start(this._cfg.nodeId, this._cfg.endpoint);
     }
 
     // R1: start RelayAcceptServer when relay-capable (#341)

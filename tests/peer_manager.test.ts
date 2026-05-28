@@ -67,3 +67,71 @@ describe("PeerManager verifyExchange", () => {
     assert.equal(m.verifyExchange(body, undefined), false);
   });
 });
+
+// ── R3: relay election (#341) ────────────────────────────────────────────────
+
+function pmWithRelays(): PeerManager {
+  const m = new PeerManager("https://dir.example/api", "", { relayCapable: true, relayAcceptPort: 9485 });
+  m.mergePeers([
+    { node_id: "relay-a", endpoint: "http://relay-a:8020", relay_capable: true, relay_accept_port: 9485, relay_load: 0.2 },
+    { node_id: "relay-b", endpoint: "http://relay-b:8020", relay_capable: true, relay_accept_port: 9486, relay_load: 0.1 },
+    { node_id: "non-relay", endpoint: "http://nr:8020", relay_capable: false },
+  ]);
+  return m;
+}
+
+describe("PeerManager relay election (R3)", () => {
+  it("electRelay returns a relay-capable candidate", async () => {
+    const m = pmWithRelays();
+    const elected = await m.electRelay("worker-001");
+    assert.ok(elected, "should elect a relay");
+    assert.equal(elected.relay_capable, true);
+  });
+
+  it("electRelay prefers lower load", async () => {
+    const m = pmWithRelays();
+    const elected = await m.electRelay("worker-001");
+    // relay-b load=0.1 < relay-a load=0.2 → relay-b always wins
+    assert.equal(elected?.node_id, "relay-b");
+  });
+
+  it("electRelay is deterministic for same workerId", async () => {
+    const m = pmWithRelays();
+    const e1 = await m.electRelay("worker-xyz");
+    const e2 = await m.electRelay("worker-xyz");
+    assert.ok(e1 && e2);
+    assert.equal(e1.node_id, e2.node_id);
+  });
+
+  it("electRelay derives _relayHost and _relayPort", async () => {
+    const m = pmWithRelays();
+    const elected = await m.electRelay("worker-001");
+    assert.ok(elected);
+    assert.equal(typeof elected._relayHost, "string");
+    assert.equal(typeof elected._relayPort, "number");
+    assert.ok(elected._relayHost.length > 0);
+  });
+
+  it("electRelay returns null when no relay-capable peers", async () => {
+    const m = new PeerManager("https://dir.example/api");
+    m.mergePeers([{ node_id: "nr", endpoint: "http://nr:8020", relay_capable: false }]);
+    const elected = await m.electRelay("worker");
+    assert.equal(elected, null);
+  });
+
+  it("getRelayCandidates excludes non-relay peers", () => {
+    const m = pmWithRelays();
+    const ids = m.getRelayCandidates().map((p) => p.node_id);
+    assert.ok(!ids.includes("non-relay"));
+    assert.ok(ids.includes("relay-a") && ids.includes("relay-b"));
+  });
+
+  it("mergePeers stores relay fields", () => {
+    const m = new PeerManager("https://dir.example/api");
+    m.mergePeers([{ node_id: "r", endpoint: "http://r:8020", relay_capable: true, relay_accept_port: 9485 }]);
+    const peer = m.relayTarget("r");
+    assert.ok(peer);
+    assert.equal(peer.relay_capable, true);
+    assert.equal(peer.relay_accept_port, 9485);
+  });
+});

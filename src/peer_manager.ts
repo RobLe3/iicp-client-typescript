@@ -20,6 +20,10 @@ export interface PeerInfo {
   region: string;
   last_seen: string;
   last_contact: number; // ms epoch
+  /** R3: relay election fields — advertised in gossip exchange */
+  relay_capable?: boolean;
+  relay_accept_port?: number;
+  relay_load?: number;
 }
 
 export class PeerManager {
@@ -27,11 +31,20 @@ export class PeerManager {
   private readonly nodeToken: string;
   private peers = new Map<string, PeerInfo>();
   private ownId = "";
+  private ownEndpoint = "";
+  private readonly ownRelayCapable: boolean;
+  private readonly ownRelayAcceptPort: number;
   private timer: ReturnType<typeof setInterval> | undefined;
 
-  constructor(directoryUrl: string, nodeToken = "") {
+  constructor(
+    directoryUrl: string,
+    nodeToken = "",
+    opts: { relayCapable?: boolean; relayAcceptPort?: number } = {},
+  ) {
     this.directoryUrl = directoryUrl.replace(/\/$/, "");
     this.nodeToken = nodeToken;
+    this.ownRelayCapable = opts.relayCapable ?? false;
+    this.ownRelayAcceptPort = opts.relayAcceptPort ?? 9485;
   }
 
   getPeers(): PeerInfo[] {
@@ -56,9 +69,40 @@ export class PeerManager {
         region: p.region ?? "",
         last_seen: p.last_seen ?? "",
         last_contact: now,
+        relay_capable: p.relay_capable ?? false,
+        relay_accept_port: p.relay_accept_port ?? 9485,
+        relay_load: p.relay_load ?? 0,
       });
     }
     return added;
+  }
+
+  /** R3: return relay-capable peers, for relay election. */
+  getRelayCandidates(): PeerInfo[] {
+    return [...this.peers.values()].filter((p) => p.relay_capable && p.endpoint);
+  }
+
+  /** R3: deterministic relay election — rank by load, tiebreak by SHA-256 hash. */
+  async electRelay(workerId: string): Promise<(PeerInfo & { _relayHost: string; _relayPort: number }) | null> {
+    const { createHash } = await import("node:crypto");
+    const candidates = this.getRelayCandidates();
+    if (candidates.length === 0) return null;
+    const scored = candidates.map((p) => {
+      const load = p.relay_load ?? 0;
+      const hash = createHash("sha256").update(`${workerId}:${p.node_id}`).digest("hex");
+      return { p, score: [load, hash] as [number, string] };
+    });
+    scored.sort((a, b) => {
+      if (a.score[0] !== b.score[0]) return a.score[0] - b.score[0];
+      return a.score[1] < b.score[1] ? -1 : 1;
+    });
+    const elected = scored[0].p;
+    const url = new URL(elected.endpoint.startsWith("http") ? elected.endpoint : `http://${elected.endpoint}`);
+    return {
+      ...elected,
+      _relayHost: url.hostname,
+      _relayPort: elected.relay_accept_port ?? 9485,
+    };
   }
 
   /** Drop peers not contacted within the expiry window. Returns count pruned. */
@@ -81,8 +125,9 @@ export class PeerManager {
     return signBody(body, this.nodeToken) === signature;
   }
 
-  async start(nodeId: string): Promise<void> {
+  async start(nodeId: string, ownEndpoint = ""): Promise<void> {
     this.ownId = nodeId;
+    this.ownEndpoint = ownEndpoint;
     await this.bootstrap();
     this.timer = setInterval(() => {
       void this.gossipRound();
@@ -118,7 +163,19 @@ export class PeerManager {
   }
 
   private async exchange(target: PeerInfo): Promise<void> {
-    const body = JSON.stringify({ known_peers: [...this.peers.keys()] });
+    // R3: send full peer objects + own relay entry so recipients can elect us as a relay.
+    const peers = [...this.peers.values()];
+    const knownPeers: Array<Partial<PeerInfo>> = [...peers];
+    if (this.ownId) {
+      knownPeers.push({
+        node_id: this.ownId,
+        endpoint: this.ownEndpoint,
+        relay_capable: this.ownRelayCapable,
+        relay_accept_port: this.ownRelayAcceptPort,
+        relay_load: 0,
+      });
+    }
+    const body = JSON.stringify({ known_peers: knownPeers });
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (this.nodeToken) headers["X-IICP-Signature"] = signBody(body, this.nodeToken);
     try {
