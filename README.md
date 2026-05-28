@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml/badge.svg)](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Protocol](https://img.shields.io/badge/IICP-v1.5-indigo.svg)](https://iicp.network/spec)
+[![Protocol](https://img.shields.io/badge/IICP-v1.7-indigo.svg)](https://iicp.network/spec)
 [![npm](https://img.shields.io/badge/npm-iicp--client-red?logo=npm)](https://www.npmjs.com/package/iicp-client)
 
 Official TypeScript client library for the [IICP protocol](https://iicp.network) — route AI agent tasks by intent across a self-organising mesh of provider nodes. No central broker. No hardcoded endpoints.
@@ -113,6 +113,73 @@ Error codes match the [IICP error reference](https://iicp.network/docs/error-ref
 
 ---
 
+## Serving as a provider node
+
+```typescript
+import { IicpNode } from "iicp-client";
+
+const node = new IicpNode({
+  nodeId  : "my-node-001",
+  endpoint: "http://my.public.host:8020",
+  intent  : "urn:iicp:intent:llm:chat:v1",
+  model   : "llama3:8b",
+});
+
+const token = await node.register();
+const stop = node.serve(async (task) => {
+  // Return the inner result value — serve() wraps it in {result: ...}
+  return { choices: [{ message: { role: "assistant", content: "Hello!" } }] };
+}, { port: 8020, nodeToken: token });
+
+process.on("SIGINT", () => { stop(); });
+```
+
+---
+
+## NAT traversal — v0.7.0
+
+IICP nodes pick the best available NAT path automatically (ADR-041):
+
+| Tier | Method | Requirement |
+|------|--------|-------------|
+| 0 | Direct — publicly routable | Open port 8020 |
+| 1 | UPnP/IGD port mapping | Home router with UPnP |
+| 2 | IPv6 firewall pinhole | IPv6 + UPnP/IGD2 |
+| 3 | **Relay-as-last-resort** | A relay operator in the mesh |
+
+**Relay-as-last-resort** lets a node behind CGNAT stay reachable by binding an outbound
+channel to a public relay node that forwards inbound tasks down it.
+
+### Running a relay-capable node (relay operator)
+
+```typescript
+const node = new IicpNode({
+  nodeId         : "relay-eu-01",
+  endpoint       : "http://relay.example.com:8020",
+  intent         : "urn:iicp:intent:llm:chat:v1",
+  relayCapable   : true,   // accept RELAY_BIND on TCP port 9485
+  relayAcceptPort: 9485,
+  enableMesh     : true,   // gossip relayCapable=true to peers
+});
+```
+
+### Node behind CGNAT (connects outbound to relay)
+
+```typescript
+const node = new IicpNode({
+  nodeId              : "cgnat-worker-001",
+  endpoint            : "http://placeholder",       // overwritten on bind
+  intent              : "urn:iicp:intent:llm:chat:v1",
+  relayWorkerEndpoint : "relay.example.com:9485",   // outbound target
+  // or: env IICP_RELAY_WORKER_ENDPOINT=relay.example.com:9485
+});
+```
+
+When the worker binds it re-registers with the relay's public address
+(`transport_method: "turn_relay"`), making it discoverable.
+
+---
+
 ## SDK conformance
 
 | Rule | Description | Status |
@@ -133,7 +200,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 ```bash
 npm install        # install deps
 npm run typecheck  # tsc strict
-npm test           # 25 unit tests
+npm test           # 184 unit tests
 npm run build      # emit to dist/
 ```
 
