@@ -92,6 +92,10 @@ export interface NodeConfig {
    * Workers behind CGNAT connect outbound here and send RELAY_BIND.
    * Default 9485. */
   relayAcceptPort?: number;
+  /** R2: when set, this node acts as a relay worker — connects outbound to
+   * the specified relay. Format: "host:port" (e.g. "relay.example.com:9485").
+   * env: IICP_RELAY_WORKER_ENDPOINT */
+  relayWorkerEndpoint?: string;
 }
 
 export interface ServeOptions {
@@ -108,7 +112,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable"
+      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint"
     >
   > & {
     model: string | undefined;
@@ -128,6 +132,7 @@ export class IicpNode {
     enableMesh: boolean;
     relayCapable: boolean;
     relayAcceptPort: number;
+    relayWorkerEndpoint: string | undefined;
   };
   private readonly _availability: AvailabilityEvaluator;
   private readonly _idempotency = new IdempotencyGuard();
@@ -175,6 +180,7 @@ export class IicpNode {
       enableMesh: config.enableMesh ?? false,
       relayCapable: config.relayCapable ?? false,
       relayAcceptPort: config.relayAcceptPort ?? 9485,
+      relayWorkerEndpoint: config.relayWorkerEndpoint,
     };
     this._runtimeHmacKey = config.nodeHmacKey ?? "";
     this._availability = new AvailabilityEvaluator(this._cfg.availabilityWindows);
@@ -517,9 +523,32 @@ export class IicpNode {
       }).catch(() => undefined);
     }
 
+    // R2: start relay worker client if relayWorkerEndpoint is configured (#341)
+    let stopRelayWorker: (() => void) | undefined;
+    if (this._cfg.relayWorkerEndpoint) {
+      const ep = this._cfg.relayWorkerEndpoint;
+      const lastColon = ep.lastIndexOf(":");
+      const relayHost = lastColon > 0 ? ep.slice(0, lastColon) : ep;
+      const relayPortStr = lastColon > 0 ? ep.slice(lastColon + 1) : "9485";
+      const relayPort = parseInt(relayPortStr, 10) || 9485;
+      import("./relay_worker_client.js").then(({ RelayWorkerClient }) => {
+        const rwc = new RelayWorkerClient({
+          workerId: this._cfg.nodeId,
+          intent: this._cfg.intent,
+          relayHost,
+          relayPort,
+          handler: handler as never,
+          models: this._cfg.model ? [this._cfg.model] : [],
+        });
+        stopRelayWorker = rwc.start();
+        console.log(`[iicp-node] relay worker started → ${relayHost}:${relayPort}`);
+      }).catch(() => undefined);
+    }
+
     return () => {
       if (hbTimer) clearInterval(hbTimer);
       this._peerManager.stop();
+      if (stopRelayWorker) stopRelayWorker();
       if (relayAcceptSrv) relayAcceptSrv.stop().catch(() => undefined);
       (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
       server.close();

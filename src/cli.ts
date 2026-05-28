@@ -51,6 +51,7 @@ interface ServeOpts {
   skipRegistration: boolean;
   autoDetectNat: boolean;
   externalIpProbeUrl: string;
+  relayWorkerEndpoint: string;
   node: string;
 }
 
@@ -391,6 +392,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     region: opts.region,
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
+    relayWorkerEndpoint: opts.relayWorkerEndpoint || undefined,
   });
 
   // Surface tier-0 declaration to the directory so it doesn't run dial-back.
@@ -540,6 +542,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "skip-registration": { type: "boolean" },
       "auto-detect-nat": { type: "boolean" },
       "external-ip-probe-url": { type: "string" },
+      "relay-worker-endpoint": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -578,6 +581,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       Boolean(values["auto-detect-nat"]) || envBool("IICP_AUTO_DETECT_NAT"),
     externalIpProbeUrl:
       (values["external-ip-probe-url"] as string | undefined) ?? envOr("IICP_EXTERNAL_IP_PROBE_URL") ?? "",
+    relayWorkerEndpoint:
+      (values["relay-worker-endpoint"] as string | undefined) ?? envOr("IICP_RELAY_WORKER_ENDPOINT") ?? "",
   };
   return runServe(opts);
 }
