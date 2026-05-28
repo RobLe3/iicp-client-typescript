@@ -575,10 +575,16 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     host: (values.host as string | undefined) ?? envOr("IICP_HOST", "0.0.0.0")!,
     skipRegistration:
       Boolean(values["skip-registration"]) || envBool("IICP_SKIP_REGISTRATION"),
+    // Default ON — matches Python CLI behaviour; operator must set IICP_AUTO_DETECT_NAT=false to opt out.
     autoDetectNat:
-      Boolean(values["auto-detect-nat"]) || envBool("IICP_AUTO_DETECT_NAT"),
+      values["auto-detect-nat"] !== undefined
+        ? Boolean(values["auto-detect-nat"])
+        : (process.env.IICP_AUTO_DETECT_NAT !== undefined ? envBool("IICP_AUTO_DETECT_NAT") : true),
+    // Default to api.ipify.org so FRITZ!Box/CGNAT detection works out of the box.
     externalIpProbeUrl:
-      (values["external-ip-probe-url"] as string | undefined) ?? envOr("IICP_EXTERNAL_IP_PROBE_URL") ?? "",
+      (values["external-ip-probe-url"] as string | undefined)
+        ?? envOr("IICP_EXTERNAL_IP_PROBE_URL")
+        ?? "https://api.ipify.org",
     relayWorkerEndpoint:
       (values["relay-worker-endpoint"] as string | undefined) ?? envOr("IICP_RELAY_WORKER_ENDPOINT") ?? "",
   };
