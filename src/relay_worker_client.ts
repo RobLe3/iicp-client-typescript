@@ -56,6 +56,7 @@ export class RelayWorkerClient {
   private readonly _relayPort: number;
   private readonly _handler: RelayTaskHandler;
   private readonly _models: string[];
+  private readonly _onBind?: (relayHost: string, relayPort: number, workerId: string) => Promise<void>;
   private _stopped = false;
 
   constructor(opts: {
@@ -65,6 +66,8 @@ export class RelayWorkerClient {
     relayPort: number;
     handler: RelayTaskHandler;
     models?: string[];
+    /** Called after a successful RELAY_ACK — use to re-register with the directory (#358). */
+    onBind?: (relayHost: string, relayPort: number, workerId: string) => Promise<void>;
   }) {
     this._workerId = opts.workerId;
     this._intent = opts.intent;
@@ -72,6 +75,7 @@ export class RelayWorkerClient {
     this._relayPort = opts.relayPort;
     this._handler = opts.handler;
     this._models = opts.models ?? [];
+    this._onBind = opts.onBind;
   }
 
   /** Start the reconnect loop. Returns a stop() function. */
@@ -162,6 +166,13 @@ export class RelayWorkerClient {
     if (ackBody[1] !== "ok") throw new Error(`RELAY_ACK not ok: ${JSON.stringify(ackBody)}`);
 
     console.log(`[relay-worker] ${this._workerId}: bound to relay ${this._relayHost}:${this._relayPort}`);
+    if (this._onBind) {
+      try {
+        await this._onBind(this._relayHost, this._relayPort, this._workerId);
+      } catch (exc) {
+        console.warn(`[relay-worker] onBind callback failed: ${exc instanceof Error ? exc.message : exc}`);
+      }
+    }
 
     // Step 3: session loop
     const pingTimer = setInterval(() => {

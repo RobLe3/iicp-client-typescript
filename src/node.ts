@@ -531,6 +531,23 @@ export class IicpNode {
       const relayHost = lastColon > 0 ? ep.slice(0, lastColon) : ep;
       const relayPortStr = lastColon > 0 ? ep.slice(lastColon + 1) : "9485";
       const relayPort = parseInt(relayPortStr, 10) || 9485;
+      let currentToken = nodeToken;
+      const self = this;
+      const onBind = async (rHost: string, rPort: number, _wId: string) => {
+        const newEndpoint = `http://${rHost}:${rPort}`;
+        self["_cfg"].endpoint = newEndpoint;
+        (self["_cfg"] as Record<string, unknown>).transportMethod = "turn_relay";
+        if (currentToken) {
+          try { await self.deregister(currentToken); } catch { /* best-effort */ }
+        }
+        try {
+          const tok = await self.register();
+          currentToken = tok ?? undefined;
+          console.log(`[iicp-node] relay worker: re-registered with relay endpoint ${newEndpoint}`);
+        } catch (exc) {
+          console.warn(`[iicp-node] relay worker: re-registration failed: ${exc instanceof Error ? exc.message : exc}`);
+        }
+      };
       import("./relay_worker_client.js").then(({ RelayWorkerClient }) => {
         const rwc = new RelayWorkerClient({
           workerId: this._cfg.nodeId,
@@ -539,6 +556,7 @@ export class IicpNode {
           relayPort,
           handler: handler as never,
           models: this._cfg.model ? [this._cfg.model] : [],
+          onBind,
         });
         stopRelayWorker = rwc.start();
         console.log(`[iicp-node] relay worker started → ${relayHost}:${relayPort}`);
