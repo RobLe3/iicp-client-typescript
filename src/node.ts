@@ -14,6 +14,7 @@ import { isQueueEligible, QUEUE_WAIT_MS } from "./scheduler.js";
 import { AvailabilityEvaluator, type Window } from "./availability.js";
 import { IdempotencyGuard } from "./idempotency.js";
 import { PeerManager } from "./peer_manager.js";
+import { RelaySessionRegistry } from "./relay_session.js";
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -87,6 +88,10 @@ export interface NodeConfig {
   /** When true, serve() exposes POST /v1/relay to forward tasks to peers learned
    * via gossip (ADR-022). Requires enableMesh. Default false. */
   relayCapable?: boolean;
+  /** Port for the RelayAcceptServer (R1 relay-as-last-resort, #341).
+   * Workers behind CGNAT connect outbound here and send RELAY_BIND.
+   * Default 9485. */
+  relayAcceptPort?: number;
 }
 
 export interface ServeOptions {
@@ -122,6 +127,7 @@ export class IicpNode {
     enableIdempotency: boolean;
     enableMesh: boolean;
     relayCapable: boolean;
+    relayAcceptPort: number;
   };
   private readonly _availability: AvailabilityEvaluator;
   private readonly _idempotency = new IdempotencyGuard();
@@ -134,6 +140,8 @@ export class IicpNode {
   private _pinholeLeaseSeconds = 3600;
   private _pinholeRenewalTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** R1 relay-as-last-resort (#341): session registry for bound CGNAT workers. */
+  private readonly _relaySessions = new RelaySessionRegistry();
   private _activeTasks = 0;
   private _nonces = new Map<string, number>(); // nonce → expiry timestamp (ms)
   private _prom: PromLib | null = null;
@@ -166,6 +174,7 @@ export class IicpNode {
       enableIdempotency: config.enableIdempotency ?? false,
       enableMesh: config.enableMesh ?? false,
       relayCapable: config.relayCapable ?? false,
+      relayAcceptPort: config.relayAcceptPort ?? 9485,
     };
     this._runtimeHmacKey = config.nodeHmacKey ?? "";
     this._availability = new AvailabilityEvaluator(this._cfg.availabilityWindows);
@@ -497,9 +506,21 @@ export class IicpNode {
       void this._peerManager.start(this._cfg.nodeId);
     }
 
+    // R1: start RelayAcceptServer when relay-capable (#341)
+    let relayAcceptSrv: import("./relay_session.js").RelayAcceptServer | undefined;
+    if (this._cfg.relayCapable) {
+      import("./relay_session.js").then(({ RelayAcceptServer: RAS }) => {
+        relayAcceptSrv = new RAS(this._relaySessions, { host, port: this._cfg.relayAcceptPort });
+        relayAcceptSrv.start().catch((err) => {
+          console.warn(`[iicp-node] relay accept server failed to start: ${err instanceof Error ? err.message : err}`);
+        });
+      }).catch(() => undefined);
+    }
+
     return () => {
       if (hbTimer) clearInterval(hbTimer);
       this._peerManager.stop();
+      if (relayAcceptSrv) relayAcceptSrv.stop().catch(() => undefined);
       (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
       server.close();
     };
@@ -556,10 +577,28 @@ export class IicpNode {
         res.end(JSON.stringify({ error: { code: "IICP-E000", message: "target_node_id and task required" } }));
         return;
       }
+
+      // R1: check relay session registry first (CGNAT workers with no inbound endpoint)
+      const relaySession = this._relaySessions.get(targetId);
+      if (relaySession) {
+        try {
+          const result = await relaySession.forwardTask(task);
+          const taskId = (task as Record<string, unknown>).task_id ?? "";
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ task_id: taskId, status: "completed", ...result }));
+        } catch (exc) {
+          const msg = exc instanceof Error ? exc.message : String(exc);
+          res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { code: "IICP-E031", message: `relay session forward failed: ${msg}` } }));
+        }
+        return;
+      }
+
+      // Fall back to HTTP forwarding for routable peers (ADR-022)
       const target = this._peerManager.relayTarget(targetId);
       if (!target) {
         res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { code: "IICP-E030", message: "target not in peer list" } }));
+        res.end(JSON.stringify({ error: { code: "IICP-E030", message: "target not in peer list and not a bound relay worker" } }));
         return;
       }
       try {

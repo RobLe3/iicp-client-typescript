@@ -37,6 +37,9 @@ export enum MsgType {
   FEEDBACK = 0x08,
   PING = 0x09,
   PONG = 0x0a,
+  /** R1 relay-as-last-resort: worker binds outbound session to relay (#341). */
+  RELAY_BIND = 0x0b,
+  RELAY_ACK = 0x0c,
 }
 
 // ── Frame ─────────────────────────────────────────────────────────────────────
