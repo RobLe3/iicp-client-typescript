@@ -127,6 +127,8 @@ export class IicpNode {
   private readonly _idempotency = new IdempotencyGuard();
   private readonly _peerManager: PeerManager;
   private _runtimeHmacKey: string = "";
+  /** BUG-5: token stashed by register() so deregister()/heartbeat don't need it re-passed. */
+  private _runtimeToken: string = "";
   /** #343 — UPnP IPv6 pinhole UID captured by applyNatProfile, revoked on shutdown. */
   private _pinholeUid: number | null = null;
   private _pinholeLeaseSeconds = 3600;
@@ -340,6 +342,8 @@ export class IicpNode {
     const data = (await resp.json()) as Record<string, unknown>;
     const token = (data.node_token ?? data.token) as string | undefined;
     if (!token) throw new Error(`Directory did not return node_token: ${JSON.stringify(data)}`);
+    // BUG-5: stash the token so deregister()/heartbeat don't need it re-passed.
+    this._runtimeToken = token;
     // ADR-019: capture the directory-issued HMAC key for subsequent pricing
     // signatures. Operator-provisioned key wins when set.
     if (!this._runtimeHmacKey) {
@@ -386,7 +390,13 @@ export class IicpNode {
    * shutdown paths swallow failures so a flaky directory connection doesn't
    * block process exit.
    */
-  async deregister(nodeToken: string): Promise<void> {
+  async deregister(nodeToken?: string): Promise<void> {
+    // BUG-5: default to the token stashed by register() so callers can simply
+    // `await node.deregister()`. Explicit arg overrides.
+    const token = nodeToken ?? this._runtimeToken;
+    if (!token) {
+      throw new Error("deregister() requires a node token (none stashed — call register() first)");
+    }
     const resp = await fetch(
       `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,
       {
@@ -394,7 +404,7 @@ export class IicpNode {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           node_id: this._cfg.nodeId,
-          node_token: nodeToken,
+          node_token: token,
         }),
         signal: AbortSignal.timeout(this._cfg.timeoutMs),
       }
