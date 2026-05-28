@@ -136,25 +136,49 @@ process.on("SIGINT", () => { stop(); });
 
 ---
 
-## NAT traversal — v0.7.0
+## NAT traversal — automatic (v0.7.3+)
 
-IICP nodes pick the best available NAT path automatically (ADR-041):
+Since v0.7.3, NAT detection runs automatically on every node startup — no flags needed.
+The SDK tries each path in order and picks the best one for your network:
 
-| Tier | Method | Requirement |
-|------|--------|-------------|
-| 0 | Direct — publicly routable | Open port 8020 |
-| 1 | UPnP/IGD port mapping | Home router with UPnP |
-| 2 | IPv6 firewall pinhole | IPv6 + UPnP/IGD2 |
-| 3 | **Relay-as-last-resort** | A relay operator in the mesh |
+| Tier | When | What happens |
+|------|------|-------------|
+| **0** | VPS/cloud (public IP on NIC) or `IICP_PUBLIC_ENDPOINT` set | Registers directly |
+| **1a** | Home router with UPnP, no CGNAT | Port-forward via UPnP → register WAN IP |
+| **1b** | CGNAT + IPv6 + AddPinhole works | Registers IPv6 with firewall rule |
+| **1c** | CGNAT + IPv6 + AddPinhole fails (e.g. FRITZ!Box error 606) | Registers IPv6 + logs guidance |
+| **3** | CGNAT + no usable IPv6 | Auto-elects relay from directory |
+| **4** | Nothing worked | Serves locally with operator guidance |
 
-**Relay-as-last-resort** lets a node behind CGNAT stay reachable by binding an outbound
-channel to a public relay node that forwards inbound tasks down it.
+### Environment-specific behaviour
+
+**Docker bridge (`-p 8020:8020`)** — UPnP is skipped (it would reach Docker NAT, not your
+home router). Set `IICP_PUBLIC_ENDPOINT` in `docker-compose.yml`:
+
+```yaml
+environment:
+  IICP_PUBLIC_ENDPOINT: "http://your-host-ip:8020"
+  IICP_BACKEND_URL: "http://host.docker.internal:11434"
+```
+
+Or run with `--network host` to let UPnP work as on bare metal.
+
+**Kubernetes** — set `IICP_PUBLIC_ENDPOINT` to the LoadBalancer / NodePort IP.
+
+**CGNAT + no IPv6 → automatic relay:**
+
+```
+[iicp-node] NAT tier=3: auto-electing relay from directory...
+[iicp-node] auto-elected relay: relay.example.com:9485
+```
+
+The node connects outbound to the elected relay and re-registers automatically.
+To use a specific relay: `IICP_RELAY_WORKER_ENDPOINT=relay.example.com:9485`.
 
 ### Running a relay-capable node (relay operator)
 
 ```typescript
 const node = new IicpNode({
-  nodeId         : "relay-eu-01",
   endpoint       : "http://relay.example.com:8020",
   intent         : "urn:iicp:intent:llm:chat:v1",
   relayCapable   : true,   // accept RELAY_BIND on TCP port 9485
@@ -163,20 +187,13 @@ const node = new IicpNode({
 });
 ```
 
-### Node behind CGNAT (connects outbound to relay)
+### Opt-out / override
 
-```typescript
-const node = new IicpNode({
-  nodeId              : "cgnat-worker-001",
-  endpoint            : "http://placeholder",       // overwritten on bind
-  intent              : "urn:iicp:intent:llm:chat:v1",
-  relayWorkerEndpoint : "relay.example.com:9485",   // outbound target
-  // or: env IICP_RELAY_WORKER_ENDPOINT=relay.example.com:9485
-});
+```bash
+IICP_AUTO_DETECT_NAT=false              # disable detection entirely
+IICP_PUBLIC_ENDPOINT=http://x.x.x.x:8020  # trust this endpoint
+IICP_RELAY_WORKER_ENDPOINT=host:9485    # specific relay instead of auto-elect
 ```
-
-When the worker binds it re-registers with the relay's public address
-(`transport_method: "turn_relay"`), making it discoverable.
 
 ---
 

@@ -21,7 +21,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.7.3";
+const SDK_VERSION = "0.7.4";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
