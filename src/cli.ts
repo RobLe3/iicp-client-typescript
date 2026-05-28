@@ -294,6 +294,51 @@ function runList(): number {
   return 0;
 }
 
+// ── serve helpers ───────────────────────────────────────────────────────────
+
+/** Query directory for relay-capable peers and elect one deterministically.
+ *  Used when NAT detection returns tier≥3 (CGNAT + no usable IPv6).
+ *  Returns [relayHost, relayPort] or null if no relay-capable peer is found.
+ */
+async function _autoElectRelay(
+  directoryUrl: string,
+  intent: string,
+  nodeId: string,
+): Promise<[string, number] | null> {
+  try {
+    const url = `${directoryUrl.replace(/\/$/, "")}/v1/discover?intent=${encodeURIComponent(intent)}&relay_capable=true`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!resp.ok) return null;
+    const data = await resp.json() as { nodes?: Array<Record<string, unknown>> };
+    const candidates = (data.nodes ?? []).filter(
+      (n) => n.relay_capable && n.endpoint,
+    );
+    if (!candidates.length) return null;
+
+    const { createHash } = await import("node:crypto");
+    const scored = candidates.map((c) => ({
+      c,
+      score: [
+        Number(c.load ?? 0),
+        createHash("sha256").update(`${nodeId}:${String(c.node_id)}`).digest("hex"),
+      ] as [number, string],
+    }));
+    scored.sort((a, b) => {
+      if (a.score[0] !== b.score[0]) return a.score[0] - b.score[0];
+      return a.score[1] < b.score[1] ? -1 : 1;
+    });
+    const elected = scored[0].c;
+    const endpoint = String(elected.endpoint ?? "").replace(/\/$/, "");
+    const u = new URL(endpoint.startsWith("http") ? endpoint : `http://${endpoint}`);
+    const relayHost = u.hostname;
+    const relayPort = (elected.relay_accept_port as number | undefined) ?? 9485;
+    if (!relayHost) return null;
+    return [relayHost, relayPort];
+  } catch {
+    return null;
+  }
+}
+
 // ── serve ───────────────────────────────────────────────────────────────────
 
 function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
@@ -382,6 +427,56 @@ async function runServe(opts: ServeOpts): Promise<number> {
     }
   }
 
+  // ADR-041 / #343 — NAT detection + relay election BEFORE node creation so
+  // relay config is available in the IicpNode constructor.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let natProfile: any = null;
+  if (opts.autoDetectNat) {
+    try {
+      const { detectNat } = await import("./nat_detection.js");
+      natProfile = await detectNat({
+        bindHost: opts.host,
+        bindPort: opts.port,
+        operatorPublicEndpoint: opts.publicEndpoint || undefined,
+        externalIpProbeUrl: opts.externalIpProbeUrl || undefined,
+      });
+      // eslint-disable-next-line no-console
+      console.log(
+        `[iicp-node] NAT auto-detect: tier=${natProfile.tier} method=${natProfile.transportMethod} ` +
+          `public=${natProfile.publicEndpoint ?? "<none>"} ipv6_pinhole=${natProfile.ipv6?.pinholeActive ?? false}`,
+      );
+      if (natProfile.publicEndpoint) publicEndpoint = natProfile.publicEndpoint as string;
+
+      // Tier ≥ 3 (CGNAT + no usable IPv6 path) and no relay configured:
+      // auto-elect a relay from the directory so we can register via relay.
+      if (natProfile.tier >= 3 && !opts.relayWorkerEndpoint) {
+        // eslint-disable-next-line no-console
+        console.log(`[iicp-node] NAT tier=${natProfile.tier}: auto-electing relay from directory…`);
+        const elected = await _autoElectRelay(
+          opts.directoryUrl ?? "https://iicp.network/api",
+          opts.intent,
+          nodeId,
+        );
+        if (elected) {
+          const [relayHost, relayPort] = elected;
+          opts = { ...opts, relayWorkerEndpoint: `${relayHost}:${relayPort}` };
+          // eslint-disable-next-line no-console
+          console.log(`[iicp-node] auto-elected relay: ${relayHost}:${relayPort}`);
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[iicp-node] NAT tier=${natProfile.tier}: no relay-capable peers in directory. ` +
+            `Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
+          );
+        }
+      }
+    } catch (exc) {
+      const msg = exc instanceof Error ? exc.message : String(exc);
+      // eslint-disable-next-line no-console
+      console.warn(`[iicp-node] NAT auto-detect failed: ${msg} — continuing with configured endpoint`);
+    }
+  }
+
   const node = new IicpNode({
     nodeId,
     endpoint: publicEndpoint,
@@ -393,8 +488,10 @@ async function runServe(opts: ServeOpts): Promise<number> {
     relayWorkerEndpoint: opts.relayWorkerEndpoint || undefined,
   });
 
-  // Surface tier-0 declaration to the directory so it doesn't run dial-back.
-  if (tier0Pinhole && !opts.autoDetectNat) {
+  // Apply collected NAT profile (covers both auto-detect and tier-0 IPv6 cases).
+  if (natProfile) {
+    node.applyNatProfile(natProfile);
+  } else if (tier0Pinhole) {
     node.applyNatProfile({
       tier: 0,
       transportMethod: "direct",
@@ -406,29 +503,6 @@ async function runServe(opts: ServeOpts): Promise<number> {
         pinholeUniqueId: tier0Pinhole.pinholeUniqueId,
       },
     });
-  }
-
-  // ADR-041 / #343 — optional NAT auto-detection prior to register
-  if (opts.autoDetectNat) {
-    try {
-      const { detectNat } = await import("./nat_detection.js");
-      const profile = await detectNat({
-        bindHost: opts.host,
-        bindPort: opts.port,
-        operatorPublicEndpoint: opts.publicEndpoint || undefined,
-        externalIpProbeUrl: opts.externalIpProbeUrl || undefined,
-      });
-      node.applyNatProfile(profile);
-      // eslint-disable-next-line no-console
-      console.log(
-        `[iicp-node] NAT auto-detect: tier=${profile.tier} method=${profile.transportMethod} ` +
-          `public=${profile.publicEndpoint ?? "<none>"} ipv6_pinhole=${profile.ipv6?.pinholeActive ?? false}`,
-      );
-    } catch (exc) {
-      const msg = exc instanceof Error ? exc.message : String(exc);
-      // eslint-disable-next-line no-console
-      console.warn(`[iicp-node] NAT auto-detect failed: ${msg} — continuing with configured endpoint`);
-    }
   }
 
   const handler = getBackendHandler(opts.backendType, {
