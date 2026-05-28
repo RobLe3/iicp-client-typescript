@@ -348,9 +348,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     );
     return 2;
   }
-  const nodeId =
-    opts.nodeId ||
-    `sdk-${opts.model.replace(/:/g, "-")}-${randomBytes(4).toString("hex")}`;
+  const nodeId = opts.nodeId || crypto.randomUUID();
   let publicEndpoint = opts.publicEndpoint || `http://localhost:${opts.port}`;
 
   // ADR-043 §5 / #343 — Tier-0 IPv6 pinhole attempt. Runs unconditionally
