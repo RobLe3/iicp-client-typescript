@@ -436,6 +436,27 @@ async function runServe(opts: ServeOpts): Promise<number> {
     model: opts.model,
   });
 
+  // GAP-6: probe backend for all available models so the registration advertises
+  // the full list — not just the single configured model. Best-effort; fall back
+  // to the single configured model on any error.
+  try {
+    const tagsUrl = opts.backendUrl.replace(/\/$/, "") + "/api/tags";
+    const tagsResp = await fetch(tagsUrl, { signal: AbortSignal.timeout(3000) });
+    if (tagsResp.ok) {
+      const tagsData = await tagsResp.json() as { models?: Array<{ name: string }> };
+      const extra = (tagsData.models ?? [])
+        .map((m) => m.name)
+        .filter((m) => m !== opts.model);
+      if (extra.length > 0) {
+        node["_cfg"].capabilities = extra;
+        // eslint-disable-next-line no-console
+        console.log(`[iicp-node] GAP-6: advertising ${extra.length} additional model(s): ${extra.slice(0, 6).join(", ")}`);
+      }
+    }
+  } catch {
+    // best-effort; no-op on error
+  }
+
   let token: string | undefined;
   if (!opts.skipRegistration) {
     try {
