@@ -1,4 +1,4 @@
-// ADR-041 tier-3 / #341 — relay-as-last-resort R1 (TypeScript parity)
+// ADR-016: IICP client SDK conformance — ADR-041 tier-3 / #341 relay R1 (TypeScript parity)
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { RelaySessionRegistry, RelayWorkerSession } from "../src/relay_session.js";
