@@ -18,6 +18,7 @@
  */
 import { parseArgs } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
+import * as net from "node:net";
 import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -93,7 +94,7 @@ function printHelp(): void {
       `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
       `  --max-concurrent N         IICP_MAX_CONCURRENT (default 4)\n` +
       `  --node-id ID               IICP_NODE_ID (auto-generated if absent)\n` +
-      `  --port N                   IICP_PORT (default 8020)\n` +
+      `  --port N                   IICP_PORT (default 9484)\n` +
       `  --host HOST                IICP_HOST (default 0.0.0.0)\n` +
       `  --skip-registration        IICP_SKIP_REGISTRATION — register-free dev mode\n` +
       `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup\n` +
@@ -229,8 +230,8 @@ async function runInit(): Promise<number> {
     const directory = await ask(rl, "IICP directory URL", "https://iicp.network/api");
     const region = await ask(rl, "Region tag", "eu-central");
     const intent = await ask(rl, "Intent URN", "urn:iicp:intent:llm:chat:v1");
-    const portStr = await ask(rl, "Listen port", "8020");
-    const port = parseInt(portStr, 10) || 8020;
+    const portStr = await ask(rl, "Listen port", "9484");
+    const port = parseInt(portStr, 10) || 9484;
     const host = await ask(rl, "Bind host", "0.0.0.0");
     const publicEndpoint = await ask(rl, "Public endpoint URL (blank = dev mode)");
     const autoDetectNatStr = (await ask(rl, "Auto-detect NAT via UPnP/STUN? [y/N]", "n")).toLowerCase();
@@ -339,6 +340,40 @@ async function _autoElectRelay(
   }
 }
 
+/**
+ * Return the first bindable TCP port >= `start` on `host`.
+ *
+ * The official IICP port 9484 is the starting point; when running multiple
+ * nodes on one host (each model on its own port → its own pinhole) the second
+ * node auto-increments to 9485, the third to 9486, and so on. Probes by
+ * attempting a real listen so the chosen port is genuinely free before NAT
+ * detection opens a pinhole and the directory registration advertises it.
+ */
+function findAvailablePort(host: string, start: number, maxTries = 64): Promise<number> {
+  const bindHost = host === "" || host === "0.0.0.0" ? "0.0.0.0" : host;
+  return new Promise((resolve) => {
+    let candidate = start;
+    const tryBind = (): void => {
+      if (candidate >= start + maxTries) {
+        resolve(start); // exhausted — let serve() surface the real bind error
+        return;
+      }
+      const srv = net.createServer();
+      srv.once("error", () => {
+        srv.close();
+        candidate += 1;
+        tryBind();
+      });
+      srv.once("listening", () => {
+        const chosen = candidate;
+        srv.close(() => resolve(chosen));
+      });
+      srv.listen(candidate, bindHost);
+    };
+    tryBind();
+  });
+}
+
 // ── serve ───────────────────────────────────────────────────────────────────
 
 function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
@@ -352,7 +387,7 @@ function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
     intent: opts.intent || saved.intent,
     nodeId: opts.nodeId || saved.node_id,
     maxConcurrent: opts.maxConcurrent === 4 ? saved.max_concurrent : opts.maxConcurrent,
-    port: opts.port === 8020 ? saved.port : opts.port,
+    port: opts.port === 9484 ? saved.port : opts.port,
     host: opts.host === "0.0.0.0" ? saved.host : opts.host,
     autoDetectNat: opts.autoDetectNat || saved.auto_detect_nat,
     externalIpProbeUrl: opts.externalIpProbeUrl || saved.external_ip_probe_url,
@@ -394,6 +429,22 @@ async function runServe(opts: ServeOpts): Promise<number> {
     return 2;
   }
   const nodeId = (opts.nodeId || crypto.randomUUID()).slice(0, 36);
+
+  // Resolve the actual listen port before NAT detection: start at the
+  // requested port (default 9484, the official IICP port) and auto-increment
+  // to the next free port. Keeps one port per node (multiple models share it)
+  // while N nodes on one host each get a distinct port → distinct pinhole.
+  // Skipped when the operator supplies an explicit --public-endpoint.
+  if (!opts.publicEndpoint) {
+    const resolvedPort = await findAvailablePort(opts.host, opts.port);
+    if (resolvedPort !== opts.port) {
+      console.log(
+        `[iicp-node] port ${opts.port} in use — auto-incremented to first free port ${resolvedPort}.`,
+      );
+      opts.port = resolvedPort;
+    }
+  }
+
   let publicEndpoint = opts.publicEndpoint || `http://localhost:${opts.port}`;
 
   // ADR-043 §5 / #343 — Tier-0 IPv6 pinhole attempt. Runs unconditionally
@@ -645,7 +696,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     port:
       values.port !== undefined
         ? parseInt(values.port as string, 10)
-        : envInt("IICP_PORT", 8020),
+        : envInt("IICP_PORT", 9484),
     host: (values.host as string | undefined) ?? envOr("IICP_HOST", "0.0.0.0")!,
     skipRegistration:
       Boolean(values["skip-registration"]) || envBool("IICP_SKIP_REGISTRATION"),

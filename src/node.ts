@@ -21,7 +21,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.7.4";
+const SDK_VERSION = "0.7.5";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -479,7 +479,7 @@ export class IicpNode {
 
   serve(handler: TaskHandler, options: ServeOptions = {}): () => void {
     const host = options.host ?? "0.0.0.0";
-    const port = options.port ?? 8020;
+    const port = options.port ?? 9484;
     const nodeToken = options.nodeToken;
 
     // Load Prometheus in background (non-blocking)
