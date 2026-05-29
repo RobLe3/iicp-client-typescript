@@ -40,16 +40,15 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "dependencies": {
+    "cbor-x": "^1.6.4"
+  },
   "peerDependencies": {
-    "cbor-x": "^1.6.4",
     "prom-client": ">=14",
     "nat-upnp": ">=1.1"
   },
   "peerDependenciesMeta": {
     "prom-client": {
-      "optional": true
-    },
-    "cbor-x": {
       "optional": true
     },
     "nat-upnp": {
