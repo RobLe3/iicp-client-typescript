@@ -419,11 +419,11 @@ export class IicpNode {
       `${this._cfg.directoryUrl.replace(/\/$/, "")}/v1/register`,
       {
         method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          node_id: this._cfg.nodeId,
-          node_token: token,
-        }),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ node_id: this._cfg.nodeId }),
         signal: AbortSignal.timeout(this._cfg.timeoutMs),
       }
     );
