@@ -9,6 +9,7 @@
  */
 
 import * as net from "node:net";
+import { randomUUID } from "node:crypto";
 
 const IICP_MAGIC = Buffer.from("IICP");
 const FRAMING_VERSION = 0x01;
@@ -70,7 +71,7 @@ export class RelayWorkerSession {
 
   /** Push a task CALL to the worker and await the RESPONSE (via Promise). */
   async forwardTask(task: unknown, timeoutMs = 120_000): Promise<Record<string, unknown>> {
-    const callId = crypto.randomUUID();
+    const callId = randomUUID();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this._pending.delete(callId);

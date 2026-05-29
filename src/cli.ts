@@ -448,7 +448,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     );
     return 2;
   }
-  const nodeId = (opts.nodeId || crypto.randomUUID()).slice(0, 36);
+  const nodeId = (opts.nodeId || randomUUID()).slice(0, 36);
 
   // Resolve the actual listen port before NAT detection: start at the
   // requested port (default 9484, the official IICP port) and auto-increment
