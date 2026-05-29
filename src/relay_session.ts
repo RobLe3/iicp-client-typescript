@@ -25,16 +25,23 @@ const MT_PONG = 0x0a;
 const MT_RELAY_BIND = 0x0b;
 const MT_RELAY_ACK = 0x0c;
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const _cborx = require("cbor-x") as {
+  Encoder: new (opts: object) => { encode: (v: unknown) => Buffer };
+  decode: (v: Buffer) => unknown;
+};
+// useRecords:false + mapsAsObjects:false so encode(Map) emits a plain integer-keyed
+// CBOR map interoperable with Python cbor2 / Rust ciborium. IICP wire headers are
+// integer-keyed maps: build them with `new Map` — a plain object {1:x} emits TEXT
+// keys ("1") that integer-key decoders cannot read (GAPS-014). Mirrors src/iicp_tcp.ts.
+const _encoder = new _cborx.Encoder({ useRecords: false, mapsAsObjects: false });
+
 function _enc(obj: unknown): Buffer {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const cbor = require("cbor-x") as { encode: (v: unknown) => Buffer };
-  return cbor.encode(obj);
+  return Buffer.from(_encoder.encode(obj));
 }
 
 function _dec(buf: Buffer): unknown {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const cbor = require("cbor-x") as { decode: (v: Buffer) => unknown };
-  return cbor.decode(buf);
+  return _cborx.decode(buf);
 }
 
 function makeFrame(msgType: number, payload: Buffer): Buffer {
@@ -76,7 +83,10 @@ export class RelayWorkerSession {
       });
 
       try {
-        const payload = _enc({ 15: callId, 5: Buffer.from(JSON.stringify(task)) });
+        const payload = _enc(new Map<number, unknown>([
+          [15, callId],
+          [5, Buffer.from(JSON.stringify(task))],
+        ]));
         const frame = makeFrame(MT_CALL, payload as Buffer);
         this._socket.write(frame);
       } catch (err) {
@@ -201,7 +211,7 @@ export class RelayAcceptServer {
     const payloadLen = header.readUInt32BE(8);
     if (msgType !== MT_INIT) return;
     if (payloadLen > 0) { const _ = await readExactly(payloadLen); if (!_) return; }
-    socket.write(makeFrame(MT_ACK, _enc({ 1: FRAMING_VERSION }) as Buffer));
+    socket.write(makeFrame(MT_ACK, _enc(new Map<number, unknown>([[1, FRAMING_VERSION]])) as Buffer));
 
     // Step 2: RELAY_BIND
     const rh = await readExactly(FRAME_HEADER_LEN);
@@ -223,7 +233,7 @@ export class RelayAcceptServer {
     const session = new RelayWorkerSession(workerId, socket);
     this._registry.bind(workerId, session);
     console.log(`[relay-accept] worker=${workerId} bound (intent=${intent} models=${models.slice(0, 3).join(",")})`);
-    socket.write(makeFrame(MT_RELAY_ACK, _enc({ 1: "ok", 2: workerId }) as Buffer));
+    socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([[1, "ok"], [2, workerId]])) as Buffer));
 
     // Step 3: relay-worker frame loop
     try {
@@ -238,7 +248,7 @@ export class RelayAcceptServer {
         if (ft === MT_PING) {
           let echo = Buffer.alloc(0);
           try { const pb = _dec(fp) as Record<number, unknown>; const e = pb[1]; echo = Buffer.isBuffer(e) ? Buffer.from(e) : Buffer.alloc(0); } catch { /* ok */ }
-          socket.write(makeFrame(MT_PONG, _enc({ 1: echo }) as Buffer));
+          socket.write(makeFrame(MT_PONG, _enc(new Map<number, unknown>([[1, echo]])) as Buffer));
         } else if (ft === MT_RESPONSE) {
           try {
             const rb = _dec(fp) as Record<number, unknown>;

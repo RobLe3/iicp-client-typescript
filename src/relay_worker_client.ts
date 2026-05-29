@@ -26,14 +26,24 @@ const MT_PONG = 0x0a;
 const MT_RELAY_BIND = 0x0b;
 const MT_RELAY_ACK = 0x0c;
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const _cborx = require("cbor-x") as {
+  Encoder: new (opts: object) => { encode: (v: unknown) => Buffer };
+  decode: (v: Buffer) => unknown;
+};
+// useRecords:false + mapsAsObjects:false so encode(Map) emits a plain integer-keyed
+// CBOR map (a2 01.. 02..) interoperable with Python cbor2 / Rust ciborium — NOT
+// cbor-x Record tags. IICP wire headers are integer-keyed maps: build them with
+// `new Map`, since a plain object {1:x} emits TEXT keys ("1") that integer-key
+// decoders cannot read (GAPS-014). Mirrors src/iicp_tcp.ts.
+const _encoder = new _cborx.Encoder({ useRecords: false, mapsAsObjects: false });
+
 function _enc(obj: unknown): Buffer {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return (require("cbor-x") as { encode: (v: unknown) => Buffer }).encode(obj);
+  return Buffer.from(_encoder.encode(obj));
 }
 
 function _dec(buf: Buffer): Record<number, unknown> {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  return (require("cbor-x") as { decode: (v: Buffer) => unknown }).decode(buf) as Record<number, unknown>;
+  return _cborx.decode(buf) as Record<number, unknown>;
 }
 
 function makeFrame(msgType: number, payload: Buffer): Buffer {
@@ -150,16 +160,16 @@ export class RelayWorkerClient {
     };
 
     // Step 1: INIT → ACK
-    socket.write(makeFrame(MT_INIT, _enc({ 1: FRAMING_VERSION })));
+    socket.write(makeFrame(MT_INIT, _enc(new Map<number, unknown>([[1, FRAMING_VERSION]]))));
     const ack = await readFrame();
     if (!ack || ack[0] !== MT_ACK) throw new Error(`Expected ACK, got ${ack?.[0]}`);
 
     // Step 2: RELAY_BIND → RELAY_ACK
-    socket.write(makeFrame(MT_RELAY_BIND, _enc({
-      1: this._workerId,
-      2: this._intent,
-      3: this._models,
-    })));
+    socket.write(makeFrame(MT_RELAY_BIND, _enc(new Map<number, unknown>([
+      [1, this._workerId],
+      [2, this._intent],
+      [3, this._models],
+    ]))));
     const rack = await readFrame();
     if (!rack || rack[0] !== MT_RELAY_ACK) throw new Error(`Expected RELAY_ACK, got ${rack?.[0]}`);
     const ackBody = _dec(rack[1]);
@@ -176,7 +186,7 @@ export class RelayWorkerClient {
 
     // Step 3: session loop
     const pingTimer = setInterval(() => {
-      if (!socket.destroyed) socket.write(makeFrame(MT_PING, _enc({ 1: Buffer.alloc(0) })));
+      if (!socket.destroyed) socket.write(makeFrame(MT_PING, _enc(new Map<number, unknown>([[1, Buffer.alloc(0)]]))));
     }, PING_INTERVAL_MS);
 
     try {
@@ -211,7 +221,10 @@ export class RelayWorkerClient {
       result = { error: exc instanceof Error ? exc.message : String(exc) };
     }
     try {
-      const respPayload = _enc({ 15: callId, 5: Buffer.from(JSON.stringify(result)) });
+      const respPayload = _enc(new Map<number, unknown>([
+        [15, callId],
+        [5, Buffer.from(JSON.stringify(result))],
+      ]));
       socket.write(makeFrame(MT_RESPONSE, respPayload));
     } catch (exc) {
       console.warn(`[relay-worker] failed to send RESPONSE: ${exc}`);
