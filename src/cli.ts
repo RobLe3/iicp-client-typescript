@@ -562,6 +562,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // Apply collected NAT profile (covers both auto-detect and tier-0 IPv6 cases).
   if (natProfile) {
     node.applyNatProfile(natProfile);
+    // ADR-043 §9 (#344) — derive the canonical exposure_mode from the FULL profile
+    // (applyNatProfile's param is a structural subset) and set it on the node config.
+    try {
+      const { qualifyService } = await import("./qualify.js");
+      (node["_cfg"] as Record<string, unknown>).exposureMode = qualifyService(natProfile).exposureMode;
+    } catch {
+      // best-effort; exposure_mode stays unset if qualification can't run
+    }
   } else if (tier0Pinhole) {
     node.applyNatProfile({
       tier: 0,

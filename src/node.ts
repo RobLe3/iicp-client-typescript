@@ -64,6 +64,9 @@ export interface NodeConfig {
     | "unknown";
   natType?: "full_cone" | "restricted_cone" | "port_restricted" | "symmetric" | "unknown";
   transportMetadata?: Record<string, unknown>;
+  /** ADR-043 §9 (#344) — 8-category exposure_mode; derived via qualifyService in the
+   * serve flow and surfaced to the directory nodes.exposure_mode column. */
+  exposureMode?: string;
   /** S.12 §2.1 CIP policy block (CIP-D1) surfaced to the directory register.
    * Pass a CooperativeInferencePolicy instance; when undefined the SDK falls
    * back to the module-level getCipPolicy(). */
@@ -112,7 +115,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint"
+      "model" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint"
     >
   > & {
     model: string | undefined;
@@ -122,6 +125,7 @@ export class IicpNode {
     transportMethod: NodeConfig["transportMethod"];
     natType: NodeConfig["natType"];
     transportMetadata: Record<string, unknown> | undefined;
+    exposureMode: string | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     cipPolicy: any | undefined;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -172,6 +176,7 @@ export class IicpNode {
       transportMethod: config.transportMethod,
       natType: config.natType,
       transportMetadata: config.transportMetadata,
+      exposureMode: config.exposureMode,
       cipPolicy: config.cipPolicy,
       pricing: config.pricing,
       nodeHmacKey: config.nodeHmacKey ?? "",
@@ -322,6 +327,7 @@ export class IicpNode {
     if (this._cfg.transportMethod) body.transport_method = this._cfg.transportMethod;
     if (this._cfg.natType) body.nat_type = this._cfg.natType;
     if (this._cfg.transportMetadata) body.transport_metadata = this._cfg.transportMetadata;
+    if (this._cfg.exposureMode) body.exposure_mode = this._cfg.exposureMode;
 
     // SDK self-identification — directory surfaces these on /v1/discover
     // so dashboards can render a language badge. Free-form so future SDKs
