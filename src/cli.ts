@@ -417,6 +417,25 @@ async function runServe(opts: ServeOpts): Promise<number> {
     opts = applySavedNode(opts, saved);
   }
 
+  // Onboarding: if no --model given, auto-select the first model the backend advertises
+  // (Ollama /api/tags) so a bare `iicp-node serve` just works (parity with Rust/Python).
+  if (!opts.model && opts.backendUrl) {
+    try {
+      const tagsUrl = opts.backendUrl.replace(/\/$/, "") + "/api/tags";
+      const r = await fetch(tagsUrl, { signal: AbortSignal.timeout(3000) });
+      if (r.ok) {
+        const d = (await r.json()) as { models?: Array<{ name: string }> };
+        const first = (d.models ?? [])[0]?.name;
+        if (first) {
+          opts.model = first;
+          process.stderr.write(`[iicp-node] no --model given — auto-selected '${first}' from ${opts.backendUrl}\n`);
+        }
+      }
+    } catch {
+      // best-effort; the required-model check below surfaces a clear error
+    }
+  }
+
   if (!opts.backendUrl || !opts.model) {
     process.stderr.write(
       "ERROR: --model is required (--backend-url defaults to http://localhost:11434). Set IICP_BACKEND_MODEL, or use --node NAME.\n",
