@@ -16,6 +16,9 @@ const FRAMING_VERSION = 0x01;
 const FRAME_HEADER_LEN = 12;
 const PING_INTERVAL_MS = 30_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+// #359 — explicit connect timeout so a TCP-reachable-but-not-accepting relay
+// fails fast instead of blocking on the OS default; the _run() loop reconnects.
+const CONNECT_TIMEOUT_MS = 10_000;
 
 const MT_INIT = 0x01;
 const MT_ACK = 0x02;
@@ -113,8 +116,13 @@ export class RelayWorkerClient {
   private _session(): Promise<void> {
     return new Promise((resolve, reject) => {
       const socket = net.createConnection(this._relayPort, this._relayHost);
-      socket.on("error", reject);
+      const connectTimer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error(`relay connect timed out after ${CONNECT_TIMEOUT_MS}ms`));
+      }, CONNECT_TIMEOUT_MS);
+      socket.on("error", (e) => { clearTimeout(connectTimer); reject(e); });
       socket.on("connect", () => {
+        clearTimeout(connectTimer);
         this._handshake(socket)
           .then(resolve)
           .catch(reject)
