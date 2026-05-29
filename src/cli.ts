@@ -83,10 +83,10 @@ function printHelp(): void {
       `  serve                      Register and serve a node\n\n` +
       `Run an IICP provider node backed by an OpenAI-compatible server.\n\n` +
       `serve required (flag or env):\n` +
-      `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio endpoint\n` +
       `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
       `  (or --node NAME            load both from ~/.iicp/nodes/<NAME>.json after \`iicp-node init\`)\n\n` +
       `serve optional:\n` +
+      `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434)\n` +
       `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp (default openai_compat)\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
@@ -379,7 +379,8 @@ function findAvailablePort(host: string, start: number, maxTries = 64): Promise<
 function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
   return {
     ...opts,
-    backendUrl: opts.backendUrl || saved.backend_url,
+    // Onboarding: default to Ollama's well-known local port so only --model is required.
+    backendUrl: opts.backendUrl || saved.backend_url || "http://localhost:11434",
     model: opts.model || saved.model,
     publicEndpoint: opts.publicEndpoint || saved.public_endpoint,
     directoryUrl: opts.directoryUrl || saved.directory_url,
@@ -418,7 +419,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
 
   if (!opts.backendUrl || !opts.model) {
     process.stderr.write(
-      "ERROR: --backend-url and --model are required (or IICP_BACKEND_URL / IICP_BACKEND_MODEL, or --node NAME).\n",
+      "ERROR: --model is required (--backend-url defaults to http://localhost:11434). Set IICP_BACKEND_MODEL, or use --node NAME.\n",
     );
     return 2;
   }
