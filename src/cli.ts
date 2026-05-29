@@ -556,8 +556,17 @@ async function runServe(opts: ServeOpts): Promise<number> {
     });
   }
 
+  // Normalize to the OpenAI-dialect root: the handler appends /chat/completions,
+  // so baseUrl MUST end in /v1 (Ollama serves the OpenAI dialect at /v1). An
+  // operator naturally passes --backend-url http://host:11434 (matching the
+  // /api/tags probe URL), so append /v1 if absent. Mirrors the Python CLI; the
+  // raw backendUrl is kept for the /api/tags model probe below.
+  const _baseUrl = (() => {
+    const t = opts.backendUrl.replace(/\/$/, "");
+    return t.endsWith("/v1") ? t : `${t}/v1`;
+  })();
   const handler = getBackendHandler(opts.backendType, {
-    baseUrl: opts.backendUrl,
+    baseUrl: _baseUrl,
     model: opts.model,
   });
 
