@@ -28,6 +28,18 @@ export {
   tryUpnpMapping,
 } from "./nat_detection.js";
 export type { NatProfile, DetectNatOptions, UpnpResult } from "./nat_detection.js";
+export {
+  EXPOSURE_MODES,
+  qualifyService,
+  qualifyServiceAsync,
+} from "./qualify.js";
+export type {
+  ExposureMode,
+  ServiceQualification,
+  Ipv4Qualification,
+  Ipv6Qualification,
+  ExposureQualification,
+} from "./qualify.js";
 export { openaiCompatHandler } from "./backends/openai_compat.js";
 export type {
   OpenAiCompatOptions,
