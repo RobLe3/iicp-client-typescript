@@ -76,6 +76,8 @@ export class IicpClient {
         region: String(node.region ?? ""),
         latency_estimate_ms: node.latency_estimate_ms as number | undefined,
         reputation_score: node.reputation_score as number | undefined,
+        health_label: node.health_label as string | undefined,
+        exposure_mode: node.exposure_mode as string | undefined,
       };
     });
   }

@@ -62,6 +62,10 @@ export interface Node {
   region: string;
   latency_estimate_ms?: number;
   reputation_score?: number;
+  // ADR-044 composed health label + ADR-043 8-category network exposure.
+  // Optional: present only when the directory is on v1.10.0+.
+  health_label?: string;
+  exposure_mode?: string;
 }
 
 export interface ChatMessage {

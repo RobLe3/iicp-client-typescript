@@ -110,7 +110,7 @@ describe("discover", () => {
       if (u.includes("/api/v1/discover")) {
         return jsonResponse({
           nodes: [
-            { node_id: "n1", endpoint: "https://node1.test", score: 0.95, available: true, region: "eu" },
+            { node_id: "n1", endpoint: "https://node1.test", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct" },
             { node_id: "n2", endpoint: "https://node2.test", score: 0.80, available: true, region: "us" },
           ],
         });
@@ -124,6 +124,11 @@ describe("discover", () => {
     assert.equal(nodes[0].node_id, "n1");
     assert.equal(nodes[0].score, 0.95);
     assert.equal(nodes[0].region, "eu");
+    // ADR-044 — health_label + exposure_mode parsed (directory v1.10.0+)
+    assert.equal(nodes[0].health_label, "healthy");
+    assert.equal(nodes[0].exposure_mode, "ipv4_public_direct");
+    // absent against older directory → undefined, no break
+    assert.equal(nodes[1].health_label, undefined);
     restore();
   });
 
