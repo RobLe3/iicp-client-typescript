@@ -61,7 +61,7 @@ function _isSsrfSafe(url: string): boolean {
 }
 
 const DEFAULT_CONFIG: ClientConfig = {
-  directory_url: "https://iicp.network",
+  directory_url: "https://iicp.network/api",
   timeout_ms: DEFAULT_TIMEOUT_MS,
   tls_verify: true,
 };
@@ -105,7 +105,7 @@ export class IicpClient {
       params.set("min_reputation", String(o.min_reputation));
 
     const data = await this._get(
-      `${this.cfg.directory_url}/api/v1/discover?${params}`,
+      `${this.cfg.directory_url.replace(/\/$/, "")}/v1/discover?${params}`,
       5_000,
       traceparent,
     );

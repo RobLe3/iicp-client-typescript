@@ -1,7 +1,7 @@
 /** IICP TypeScript SDK — type definitions (ADR-016 §1) */
 
 export interface ClientConfig {
-  /** Directory URL. Default: https://iicp.network */
+  /** Directory URL base (with /api suffix). Default: https://iicp.network/api */
   directory_url: string;
   /** Request timeout in ms. Max 120 000 (SDK-04). Default: 30 000 */
   timeout_ms: number;
