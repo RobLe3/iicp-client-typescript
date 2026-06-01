@@ -38,6 +38,12 @@ function _isSsrfSafe(url: string): boolean {
   if (["localhost", "0.0.0.0", "::1", "::"].includes(host)) return false;
   const blockedSuffixes = [".local", ".internal", ".lan", ".test", ".invalid", ".localhost"];
   if (blockedSuffixes.some((s) => host.endsWith(s))) return false;
+  // IPv6 address — URL.hostname strips brackets, leaving e.g. "2a0a:a543::1"
+  if (host.includes(":")) {
+    // Block link-local (fe80:) and unique-local (fc00::/7)
+    if (/^(fe80:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)/i.test(host)) return false;
+    return true; // global unicast IPv6 — safe
+  }
   if (!host.includes(".")) return false; // bare Docker service name
   const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
   if (ipv4Match) {
