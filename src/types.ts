@@ -11,6 +11,8 @@ export interface ClientConfig {
   api_token?: string;
   /** Verify TLS certificates. Default: true */
   tls_verify: boolean;
+  /** IICP-CX S.16: encrypt task payloads when node advertises cx_public_key. Default: false */
+  use_confidentiality?: boolean;
 }
 
 export interface TaskConstraints {
@@ -54,6 +56,12 @@ export interface DiscoverOptions {
   min_reputation?: number;
 }
 
+export interface CxPublicKey {
+  algorithm: string;
+  key: string;
+  key_id: string;
+}
+
 export interface Node {
   node_id: string;
   endpoint: string;
@@ -66,6 +74,8 @@ export interface Node {
   // Optional: present only when the directory is on v1.10.0+.
   health_label?: string;
   exposure_mode?: string;
+  // IICP-CX S.16 §3.1 — X25519 public key for E2E payload confidentiality.
+  cx_public_key?: CxPublicKey;
 }
 
 export interface ChatMessage {

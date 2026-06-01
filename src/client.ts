@@ -16,6 +16,7 @@ import type {
   TaskRequest,
   TaskResponse,
 } from "./types.js";
+import { encryptPayload } from "./confidentiality.js";
 
 const INTENT_RE = /^urn:iicp:intent:[a-z0-9_:/-]+$/;
 const MAX_TIMEOUT_MS = 120_000;
@@ -113,6 +114,7 @@ export class IicpClient {
         );
         continue;
       }
+      const rawCx = node.cx_public_key as Record<string, string> | undefined;
       nodes.push({
         node_id: String(node.node_id),
         endpoint,
@@ -123,6 +125,10 @@ export class IicpClient {
         reputation_score: node.reputation_score as number | undefined,
         health_label: node.health_label as string | undefined,
         exposure_mode: node.exposure_mode as string | undefined,
+        cx_public_key:
+          rawCx && typeof rawCx === "object" && rawCx.algorithm && rawCx.key && rawCx.key_id
+            ? { algorithm: rawCx.algorithm, key: rawCx.key, key_id: rawCx.key_id }
+            : undefined,
       });
     }
     return nodes;
@@ -151,12 +157,19 @@ export class IicpClient {
 
     const node = nodes[0];
     const taskId = req.task_id ?? randomUUID();
-    const body = {
+
+    // IICP-CX S.16 §5: encrypt payload when use_confidentiality=true and node advertises cx_public_key
+    const shouldEncrypt = this.cfg.use_confidentiality === true && node.cx_public_key != null;
+    const body: Record<string, unknown> = {
       task_id: taskId,
       intent: req.intent,
-      payload: req.payload,
       constraints: req.constraints ?? {},
     };
+    if (shouldEncrypt && node.cx_public_key) {
+      body["iicp_conf"] = encryptPayload(req.payload, node.cx_public_key, taskId, req.intent);
+    } else {
+      body["payload"] = req.payload;
+    }
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
