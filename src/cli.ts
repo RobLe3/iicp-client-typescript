@@ -100,7 +100,7 @@ function printHelp(): void {
       `  --max-concurrent N         IICP_MAX_CONCURRENT (default 4)\n` +
       `  --node-id ID               IICP_NODE_ID (auto-generated if absent)\n` +
       `  --port N                   IICP_PORT (default 9484)\n` +
-      `  --host HOST                IICP_HOST (default 0.0.0.0)\n` +
+      `  --host HOST                IICP_HOST (default :: — dual-stack IPv4+IPv6)\n` +
       `  --skip-registration        IICP_SKIP_REGISTRATION — register-free dev mode\n` +
       `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup\n` +
       `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n\n` +
@@ -837,7 +837,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       values.port !== undefined
         ? parseInt(values.port as string, 10)
         : envInt("IICP_PORT", 9484),
-    host: (values.host as string | undefined) ?? envOr("IICP_HOST", "0.0.0.0")!,
+    host: (values.host as string | undefined) ?? envOr("IICP_HOST", "::")!,
     skipRegistration:
       Boolean(values["skip-registration"]) || envBool("IICP_SKIP_REGISTRATION"),
     // Default ON — matches Python CLI behaviour; operator must set IICP_AUTO_DETECT_NAT=false to opt out.
