@@ -153,6 +153,9 @@ export class IicpNode {
   private readonly _relaySessions = new RelaySessionRegistry();
   private _activeTasks = 0;
   private _nonces = new Map<string, number>(); // nonce → expiry timestamp (ms)
+  /** Incremental task counters drained on each heartbeat for directory reporting. */
+  private _tasksSuccessPending = 0;
+  private _tasksFailedPending = 0;
   private _prom: PromLib | null = null;
   private _tasksCounter: PromCounter | null = null;
   private _latencyHistogram: PromHistogram | null = null;
@@ -380,6 +383,23 @@ export class IicpNode {
   }
 
   async heartbeat(nodeToken: string): Promise<void> {
+    // Drain incremental task counters for directory reputation reporting.
+    const ok = this._tasksSuccessPending;
+    const fail = this._tasksFailedPending;
+    this._tasksSuccessPending = 0;
+    this._tasksFailedPending = 0;
+
+    const payload: Record<string, unknown> = {
+      node_id: this._cfg.nodeId,
+      node_token: nodeToken,
+      status: "available",
+      // Live capacity after availability shaping (ADR-006).
+      max_concurrent: this._effectiveMaxConcurrent(),
+    };
+    if (ok > 0 || fail > 0) {
+      payload.metrics = { tasks_success: ok, tasks_failed: fail };
+    }
+
     const resp = await fetch(
       // /v1/heartbeat (NOT /api/v1/heartbeat) — default directoryUrl
       // already ends in /api; doubling produced 404s and prevented
@@ -394,13 +414,7 @@ export class IicpNode {
           // older directory builds.
           Authorization: `Bearer ${nodeToken}`,
         },
-        body: JSON.stringify({
-          node_id: this._cfg.nodeId,
-          node_token: nodeToken,
-          status: "available",
-          // Live capacity after availability shaping (ADR-006).
-          max_concurrent: this._effectiveMaxConcurrent(),
-        }),
+        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(this._cfg.timeoutMs),
       }
     );
@@ -835,6 +849,7 @@ export class IicpNode {
             (this._tokensCounter as unknown as { labels: (...args: unknown[]) => { inc: (n: number) => void } })
               .labels(intent).inc(tokens);
           }
+          this._tasksSuccessPending++;
           const body = JSON.stringify({ task_id: taskId, status: "completed", ...result });
           res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
           res.end(body);
@@ -845,6 +860,7 @@ export class IicpNode {
             (this._tasksCounter as unknown as { labels: (...args: unknown[]) => { inc: () => void } })
               .labels("error", intent, qos).inc();
           }
+          this._tasksFailedPending++;
           const body = JSON.stringify({ task_id: taskId, status: "error", error: { message: err.message } });
           res.writeHead(500, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
           res.end(body);

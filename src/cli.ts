@@ -27,6 +27,7 @@ import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { IicpNode } from "./node.js";
 import { IicpClient } from "./client.js";
+import { writeNodeEvent } from "./node_log.js";
 import { configureCipPolicy } from "./cip_policy.js";
 import { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 import {
@@ -58,6 +59,7 @@ interface ServeOpts {
   externalIpProbeUrl: string;
   relayWorkerEndpoint: string;
   node: string;
+  logDir?: string;
 }
 
 function envOr(name: string, fallback?: string): string | undefined {
@@ -460,6 +462,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     return 2;
   }
   const nodeId = (opts.nodeId || randomUUID()).slice(0, 36);
+  const logDir = opts.logDir;
 
   // Resolve the actual listen port before NAT detection: start at the
   // requested port (default 9484, the official IICP port) and auto-increment
@@ -655,10 +658,12 @@ async function runServe(opts: ServeOpts): Promise<number> {
       token = await node.register();
       // eslint-disable-next-line no-console
       console.log(`[iicp-node] registered as ${nodeId} (token=${(token ?? "").slice(0, 8)}…)`);
+      writeNodeEvent(nodeId, "register_ok", `endpoint=${opts.publicEndpoint || `http://localhost:${opts.port}`}`, logDir);
     } catch (exc) {
       const msg = exc instanceof Error ? exc.message : String(exc);
       // eslint-disable-next-line no-console
       console.warn(`[iicp-node] registration failed: ${msg} — continuing without heartbeat`);
+      writeNodeEvent(nodeId, "register_fail", `error=${msg}`, logDir);
     }
   }
 
@@ -667,6 +672,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     `[iicp-node] serving ${opts.intent} on ${opts.host}:${opts.port} — ` +
       `backend ${opts.backendUrl} (model=${opts.model}, max_concurrent=${opts.maxConcurrent})`,
   );
+  writeNodeEvent(nodeId, "serve_start", `port=${opts.port} model=${opts.model} intent=${opts.intent}`, logDir);
   // serve() returns a stop() handle but never resolves on its own; we wait for
   // SIGINT/SIGTERM to terminate.
   const stop = node.serve(handler, { host: opts.host, port: opts.port, nodeToken: token });
@@ -683,10 +689,13 @@ async function runServe(opts: ServeOpts): Promise<number> {
       try {
         if (token) {
           await node.deregister(token);
+          writeNodeEvent(nodeId, "deregister_ok", "", logDir);
         }
       } catch (exc) {
+        const deregMsg = exc instanceof Error ? exc.message : String(exc);
         // eslint-disable-next-line no-console
-        console.warn(`[iicp-node] deregister failed: ${exc instanceof Error ? exc.message : exc}`);
+        console.warn(`[iicp-node] deregister failed: ${deregMsg}`);
+        writeNodeEvent(nodeId, "deregister_fail", `error=${deregMsg}`, logDir);
       }
       stop();
       resolve();
@@ -806,6 +815,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "auto-detect-nat": { type: "boolean" },
       "external-ip-probe-url": { type: "string" },
       "relay-worker-endpoint": { type: "string" },
+      "log-dir": { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -852,6 +862,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
         ?? "https://api.ipify.org",
     relayWorkerEndpoint:
       (values["relay-worker-endpoint"] as string | undefined) ?? envOr("IICP_RELAY_WORKER_ENDPOINT") ?? "",
+    logDir: (values["log-dir"] as string | undefined) ?? envOr("IICP_LOG_DIR"),
   };
   return runServe(opts);
 }
