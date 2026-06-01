@@ -26,6 +26,7 @@ import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { IicpNode } from "./node.js";
+import { IicpClient } from "./client.js";
 import { configureCipPolicy } from "./cip_policy.js";
 import { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 import {
@@ -83,7 +84,8 @@ function printHelp(): void {
       `Commands:\n` +
       `  init                       Interactive wizard — set up operator + first node config\n` +
       `  list                       List node configs saved under ~/.iicp/nodes/\n` +
-      `  serve                      Register and serve a node\n\n` +
+      `  serve                      Register and serve a node\n` +
+      `  query <prompt>             Discover mesh nodes and submit a chat task\n\n` +
       `Run an IICP provider node backed by an OpenAI-compatible server.\n\n` +
       `serve required (flag or env):\n` +
       `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
@@ -101,7 +103,13 @@ function printHelp(): void {
       `  --host HOST                IICP_HOST (default 0.0.0.0)\n` +
       `  --skip-registration        IICP_SKIP_REGISTRATION — register-free dev mode\n` +
       `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup\n` +
-      `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n`,
+      `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n\n` +
+      `query optional:\n` +
+      `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
+      `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
+      `  --model NAME               Pin to a specific model on the remote node\n` +
+      `  --max-tokens N             Limit response length\n` +
+      `  --timeout-ms N             Request timeout (default 60000)\n`,
   );
 }
 
@@ -691,6 +699,74 @@ async function runServe(opts: ServeOpts): Promise<number> {
   return 0;
 }
 
+async function runQuery(argv: string[]): Promise<number> {
+  const { values, positionals } = parseArgs({
+    args: argv,
+    options: {
+      "directory-url": { type: "string" },
+      intent: { type: "string" },
+      model: { type: "string" },
+      "max-tokens": { type: "string" },
+      "timeout-ms": { type: "string" },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+
+  const prompt = positionals.join(" ").trim();
+  if (!prompt) {
+    process.stderr.write("Usage: iicp-node query <prompt> [flags]\n");
+    return 1;
+  }
+
+  const directoryUrl =
+    (values["directory-url"] as string | undefined) ??
+    process.env["IICP_DIRECTORY_URL"] ??
+    "https://iicp.network/api";
+  const intent =
+    (values["intent"] as string | undefined) ??
+    process.env["IICP_INTENT"] ??
+    "urn:iicp:intent:llm:chat:v1";
+  const timeoutMs = parseInt((values["timeout-ms"] as string | undefined) ?? "60000", 10);
+
+  const payload: Record<string, unknown> = {
+    messages: [{ role: "user", content: prompt }],
+  };
+  if (values["model"]) payload["model"] = values["model"];
+  if (values["max-tokens"]) payload["max_tokens"] = parseInt(values["max-tokens"] as string, 10);
+
+  const client = new IicpClient({ directory_url: directoryUrl, timeout_ms: timeoutMs, tls_verify: true });
+  process.stderr.write(`[iicp-node] Discovering nodes for ${intent}...\n`);
+
+  try {
+    const resp = await client.submit({
+      task_id: randomUUID(),
+      intent,
+      payload,
+    });
+    if (resp.status === "completed" && resp.result) {
+      const res = resp.result as Record<string, unknown>;
+      const content =
+        typeof res["content"] === "string"
+          ? res["content"]
+          : JSON.stringify(resp.result, null, 2);
+      process.stdout.write(content + "\n");
+      if (resp.metrics?.node_id) {
+        process.stderr.write(`[iicp-node] routed to node ${resp.metrics.node_id.slice(0, 8)}\n`);
+      }
+      if (resp.metrics?.latency_ms != null) {
+        process.stderr.write(`[iicp-node] latency ${resp.metrics.latency_ms.toFixed(0)}ms\n`);
+      }
+      return 0;
+    }
+    process.stderr.write(`[iicp-node] task status: ${resp.status}\n`);
+    return 1;
+  } catch (e) {
+    process.stderr.write(`ERROR: ${e}\n`);
+    return 1;
+  }
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     printHelp();
@@ -704,6 +780,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   const cmd = argv[0];
   if (cmd === "init") return runInit();
   if (cmd === "list") return runList();
+  if (cmd === "query") return runQuery(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();
