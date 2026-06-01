@@ -18,6 +18,9 @@
  */
 import { parseArgs } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const SDK_VERSION: string = (require("../package.json") as { version: string }).version;
 import * as net from "node:net";
 import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
@@ -692,6 +695,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     printHelp();
     return argv.length === 0 ? 2 : 0;
+  }
+  if (argv[0] === "--version" || argv[0] === "-V") {
+    process.stdout.write(`iicp-node ${SDK_VERSION}\n`);
+    return 0;
   }
 
   const cmd = argv[0];
