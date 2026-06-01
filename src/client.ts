@@ -149,7 +149,8 @@ export class IicpClient {
     const tp = _traceparent(); // SDK-06: shared trace across discover + submit
     const nodes = await this.discover(req.intent, {
       region: req.constraints?.region ?? this.cfg.region,
-      qos: req.constraints?.qos,
+      // Do not filter by qos — qos is a task execution hint, not a node capability
+      // filter. Most nodes don't declare qos support; directory returns 0 nodes.
       min_reputation: req.constraints?.min_reputation,
     }, tp);
 
@@ -161,25 +162,10 @@ export class IicpClient {
       );
     }
 
-    const node = nodes[0];
     const taskId = req.task_id ?? randomUUID();
+    const candidates = nodes.slice(0, MAX_RETRIES);
 
-    // IICP-CX S.16 §5: encrypt payload when use_confidentiality=true and node advertises cx_public_key
-    const shouldEncrypt = this.cfg.use_confidentiality === true && node.cx_public_key != null;
-    const body: Record<string, unknown> = {
-      task_id: taskId,
-      intent: req.intent,
-      constraints: req.constraints ?? {},
-    };
-    if (shouldEncrypt && node.cx_public_key) {
-      body["iicp_conf"] = encryptPayload(req.payload, node.cx_public_key, taskId, req.intent);
-    } else {
-      body["payload"] = req.payload;
-    }
-
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (req.auth?.token) {
       headers["Authorization"] = `Bearer ${req.auth.token}`;
     } else if (this.cfg.api_token) {
@@ -187,36 +173,52 @@ export class IicpClient {
     }
 
     let lastErr: IicpError | undefined;
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-        const data = await this._post(
-          `${node.endpoint}/v1/task`,
-          body,
-          req.constraints?.timeout_ms ?? this.cfg.timeout_ms,
-          headers,
-          tp,
-        );
-        return {
-          task_id: taskId,
-          result: (data as Record<string, unknown>).result,
-          status: String((data as Record<string, unknown>).status ?? "ok"),
-          metrics: (data as Record<string, unknown>).metrics as
-            | TaskResponse["metrics"]
-            | undefined,
-        };
-      } catch (err) {
-        if (
-          err instanceof IicpError &&
-          err.status_code !== undefined &&
-          TRANSIENT_STATUSES.has(err.status_code)
-        ) {
-          lastErr = err;
-          // SDK-01: exponential back-off on transient errors
-          await _sleep(200 * 2 ** attempt);
-          continue;
-        }
-        throw err;
+    for (const node of candidates) {
+      // IICP-CX S.16 §5: build body per node (cx_public_key may differ)
+      const shouldEncrypt = this.cfg.use_confidentiality === true && node.cx_public_key != null;
+      const body: Record<string, unknown> = {
+        task_id: taskId,
+        intent: req.intent,
+        constraints: req.constraints ?? {},
+      };
+      if (shouldEncrypt && node.cx_public_key) {
+        body["iicp_conf"] = encryptPayload(req.payload, node.cx_public_key, taskId, req.intent);
+      } else {
+        body["payload"] = req.payload;
       }
+
+      let nodeConnected = true;
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          const data = await this._post(
+            `${node.endpoint}/v1/task`,
+            body,
+            req.constraints?.timeout_ms ?? this.cfg.timeout_ms,
+            headers,
+            tp,
+          );
+          return {
+            task_id: taskId,
+            result: (data as Record<string, unknown>).result,
+            status: String((data as Record<string, unknown>).status ?? "ok"),
+            metrics: (data as Record<string, unknown>).metrics as
+              | TaskResponse["metrics"]
+              | undefined,
+          };
+        } catch (err) {
+          if (err instanceof IicpError) {
+            lastErr = err;
+            // Connection error → skip to next node immediately
+            if (!err.status_code) { nodeConnected = false; break; }
+            if (TRANSIENT_STATUSES.has(err.status_code)) {
+              await _sleep(200 * 2 ** attempt);
+              continue; // retry same node on 5xx
+            }
+          }
+          throw err; // non-retryable
+        }
+      }
+      if (!nodeConnected) continue; // unreachable node, try next
     }
     throw lastErr!;
   }
