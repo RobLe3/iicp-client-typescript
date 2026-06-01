@@ -619,6 +619,25 @@ async function runServe(opts: ServeOpts): Promise<number> {
     // best-effort; no-op on error
   }
 
+  // NAT-4 guard: if endpoint is non-routable and no relay configured, skip
+  // registration to avoid a confusing 422 from the directory's RoutableEndpoint check.
+  const epLocal =
+    publicEndpoint.startsWith("http://localhost") ||
+    publicEndpoint.startsWith("http://127.") ||
+    publicEndpoint.startsWith("http://0.0.0.0") ||
+    publicEndpoint.startsWith("http://192.168.") ||
+    publicEndpoint.startsWith("http://10.");
+  if (epLocal && !opts.relayWorkerEndpoint && !opts.skipRegistration) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[iicp-node] no routable endpoint detected and no relay configured — " +
+        "skipping directory registration. Node will accept direct connections " +
+        "but will not appear in discover results. " +
+        "Set IICP_PUBLIC_ENDPOINT=<url> or IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to register.",
+    );
+    opts.skipRegistration = true;
+  }
+
   let token: string | undefined;
   if (!opts.skipRegistration) {
     try {
