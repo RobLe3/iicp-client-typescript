@@ -23,6 +23,36 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 3;
 const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
+/** SSRF guard: return true only if url is safe to use as a node endpoint (#388). */
+function _isSsrfSafe(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) return false;
+  const host = parsed.hostname.toLowerCase();
+  if (!host) return false;
+  if (["localhost", "0.0.0.0", "::1", "::"].includes(host)) return false;
+  const blockedSuffixes = [".local", ".internal", ".lan", ".test", ".invalid", ".localhost"];
+  if (blockedSuffixes.some((s) => host.endsWith(s))) return false;
+  if (!host.includes(".")) return false; // bare Docker service name
+  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4Match) {
+    const [a, b, c, d] = ipv4Match.slice(1).map(Number);
+    if (a === 10) return false;                                      // RFC1918 10/8
+    if (a === 172 && b >= 16 && b <= 31) return false;              // RFC1918 172.16/12
+    if (a === 192 && b === 168) return false;                       // RFC1918 192.168/16
+    if (a === 127) return false;                                     // loopback
+    if (a === 169 && b === 254) return false;                       // link-local / metadata
+    if (a === 100 && b >= 64 && b <= 127) return false;            // CGNAT
+    if (a === 0) return false;                                      // this-network
+    void c; void d;
+  }
+  return true;
+}
+
 const DEFAULT_CONFIG: ClientConfig = {
   directory_url: "https://iicp.network",
   timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -34,6 +64,13 @@ export class IicpClient {
 
   constructor(config?: Partial<ClientConfig>) {
     const merged: ClientConfig = { ...DEFAULT_CONFIG, ...config };
+    if (merged.tls_verify === false) {
+      console.warn(
+        "[iicp-client] tls_verify: false has no effect — TLS certificate verification " +
+          "cannot be disabled via this config field. Use NODE_TLS_REJECT_UNAUTHORIZED=0 " +
+          "in the environment if you need to disable cert verification for local testing.",
+      );
+    }
     // SDK-04: reject oversized timeouts at construction time
     if (merged.timeout_ms > MAX_TIMEOUT_MS) {
       throw new IicpError(
@@ -66,11 +103,19 @@ export class IicpClient {
       traceparent,
     );
     const raw: unknown[] = (data as { nodes?: unknown[] }).nodes ?? [];
-    return raw.map((n) => {
+    const nodes: Node[] = [];
+    for (const n of raw) {
       const node = n as Record<string, unknown>;
-      return {
+      const endpoint = String(node.endpoint ?? "");
+      if (!_isSsrfSafe(endpoint)) {
+        console.warn(
+          `[iicp-client] SSRF guard: skipping node ${String(node.node_id ?? "?").slice(0, 8)} — endpoint ${endpoint} is not publicly routable`,
+        );
+        continue;
+      }
+      nodes.push({
         node_id: String(node.node_id),
-        endpoint: String(node.endpoint ?? ""),
+        endpoint,
         score: Number(node.score ?? 0),
         available: Boolean(node.available ?? true),
         region: String(node.region ?? ""),
@@ -78,8 +123,9 @@ export class IicpClient {
         reputation_score: node.reputation_score as number | undefined,
         health_label: node.health_label as string | undefined,
         exposure_mode: node.exposure_mode as string | undefined,
-      };
-    });
+      });
+    }
+    return nodes;
   }
 
   /**

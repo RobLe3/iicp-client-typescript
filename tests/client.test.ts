@@ -80,7 +80,7 @@ describe("intent validation", () => {
       const u = url.toString();
       if (u.includes("discover")) {
         return jsonResponse({
-          nodes: [{ node_id: "abc", endpoint: "http://fake-node.test", score: 0.9, available: true, region: "eu" }],
+          nodes: [{ node_id: "abc", endpoint: "http://1.2.3.4:8080", score: 0.9, available: true, region: "eu" }],
         });
       }
       // Chat node endpoint returns 503 — causes an error, but NOT SDK-02
@@ -110,8 +110,8 @@ describe("discover", () => {
       if (u.includes("/api/v1/discover")) {
         return jsonResponse({
           nodes: [
-            { node_id: "n1", endpoint: "https://node1.test", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct" },
-            { node_id: "n2", endpoint: "https://node2.test", score: 0.80, available: true, region: "us" },
+            { node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct" },
+            { node_id: "n2", endpoint: "https://1.2.3.5:9484", score: 0.80, available: true, region: "us" },
           ],
         });
       }
@@ -206,7 +206,7 @@ describe("submit", () => {
     const restore = mockFetch((url, init) => {
       const u = url.toString();
       if (u.includes("discover")) {
-        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://fake-node.test", score: 1, available: true, region: "eu" }] });
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://1.2.3.4:8080", score: 1, available: true, region: "eu" }] });
       }
       capturedHeaders = Object.fromEntries(new Headers(init?.headers).entries());
       return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
@@ -417,7 +417,7 @@ describe("SDK-06 traceparent", () => {
       const headers = Object.fromEntries(new Headers(init?.headers).entries());
       captured.push(headers["traceparent"] ?? "");
       if (u.includes("discover")) {
-        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://fake-node.test", score: 1, available: true, region: "eu" }] });
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://1.2.3.4:8080", score: 1, available: true, region: "eu" }] });
       }
       return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
     });
