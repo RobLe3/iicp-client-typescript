@@ -133,8 +133,8 @@ function deriveExposureMode(
   if (profile.tier === 4 || !profile.publicEndpoint) {
     return ipv4.cgnat ? "ipv4_cgnat_blocked" : "outbound_only";
   }
-  // tier 0 or 1
-  const ipv4Ok = !!profile.publicEndpoint;
+  // tier 0 or 1 — IPv6 GUA endpoints contain '['; must not be mistaken for IPv4.
+  const ipv4Ok = !!profile.publicEndpoint && !profile.publicEndpoint.includes("[");
   if (ipv4Ok && ipv6.routable && ipv6.pinholeOk) return "dual_stack_available";
   if (!ipv4Ok && ipv6.routable) {
     return ipv6.pinholeOk ? "ipv6_direct_pinhole_available" : "ipv6_direct_firewall_required";
