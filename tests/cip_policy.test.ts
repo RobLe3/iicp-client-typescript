@@ -169,3 +169,17 @@ describe("module-level cip_policy state", () => {
     assert.equal(p.maxConcurrentRemote, 5);
   });
 });
+
+// #403 — per-task admission: tool-execution intent gate (parity with adapter cip_gate)
+describe("CIP permitsIntent (#403)", () => {
+  it("rejects tool-domain intents unless allowToolExecution", () => {
+    const p = new CooperativeInferencePolicy();
+    assert.equal(p.allowToolExecution, false);
+    assert.equal(p.permitsIntent("urn:iicp:intent:llm:chat:v1"), true); // non-tool ok
+    assert.equal(p.permitsIntent("urn:iicp:intent:tool:shell:v1"), false); // tool denied
+    const allowed = new CooperativeInferencePolicy({ allowToolExecution: true });
+    assert.equal(allowed.permitsIntent("urn:iicp:intent:tool:shell:v1"), true);
+    const en = new CooperativeInferencePolicy({ enabled: true, allowToolExecution: true });
+    assert.equal(en.asRegisterPolicyBlock().allow_tool_execution, true);
+  });
+});

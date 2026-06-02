@@ -18,6 +18,8 @@ export interface CooperativeInferencePolicyOptions {
   /** Bounded to [1, 60000]ms. */
   maxWorkerTimeoutMs?: number;
   maxConcurrentRemote?: number;
+  /** #403 — allow tool-execution-domain intents (default false). */
+  allowToolExecution?: boolean;
 }
 
 /** Safe-by-default CIP policy with the S.12 §2.2 capacity gate built-in. */
@@ -28,6 +30,7 @@ export class CooperativeInferencePolicy {
   readonly maxReplicas: number;
   readonly maxWorkerTimeoutMs: number;
   readonly maxConcurrentRemote: number;
+  readonly allowToolExecution: boolean;
   private _inFlight = 0;
 
   constructor(opts: CooperativeInferencePolicyOptions = {}) {
@@ -37,6 +40,18 @@ export class CooperativeInferencePolicy {
     this.maxReplicas = Math.max(1, opts.maxReplicas ?? 3);
     this.maxWorkerTimeoutMs = Math.max(1, Math.min(60_000, opts.maxWorkerTimeoutMs ?? 30_000));
     this.maxConcurrentRemote = Math.max(1, opts.maxConcurrentRemote ?? 2);
+    // #403 — per-task admission: tool-execution intents rejected unless opted in.
+    this.allowToolExecution = opts.allowToolExecution ?? false;
+  }
+
+  /**
+   * #403 — per-task admission: reject tool-execution-domain intents unless the
+   * operator opted in via allowToolExecution. Mirrors the adapter cip_gate.
+   * Intent URN form: urn:iicp:intent:<domain>:... — domain is segment index 3.
+   */
+  permitsIntent(intent: string): boolean {
+    const domain = intent.split(":")[3] ?? "";
+    return this.allowToolExecution || domain !== "tool";
   }
 
   /** CIP-W01: returns true if this node may act as a CIP coordinator. */
@@ -75,6 +90,7 @@ export class CooperativeInferencePolicy {
     if (!this.enabled) return {};
     return {
       allow_remote_inference: this.allowWorker,
+      allow_tool_execution: this.allowToolExecution,
     };
   }
 }

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.27] — 2026-06-02
+
+### Fixed — CIP policy now enforced on incoming tasks (#403, security)
+
+- **`CooperativeInferencePolicy.allowToolExecution`** + **`permitsIntent(intent)`**, and the
+  serve `/v1/task` handler now **rejects tool-execution-domain intents with 403**
+  (`tool_execution_denied`) unless the operator opted in. Previously the node *declared* its
+  CIP policy but never *enforced* it — a node with `allowToolExecution:false` would still run
+  tool-execution tasks. The register policy block now also surfaces `allow_tool_execution`.
+  Ported from the original adapter `cip_gate`; full parity with the Python + Rust SDKs.
+
 ## [0.7.26] — 2026-06-02
 
 ### Added — transport on parsed discover nodes (#397)

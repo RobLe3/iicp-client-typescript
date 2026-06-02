@@ -15,13 +15,14 @@ import { AvailabilityEvaluator, type Window } from "./availability.js";
 import { IdempotencyGuard } from "./idempotency.js";
 import { PeerManager } from "./peer_manager.js";
 import { RelaySessionRegistry } from "./relay_session.js";
+import { getCipPolicy } from "./cip_policy.js"; // #403 — per-task admission gate
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.7.26";
+const SDK_VERSION = "0.7.27";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -797,6 +798,23 @@ export class IicpNode {
       const constraints = task.constraints as Record<string, unknown> | undefined;
       const qos = (constraints?.qos_class as string | undefined) ?? "best_effort";
       const taskId = (task.task_id as string | undefined) ?? "";
+
+      // #403 — CIP per-task admission gate (parity with the adapter cip_gate):
+      // reject tool-execution-domain intents unless the operator opted in via
+      // cipPolicy.allowToolExecution.
+      const cipPol = this._cfg.cipPolicy ?? getCipPolicy();
+      if (cipPol && typeof cipPol.permitsIntent === "function" && !cipPol.permitsIntent(intent)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              code: "tool_execution_denied",
+              message: "Tool-execution intents are not permitted by this node's CIP policy",
+            },
+          }),
+        );
+        return;
+      }
 
       // QoS-aware admission — IICP-E021. realtime/interactive wait briefly for a
       // slot; batch/best-effort/unspecified fail fast (ADR-006; see scheduler.ts).
