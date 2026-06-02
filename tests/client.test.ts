@@ -110,7 +110,7 @@ describe("discover", () => {
       if (u.includes("/v1/discover")) {
         return jsonResponse({
           nodes: [
-            { node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct" },
+            { node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct", transport: ["https", "iicp-native"] },
             { node_id: "n2", endpoint: "https://1.2.3.5:9484", score: 0.80, available: true, region: "us" },
           ],
         });
@@ -127,6 +127,8 @@ describe("discover", () => {
     // ADR-044 — health_label + exposure_mode parsed (directory v1.10.0+)
     assert.equal(nodes[0].health_label, "healthy");
     assert.equal(nodes[0].exposure_mode, "ipv4_public_direct");
+    // #397 — transport parsed from discover
+    assert.deepEqual(nodes[0].transport, ["https", "iicp-native"]);
     // absent against older directory → undefined, no break
     assert.equal(nodes[1].health_label, undefined);
     restore();

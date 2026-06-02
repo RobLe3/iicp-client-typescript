@@ -76,6 +76,8 @@ export interface Node {
   exposure_mode?: string;
   // IICP-CX S.16 §3.1 — X25519 public key for E2E payload confidentiality.
   cx_public_key?: CxPublicKey;
+  // #397 — transport protocols the node speaks (e.g. ["https","iicp-native"]).
+  transport?: string[];
 }
 
 export interface ChatMessage {

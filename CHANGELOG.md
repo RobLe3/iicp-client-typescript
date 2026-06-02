@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.26] — 2026-06-02
+
+### Added — transport on parsed discover nodes (#397)
+
+- `Node.transport?: string[]` — the directory now advertises which protocols each
+  node speaks (`["https","iicp-native"]`), parsed from the discover response so
+  clients can prefer the native binary path without a second round-trip to detail.
+  Parity with the Python + Rust SDKs and the PHP + Rust directories.
+
 ## [0.7.25] — 2026-06-02
 
 ### Fixed — node recovers after the directory drops it (#399)

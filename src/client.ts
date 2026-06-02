@@ -135,6 +135,10 @@ export class IicpClient {
           rawCx && typeof rawCx === "object" && rawCx.algorithm && rawCx.key && rawCx.key_id
             ? { algorithm: rawCx.algorithm, key: rawCx.key, key_id: rawCx.key_id }
             : undefined,
+        // #397 — transport protocols (http/https/iicp-native) when the directory emits them.
+        transport: Array.isArray(node.transport)
+          ? (node.transport as unknown[]).map(String)
+          : undefined,
       });
     }
     return nodes;
