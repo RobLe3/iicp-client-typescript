@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.24] — 2026-06-02
+
+### Changed — onboarding clarity
+
+- **`iicp-node init` dependency check** now distinguishes opt-in capabilities
+  from real problems. Optional packages that are not installed (`cbor-x` for
+  native IICP-TCP transport, `nat-upnp`, `prom-client` for `/metrics`) render
+  with a neutral `○` marker and an explicit "(optional — not installed)" note,
+  plus a one-line "your node runs without them" reassurance, instead of the
+  alarming `✗`. The auto-install prompt is reworded accordingly. No behavior
+  change to the node itself — purely first-run output. Parity with the Rust
+  and Python SDKs (same iteration).
+
 ## [0.5.3] — 2026-05-27
 
 ### Fixed — **upgrade required for binary IICP TCP transport**

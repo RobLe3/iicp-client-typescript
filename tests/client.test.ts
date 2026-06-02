@@ -107,7 +107,7 @@ describe("discover", () => {
   it("SDK-03: returns parsed nodes from directory", async () => {
     const restore = mockFetch((url) => {
       const u = url.toString();
-      if (u.includes("/api/v1/discover")) {
+      if (u.includes("/v1/discover")) {
         return jsonResponse({
           nodes: [
             { node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct" },

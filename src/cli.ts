@@ -119,7 +119,11 @@ function printHelp(): void {
 
 interface DepIssue {
   name: string;
-  severity: "ok" | "warn" | "missing";
+  // "ok"       — present
+  // "optional" — opt-in capability not installed; node runs fine without it
+  // "warn"     — degraded runtime state (backend unreachable, no IPv6)
+  // "missing"  — required dependency absent
+  severity: "ok" | "optional" | "warn" | "missing";
   message: string;
   installable: boolean;
   npmExtra: string;
@@ -154,7 +158,7 @@ async function checkDependencies(backendUrl: string): Promise<DepIssue[]> {
       await import(mod);
       out.push({ name: mod, severity: "ok", message: purpose, installable: false, npmExtra: "" });
     } catch {
-      out.push({ name: mod, severity: "missing", message: `${purpose} (not installed)`, installable: true, npmExtra: npmName });
+      out.push({ name: mod, severity: "optional", message: `${purpose} (optional — not installed)`, installable: true, npmExtra: npmName });
     }
   }
 
@@ -177,7 +181,7 @@ async function checkDependencies(backendUrl: string): Promise<DepIssue[]> {
 }
 
 function printDepStatus(issues: DepIssue[]): void {
-  const glyph: Record<string, string> = { ok: "  ✓", warn: "  !", missing: "  ✗" };
+  const glyph: Record<string, string> = { ok: "  ✓", optional: "  ○", warn: "  !", missing: "  ✗" };
   for (const i of issues) {
     process.stdout.write(`${glyph[i.severity] ?? "  ?"} ${i.name.padEnd(18)}  ${i.message}\n`);
   }
@@ -187,7 +191,7 @@ function installMissing(issues: DepIssue[]): void {
   const extras = Array.from(
     new Set(
       issues
-        .filter((i) => i.severity === "missing" && i.installable && i.npmExtra)
+        .filter((i) => (i.severity === "optional" || i.severity === "missing") && i.installable && i.npmExtra)
         .map((i) => i.npmExtra),
     ),
   ).sort();
@@ -274,13 +278,13 @@ async function runInit(): Promise<number> {
     process.stdout.write(`Checking dependencies …\n`);
     const issues = await checkDependencies(backend);
     printDepStatus(issues);
-    const missingCount = issues.filter((i) => i.severity === "missing" && i.installable).length;
-    if (missingCount > 0) {
-      const yn = (await ask(rl, `\nInstall ${missingCount} missing optional package(s)? [Y/n]`, "y")).toLowerCase();
+    const optionalCount = issues.filter((i) => (i.severity === "optional" || i.severity === "missing") && i.installable).length;
+    if (optionalCount > 0) {
+      const yn = (await ask(rl, `\nEnable ${optionalCount} optional package(s)? (your node runs without them) [Y/n]`, "y")).toLowerCase();
       if (yn === "" || yn === "y" || yn === "yes") {
         installMissing(issues);
       } else {
-        process.stdout.write(`  ! skipping — install later with: npm install <pkg>\n`);
+        process.stdout.write(`  ○ skipping — enable later with: npm install <pkg>\n`);
       }
     }
 
