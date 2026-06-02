@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.25] — 2026-06-02
+
+### Fixed — node recovers after the directory drops it (#399)
+
+- **Heartbeat loop now re-registers on a node-unknown rejection.** Previously a
+  `404`/`401`/`410` heartbeat (directory deregistered the node on a prior
+  shutdown, TTL-expired it after a gap, or restarted and forgot it) was swallowed
+  silently — the node kept heartbeating into the void and never reappeared in the
+  directory until `serve` was restarted. The loop now detects the rejection,
+  re-registers, and resumes with the fresh token. Parity with the Python + Rust SDKs.
+- **`SDK_VERSION`** corrected `0.7.8` → `0.7.25` (was stale; the register payload
+  had been reporting `0.7.8` regardless of the package version).
+
 ## [0.7.24] — 2026-06-02
 
 ### Changed — onboarding clarity

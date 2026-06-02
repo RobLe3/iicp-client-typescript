@@ -21,7 +21,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.7.8";
+const SDK_VERSION = "0.7.25";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -418,7 +418,13 @@ export class IicpNode {
         signal: AbortSignal.timeout(this._cfg.timeoutMs),
       }
     );
-    if (!resp.ok) throw new Error(`Heartbeat failed: ${resp.status}`);
+    if (!resp.ok) {
+      // #399 — carry the status so the heartbeat loop can detect a
+      // node-unknown rejection (401/404/410) and re-register.
+      throw Object.assign(new Error(`Heartbeat failed: ${resp.status}`), {
+        status: resp.status,
+      });
+    }
   }
 
   /**
@@ -526,8 +532,21 @@ export class IicpNode {
 
     let hbTimer: ReturnType<typeof setInterval> | undefined;
     if (nodeToken) {
+      let currentToken = nodeToken;
       hbTimer = setInterval(() => {
-        this.heartbeat(nodeToken).catch(() => undefined);
+        this.heartbeat(currentToken).catch(async (err: unknown) => {
+          // #399 — directory dropped the node (deregistered / TTL-expired /
+          // directory restarted). Re-register and resume with the fresh token
+          // instead of heartbeating into the void forever.
+          const status = (err as { status?: number } | undefined)?.status;
+          if (status === 401 || status === 404 || status === 410) {
+            try {
+              currentToken = await this.register();
+            } catch {
+              /* re-registration failed — retry on next heartbeat tick */
+            }
+          }
+        });
       }, HEARTBEAT_INTERVAL_MS);
     }
     if (this._cfg.enableMesh) {
