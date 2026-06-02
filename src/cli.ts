@@ -43,7 +43,7 @@ import {
   type NodeIdentity,
 } from "./identity.js";
 
-interface ServeOpts {
+export interface ServeOpts {
   backendUrl: string;
   backendType: string;
   /** #5 — Bearer key for an auth-requiring OpenAI-compat backend (LM Studio, hosted). Empty = none. */
@@ -398,7 +398,7 @@ function findAvailablePort(host: string, start: number, maxTries = 64): Promise<
 
 // ── serve ───────────────────────────────────────────────────────────────────
 
-function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
+export function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts {
   return {
     ...opts,
     // Onboarding: default to Ollama's well-known local port so only --model is required.
