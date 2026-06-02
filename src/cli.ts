@@ -656,18 +656,33 @@ async function runServe(opts: ServeOpts): Promise<number> {
     opts.skipRegistration = true;
   }
 
+  // #404 — register with bounded backoff retry. On persistent failure, pass an
+  // empty token (NOT undefined) so the heartbeat loop still starts and re-registers
+  // on the first 401 (#399 path) once the directory is reachable — the self-healing
+  // watchdog. undefined is reserved for --skip-registration (no heartbeat by design).
   let token: string | undefined;
   if (!opts.skipRegistration) {
-    try {
-      token = await node.register();
-      // eslint-disable-next-line no-console
-      console.log(`[iicp-node] registered as ${nodeId} (token=${(token ?? "").slice(0, 8)}…)`);
-      writeNodeEvent(nodeId, "register_ok", `endpoint=${opts.publicEndpoint || `http://localhost:${opts.port}`}`, logDir);
-    } catch (exc) {
-      const msg = exc instanceof Error ? exc.message : String(exc);
-      // eslint-disable-next-line no-console
-      console.warn(`[iicp-node] registration failed: ${msg} — continuing without heartbeat`);
-      writeNodeEvent(nodeId, "register_fail", `error=${msg}`, logDir);
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        token = await node.register();
+        // eslint-disable-next-line no-console
+        console.log(`[iicp-node] registered as ${nodeId} (token=${(token ?? "").slice(0, 8)}…)`);
+        writeNodeEvent(nodeId, "register_ok", `endpoint=${opts.publicEndpoint || `http://localhost:${opts.port}`}`, logDir);
+        break;
+      } catch (exc) {
+        const msg = exc instanceof Error ? exc.message : String(exc);
+        if (attempt >= 3) {
+          // eslint-disable-next-line no-console
+          console.warn(`[iicp-node] registration failed after ${attempt} attempts: ${msg} — starting heartbeat loop anyway; it will re-register on the first 401`);
+          writeNodeEvent(nodeId, "register_fail", `error=${msg} attempts=${attempt}`, logDir);
+          token = ""; // empty (not undefined) → heartbeat loop starts and self-heals
+          break;
+        }
+        const backoff = 2 ** attempt;
+        // eslint-disable-next-line no-console
+        console.warn(`[iicp-node] registration attempt ${attempt} failed: ${msg} — retrying in ${backoff}s`);
+        await new Promise((r) => setTimeout(r, backoff * 1000));
+      }
     }
   }
 

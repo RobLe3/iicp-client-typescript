@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.28] — 2026-06-02
+
+### Fixed — node no longer needs a manual restart to reconnect (#404, reliability)
+
+- **Registration retries with backoff** at startup (3 attempts) instead of giving up
+  and running with no heartbeat. On persistent failure the heartbeat loop **still
+  starts** (with an empty token) and re-registers on the first 401 (the #399 path) —
+  a self-healing watchdog. Previously a transient startup failure, or the heartbeat
+  loop stopping, left the node dormant in the directory until the operator killed and
+  restarted the process. Parity with the Python + Rust SDKs.
+
 ## [0.7.27] — 2026-06-02
 
 ### Fixed — CIP policy now enforced on incoming tasks (#403, security)

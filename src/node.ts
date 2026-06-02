@@ -22,7 +22,7 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.7.27";
+const SDK_VERSION = "0.7.28";
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -532,7 +532,9 @@ export class IicpNode {
     server.listen(port, host);
 
     let hbTimer: ReturnType<typeof setInterval> | undefined;
-    if (nodeToken) {
+    // #404 — start the heartbeat loop when a token is present OR empty (register
+    // failed → loop self-heals via re-register on 401). undefined = --skip-registration.
+    if (nodeToken !== undefined) {
       let currentToken = nodeToken;
       hbTimer = setInterval(() => {
         this.heartbeat(currentToken).catch(async (err: unknown) => {
