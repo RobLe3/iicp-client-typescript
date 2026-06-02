@@ -29,6 +29,7 @@ import { IicpNode } from "./node.js";
 import { IicpClient } from "./client.js";
 import { writeNodeEvent } from "./node_log.js";
 import { configureCipPolicy } from "./cip_policy.js";
+import { InstanceLock, NodeAlreadyServingError } from "./instance_lock.js";
 import { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 import {
   configDir,
@@ -55,6 +56,7 @@ interface ServeOpts {
   port: number;
   host: string;
   skipRegistration: boolean;
+  force: boolean;
   autoDetectNat: boolean;
   externalIpProbeUrl: string;
   relayWorkerEndpoint: string;
@@ -468,6 +470,19 @@ async function runServe(opts: ServeOpts): Promise<number> {
   const nodeId = (opts.nodeId || randomUUID()).slice(0, 36);
   const logDir = opts.logDir;
 
+  // #405 — single-instance lock: refuse a second LIVE process for this node_id
+  // (the token-rotation war). Distinct node_ids are unaffected. Fails open.
+  let instanceLock: InstanceLock;
+  try {
+    instanceLock = InstanceLock.acquire(nodeId, opts.force);
+  } catch (exc) {
+    if (exc instanceof NodeAlreadyServingError) {
+      console.error(`[iicp-node] ${exc.message}`);
+      process.exit(2);
+    }
+    throw exc;
+  }
+
   // Resolve the actual listen port before NAT detection: start at the
   // requested port (default 9484, the official IICP port) and auto-increment
   // to the next free port. Keeps one port per node (multiple models share it)
@@ -717,6 +732,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
         writeNodeEvent(nodeId, "deregister_fail", `error=${deregMsg}`, logDir);
       }
       stop();
+      instanceLock.release(); // #405 — free the pidfile on shutdown
       resolve();
     };
     process.once("SIGINT", () => void shutdown("SIGINT"));
@@ -831,6 +847,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       port: { type: "string" },
       host: { type: "string" },
       "skip-registration": { type: "boolean" },
+      force: { type: "boolean" },
       "auto-detect-nat": { type: "boolean" },
       "external-ip-probe-url": { type: "string" },
       "relay-worker-endpoint": { type: "string" },
@@ -869,6 +886,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     host: (values.host as string | undefined) ?? envOr("IICP_HOST", "::")!,
     skipRegistration:
       Boolean(values["skip-registration"]) || envBool("IICP_SKIP_REGISTRATION"),
+    force: Boolean(values["force"]) || envBool("IICP_FORCE"),
     // Default ON — matches Python CLI behaviour; operator must set IICP_AUTO_DETECT_NAT=false to opt out.
     autoDetectNat:
       values["auto-detect-nat"] !== undefined

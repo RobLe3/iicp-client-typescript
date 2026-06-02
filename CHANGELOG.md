@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.29] — 2026-06-02
+
+### Fixed — single-instance lock prevents duplicate-node thrash (#405)
+
+- `serve` now holds a per-node_id pidfile (`~/.iicp/run/<node_id>.pid`) and **refuses
+  a second live process for the same node_id** (`--force` / `IICP_FORCE` to take over).
+  Two processes for one node_id otherwise fight — each registration rotates the token
+  and invalidates the other's, causing a 401/re-register war that flaps the node.
+  Distinct node_ids are unaffected (a fleet of N nodes runs fine). Fail-open. Parity
+  with Python + Rust.
+
 ## [0.7.28] — 2026-06-02
 
 ### Fixed — node no longer needs a manual restart to reconnect (#404, reliability)
