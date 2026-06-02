@@ -198,3 +198,49 @@ describe("IicpNode server", () => {
     assert.equal((captured._trace as Record<string, unknown>)?.traceparent, tp);
   });
 });
+
+// #404 — heartbeat self-heal: a tick on an empty/invalid token re-registers
+describe("heartbeat self-heal (#404)", () => {
+  function cfg(): NodeConfig {
+    return {
+      nodeId: "t",
+      endpoint: "http://t.local",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      region: "r",
+      model: "m",
+      maxConcurrent: 1,
+    } as NodeConfig;
+  }
+
+  it("re-registers when a heartbeat tick is rejected with 401 (empty startup token)", async () => {
+    const node = new IicpNode(cfg());
+    let hbCalls = 0;
+    let regCalls = 0;
+    // empty token → directory rejects with 401
+    (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat = async (t: string) => {
+      hbCalls++;
+      if (t === "") throw Object.assign(new Error("Heartbeat failed: 401"), { status: 401 });
+    };
+    (node as unknown as { register: () => Promise<string> }).register = async () => {
+      regCalls++;
+      return "recovered-token";
+    };
+    const next = await (node as unknown as { _heartbeatTick: (t: string) => Promise<string> })._heartbeatTick("");
+    assert.equal(regCalls, 1, "empty-token tick must re-register on 401");
+    assert.equal(next, "recovered-token", "tick must return the recovered token for the next tick");
+    assert.equal(hbCalls, 1);
+  });
+
+  it("keeps the same token on a healthy tick", async () => {
+    const node = new IicpNode(cfg());
+    (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat = async () => undefined;
+    let regCalls = 0;
+    (node as unknown as { register: () => Promise<string> }).register = async () => {
+      regCalls++;
+      return "x";
+    };
+    const next = await (node as unknown as { _heartbeatTick: (t: string) => Promise<string> })._heartbeatTick("good-token");
+    assert.equal(next, "good-token");
+    assert.equal(regCalls, 0, "healthy tick must not re-register");
+  });
+});

@@ -429,6 +429,29 @@ export class IicpNode {
   }
 
   /**
+   * #404 — one heartbeat tick: send a heartbeat, and on a node-unknown rejection
+   * (401/404/410) re-register and return the fresh token. Returns the token to use
+   * on the next tick. Extracted from the setInterval loop so the self-heal behavior
+   * is unit-testable (the interval loop itself isn't).
+   */
+  async _heartbeatTick(token: string): Promise<string> {
+    try {
+      await this.heartbeat(token);
+      return token;
+    } catch (err: unknown) {
+      const status = (err as { status?: number } | undefined)?.status;
+      if (status === 401 || status === 404 || status === 410) {
+        try {
+          return await this.register();
+        } catch {
+          /* re-registration failed — retry on the next tick with the same token */
+        }
+      }
+      return token;
+    }
+  }
+
+  /**
    * Tell the directory this node is going away.
    *
    * Mirrors iicp_client.IicpNode.deregister (Python iter-1471). Best-effort:
@@ -537,18 +560,8 @@ export class IicpNode {
     if (nodeToken !== undefined) {
       let currentToken = nodeToken;
       hbTimer = setInterval(() => {
-        this.heartbeat(currentToken).catch(async (err: unknown) => {
-          // #399 — directory dropped the node (deregistered / TTL-expired /
-          // directory restarted). Re-register and resume with the fresh token
-          // instead of heartbeating into the void forever.
-          const status = (err as { status?: number } | undefined)?.status;
-          if (status === 401 || status === 404 || status === 410) {
-            try {
-              currentToken = await this.register();
-            } catch {
-              /* re-registration failed — retry on next heartbeat tick */
-            }
-          }
+        void this._heartbeatTick(currentToken).then((t) => {
+          currentToken = t;
         });
       }, HEARTBEAT_INTERVAL_MS);
     }
