@@ -58,6 +58,32 @@ describe("openaiCompatHandler", () => {
     assert.equal(r.result.id, "chatcmpl-test");
   });
 
+  it("#5 api key → Authorization: Bearer header on backend calls", async () => {
+    mockFetchJson({ id: "chatcmpl-key", choices: [{ message: { content: "ok" } }] });
+    const handler = openaiCompatHandler({
+      baseUrl: "http://localhost:1234/v1",
+      model: "qwen2.5-coder-14b-instruct-mlx",
+      apiKey: "sk-lm-test",
+    });
+    await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [{ role: "user", content: "hi" }] },
+    });
+    const headers = new Headers(lastRequest!.init!.headers);
+    assert.equal(headers.get("authorization"), "Bearer sk-lm-test");
+  });
+
+  it("#5 no api key → no Authorization header (local Ollama back-compat)", async () => {
+    mockFetchJson({ choices: [{ message: { content: "ok" } }] });
+    const handler = openaiCompatHandler({ model: "qwen2.5:0.5b" });
+    await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [{ role: "user", content: "hi" }] },
+    });
+    const headers = new Headers(lastRequest!.init!.headers);
+    assert.equal(headers.get("authorization"), null);
+  });
+
   it("completion intent → /completions path", async () => {
     mockFetchJson({ choices: [{ text: "PONG" }] });
     const handler = openaiCompatHandler({ model: "q" });

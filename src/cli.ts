@@ -46,6 +46,8 @@ import {
 interface ServeOpts {
   backendUrl: string;
   backendType: string;
+  /** #5 — Bearer key for an auth-requiring OpenAI-compat backend (LM Studio, hosted). Empty = none. */
+  backendApiKey: string;
   model: string;
   publicEndpoint: string;
   directoryUrl: string;
@@ -97,6 +99,7 @@ function printHelp(): void {
       `serve optional:\n` +
       `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434)\n` +
       `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp (default openai_compat)\n` +
+      `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for an auth'd backend (LM Studio, hosted)\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --region REGION            IICP_REGION (default eu-central)\n` +
@@ -629,6 +632,8 @@ async function runServe(opts: ServeOpts): Promise<number> {
   const handler = getBackendHandler(opts.backendType, {
     baseUrl: _baseUrl,
     model: opts.model,
+    // #5 — Bearer key for auth'd backends (LM Studio, hosted). Empty/undefined = no header.
+    apiKey: opts.backendApiKey || undefined,
   });
 
   // GAP-6: probe backend for all available models so the registration advertises
@@ -837,6 +842,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       node: { type: "string" },
       "backend-url": { type: "string" },
       "backend-type": { type: "string" },
+      "backend-api-key": { type: "string" },
       model: { type: "string" },
       "public-endpoint": { type: "string" },
       "directory-url": { type: "string" },
@@ -866,6 +872,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     backendType:
       (values["backend-type"] as string | undefined) ??
       envOr("IICP_BACKEND_TYPE", "openai_compat")!,
+    backendApiKey:
+      (values["backend-api-key"] as string | undefined) ?? envOr("IICP_BACKEND_API_KEY") ?? "",
     model: (values.model as string | undefined) ?? envOr("IICP_BACKEND_MODEL") ?? "",
     publicEndpoint:
       (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? "",
