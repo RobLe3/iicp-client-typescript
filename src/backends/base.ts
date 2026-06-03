@@ -13,12 +13,15 @@
 
 /** #414 — speech-to-text. Multipart file upload (distinct path below), not JSON. */
 export const AUDIO_TRANSCRIBE_INTENT = "urn:iicp:intent:audio:transcribe:v1";
+/** #414 — text-to-speech. JSON request but a *binary* audio response (distinct path). */
+export const AUDIO_SPEECH_INTENT = "urn:iicp:intent:audio:speech:v1";
 
 export const INTENT_TO_PATH: Record<string, string> = {
   "urn:iicp:intent:llm:chat:v1": "/chat/completions",
   "urn:iicp:intent:llm:completion:v1": "/completions",
   "urn:iicp:intent:llm:embedding:v1": "/embeddings",
   [AUDIO_TRANSCRIBE_INTENT]: "/audio/transcriptions",
+  [AUDIO_SPEECH_INTENT]: "/audio/speech",
 };
 
 export interface BackendOptions {
@@ -143,6 +146,62 @@ export function buildOpenAiDialectHandler(
       } catch {
         return { result: { text } }; // response_format=text → plain body
       }
+    }
+
+    // #414 — audio:speech (TTS): JSON request, but the response is BINARY audio. We
+    // base64-encode the bytes into result.audio so it rides the JSON task pipe.
+    if (intent === AUDIO_SPEECH_INTENT) {
+      const p = (payload as Record<string, unknown>) ?? {};
+      const text = p.input;
+      if (typeof text !== "string" || !text) {
+        return {
+          error_code: 400,
+          error_message: `${engine}: audio:speech requires payload.input (text to synthesize)`,
+        };
+      }
+      const speechBody: Record<string, unknown> = { input: text };
+      const reqModel = (typeof p.model === "string" ? p.model : undefined) ?? model;
+      if (reqModel) speechBody.model = reqModel;
+      for (const k of ["voice", "response_format", "speed"]) {
+        if (p[k] !== undefined && p[k] !== null) speechBody[k] = p[k];
+      }
+      if (speechBody.voice === undefined) speechBody.voice = "alloy";
+
+      const headersS: Record<string, string> = { "Content-Type": "application/json" };
+      if (apiKey) headersS["Authorization"] = `Bearer ${apiKey}`;
+      const ctrlS = new AbortController();
+      const tS = setTimeout(() => ctrlS.abort(), timeoutMs);
+      let respS: Response;
+      try {
+        respS = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: headersS,
+          body: JSON.stringify(speechBody),
+          signal: ctrlS.signal,
+        });
+      } catch (exc) {
+        clearTimeout(tS);
+        const msg = exc instanceof Error ? exc.message : String(exc);
+        if (ctrlS.signal.aborted) return { error_code: 408, error_message: `${engine}: backend timed out` };
+        return { error_code: 502, error_message: `${engine}: HTTP transport error: ${msg}` };
+      }
+      clearTimeout(tS);
+      if (!respS.ok) {
+        const errText = await respS.text().catch(() => "");
+        return {
+          error_code: respS.status,
+          error_message: `${engine}: upstream ${respS.status}: ${errText.slice(0, 512)}`,
+        };
+      }
+      const contentType = respS.headers.get("content-type") ?? "audio/mpeg";
+      const buf = Buffer.from(await respS.arrayBuffer());
+      return {
+        result: {
+          audio: buf.toString("base64"),
+          content_type: contentType,
+          format: (speechBody.response_format as string | undefined) ?? contentType.split("/").pop(),
+        },
+      };
     }
 
     const body: Record<string, unknown> = { ...((payload as Record<string, unknown>) ?? {}) };

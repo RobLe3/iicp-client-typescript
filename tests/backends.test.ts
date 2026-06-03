@@ -96,6 +96,34 @@ describe("openaiCompatHandler", () => {
     assert.match((result as { error_message: string }).error_message, /audio/);
   });
 
+  it("#414 audio:speech → JSON POST /audio/speech returns base64 audio", async () => {
+    const wav = Buffer.from("RIFF....fake-wav-audio");
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      lastRequest = { url: url.toString(), init };
+      return new Response(wav, { status: 200, headers: { "Content-Type": "audio/wav" } });
+    }) as typeof fetch;
+    const handler = openaiCompatHandler({ model: "tts-1" });
+    const result = await handler({
+      intent: "urn:iicp:intent:audio:speech:v1",
+      payload: { input: "hello world", voice: "alloy" },
+    });
+    assert.equal((result as { error_code?: number }).error_code, undefined);
+    assert.match(lastRequest!.url, /\/audio\/speech$/);
+    const r = result as { result: { audio: string; content_type: string } };
+    assert.equal(Buffer.from(r.result.audio, "base64").toString(), "RIFF....fake-wav-audio");
+    assert.equal(r.result.content_type, "audio/wav");
+    const body = JSON.parse(lastRequest!.init!.body as string);
+    assert.equal(body.input, "hello world");
+    assert.equal(body.model, "tts-1");
+  });
+
+  it("#414 audio:speech requires input field", async () => {
+    const handler = openaiCompatHandler({ model: "tts-1" });
+    const result = await handler({ intent: "urn:iicp:intent:audio:speech:v1", payload: {} });
+    assert.equal((result as { error_code: number }).error_code, 400);
+    assert.match((result as { error_message: string }).error_message, /input/);
+  });
+
   it("#5 api key → Authorization: Bearer header on backend calls", async () => {
     mockFetchJson({ id: "chatcmpl-key", choices: [{ message: { content: "ok" } }] });
     const handler = openaiCompatHandler({
