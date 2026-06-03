@@ -322,6 +322,29 @@ describe("SDK-06 traceparent", () => {
     assert.equal((captured as Record<string, unknown>).operator_delegation, undefined);
   });
 
+  it("#411 ADR-047: heartbeat answers the liveness challenge", async () => {
+    const { createHmac } = await import("node:crypto");
+    const bodies: Record<string, unknown>[] = [];
+    const restore = mockFetch((_url, init) => {
+      bodies.push(JSON.parse(init?.body as string));
+      return jsonResponse({ ok: true, challenge: "nonce-abc" }, 200);
+    });
+    const node = new IicpNode({
+      nodeId: "n-1",
+      endpoint: "https://p.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "m",
+      directoryUrl: "https://iicp.test",
+      nodeHmacKey: "secret-key",
+    });
+    await node.heartbeat("tok"); // beat 1 → captures nonce, no answer
+    await node.heartbeat("tok"); // beat 2 → answers
+    restore();
+    assert.equal(bodies[0].challenge_response, undefined);
+    const expected = createHmac("sha256", "secret-key").update("nonce-abc").digest("hex");
+    assert.equal(bodies[1].challenge_response, expected);
+  });
+
   it("iter-1412: node.register includes transport_endpoint when configured (spec v0.7.0)", async () => {
     let captured: Record<string, unknown> | null = null;
     const restore = mockFetch((_url, init) => {
