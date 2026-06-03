@@ -22,7 +22,49 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const NONCE_TTL_MS = 300_000;
 // SDK version reported in register payload sdk_version. Update on package
 // version bumps; checked by tests against package.json.
-const SDK_VERSION = "0.7.31";
+const SDK_VERSION = "0.7.32";
+
+const EMBEDDING_INTENT = "urn:iicp:intent:llm:embedding:v1";
+
+/**
+ * #409 — classify a backend model to the IICP intent it serves. Embedding
+ * models (name contains "embed") advertise the embedding intent; everything
+ * else advertises the node's configured/default intent (chat). Conservative:
+ * only embeddings are split out — the verified real case.
+ */
+export function intentForModel(model: string, defaultIntent: string): string {
+  return model.toLowerCase().includes("embed") ? EMBEDDING_INTENT : defaultIntent;
+}
+
+/**
+ * #409 — group detected backend models into one capability object per intent,
+ * so one node advertises every intent its backend can serve (chat + embedding)
+ * instead of a single hardcoded intent. The directory accepts + stores a
+ * multi-element capabilities array; serving works because the client picks the
+ * per-intent model from discover. Back-compatible: a chat-only model set yields
+ * the same single capability. First-seen intent leads (configured model first).
+ */
+export function buildCapabilities(
+  models: string[],
+  defaultIntent: string,
+  maxTokens: number,
+): Array<{ intent: string; models: string[]; max_tokens: number }> {
+  if (models.length === 0) {
+    return [{ intent: defaultIntent, models: [], max_tokens: maxTokens }];
+  }
+  const order: string[] = [];
+  const groups = new Map<string, string[]>();
+  for (const m of models) {
+    const intent = intentForModel(m, defaultIntent);
+    if (!groups.has(intent)) {
+      groups.set(intent, []);
+      order.push(intent);
+    }
+    const arr = groups.get(intent)!;
+    if (!arr.includes(m)) arr.push(m);
+  }
+  return order.map((intent) => ({ intent, models: groups.get(intent)!, max_tokens: maxTokens }));
+}
 
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -313,11 +355,9 @@ export class IicpNode {
     const body: Record<string, unknown> = {
       endpoint: this._cfg.endpoint,
       region: this._cfg.region ?? "eu-central",
-      capabilities: [{
-        intent: this._cfg.intent,
-        models,
-        max_tokens: this._cfg.maxTokens,
-      }],
+      // #409 — one capability object per intent the backend can serve (e.g.
+      // chat + embedding), classified from the detected model set.
+      capabilities: buildCapabilities(models, this._cfg.intent, this._cfg.maxTokens),
       limits: {
         max_concurrent: this._cfg.maxConcurrent,
         tokens_per_min: this._cfg.tokensPerMin,
