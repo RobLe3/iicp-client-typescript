@@ -640,18 +640,41 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // the full list — not just the single configured model. Best-effort; fall back
   // to the single configured model on any error.
   try {
-    const tagsUrl = opts.backendUrl.replace(/\/$/, "") + "/api/tags";
-    const tagsResp = await fetch(tagsUrl, { signal: AbortSignal.timeout(3000) });
-    if (tagsResp.ok) {
-      const tagsData = await tagsResp.json() as { models?: Array<{ name: string }> };
-      const extra = (tagsData.models ?? [])
-        .map((m) => m.name)
-        .filter((m) => m !== opts.model);
-      if (extra.length > 0) {
-        node["_cfg"].capabilities = extra;
-        // eslint-disable-next-line no-console
-        console.log(`[iicp-node] GAP-6: advertising ${extra.length} additional model(s): ${extra.slice(0, 6).join(", ")}`);
-      }
+    // #409 — strip a trailing /v1 to a root so probe URLs are well-formed for
+    // both Ollama (`http://host:11434`) and LM Studio/OpenAI-compat
+    // (`http://host:1234/v1`); attach the Bearer key (LM Studio /v1/models 401s
+    // without it). Without this, /v1 backends got `…/v1/v1/models` (404) and no
+    // models were discovered, so multi-intent never fired.
+    const base = opts.backendUrl.replace(/\/$/, "");
+    const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
+    const headers: Record<string, string> = opts.backendApiKey
+      ? { Authorization: `Bearer ${opts.backendApiKey}` }
+      : {};
+    const allModels = await (async (): Promise<string[]> => {
+      // Ollama /api/tags ({models:[{name}]})
+      try {
+        const r = await fetch(`${root}/api/tags`, { headers, signal: AbortSignal.timeout(3000) });
+        if (r.ok) {
+          const d = await r.json() as { models?: Array<{ name: string }> };
+          const names = (d.models ?? []).map((m) => m.name);
+          if (names.length > 0) return names;
+        }
+      } catch { /* try OpenAI next */ }
+      // OpenAI-compat /v1/models ({data:[{id}]})
+      try {
+        const r = await fetch(`${root}/v1/models`, { headers, signal: AbortSignal.timeout(3000) });
+        if (r.ok) {
+          const d = await r.json() as { data?: Array<{ id: string }> };
+          return (d.data ?? []).map((m) => m.id).filter(Boolean);
+        }
+      } catch { /* best-effort */ }
+      return [];
+    })();
+    const extra = allModels.filter((m) => m !== opts.model);
+    if (extra.length > 0) {
+      node["_cfg"].capabilities = extra;
+      // eslint-disable-next-line no-console
+      console.log(`[iicp-node] GAP-6: advertising ${extra.length} additional model(s): ${extra.slice(0, 6).join(", ")}`);
     }
   } catch {
     // best-effort; no-op on error
