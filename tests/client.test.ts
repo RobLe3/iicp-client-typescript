@@ -281,6 +281,47 @@ describe("SDK-06 traceparent", () => {
     assert.equal(body.intent, undefined, "flat intent must NOT appear at top level (spec violation)");
   });
 
+  it("#407 ADR-045: register attaches operator_delegation when configured", async () => {
+    const { issueDelegation, generateOperatorKey, verifyDelegation } = await import("../src/delegation.js");
+    const delegation = issueDelegation(generateOperatorKey(), "n-1", 3600);
+    assert.ok(verifyDelegation(delegation, "n-1"));
+
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-1", node_id: "n-1" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-1",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      directoryUrl: "https://iicp.test",
+      operatorDelegation: delegation,
+    });
+    await node.register();
+    restore();
+    assert.deepEqual((captured as Record<string, unknown>).operator_delegation, delegation);
+  });
+
+  it("#407: register omits operator_delegation when not configured", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "t", node_id: "n-2" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-2",
+      endpoint: "https://p.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "m",
+      directoryUrl: "https://iicp.test",
+    });
+    await node.register();
+    restore();
+    assert.equal((captured as Record<string, unknown>).operator_delegation, undefined);
+  });
+
   it("iter-1412: node.register includes transport_endpoint when configured (spec v0.7.0)", async () => {
     let captured: Record<string, unknown> | null = null;
     const restore = mockFetch((_url, init) => {
