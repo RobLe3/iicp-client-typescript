@@ -11,10 +11,14 @@
  * handler-factory style (tracker iicp.network#340; parity Block B).
  */
 
+/** #414 — speech-to-text. Multipart file upload (distinct path below), not JSON. */
+export const AUDIO_TRANSCRIBE_INTENT = "urn:iicp:intent:audio:transcribe:v1";
+
 export const INTENT_TO_PATH: Record<string, string> = {
   "urn:iicp:intent:llm:chat:v1": "/chat/completions",
   "urn:iicp:intent:llm:completion:v1": "/completions",
   "urn:iicp:intent:llm:embedding:v1": "/embeddings",
+  [AUDIO_TRANSCRIBE_INTENT]: "/audio/transcriptions",
 };
 
 export interface BackendOptions {
@@ -73,6 +77,72 @@ export function buildOpenAiDialectHandler(
           Object.keys(INTENT_TO_PATH).sort()
         )}`,
       };
+    }
+
+    // #414 — audio:transcribe is a multipart file upload (OpenAI
+    // /v1/audio/transcriptions). Audio rides as base64 in payload.audio; model is
+    // OPTIONAL (whisper.cpp ignores it, vLLM/OpenAI use it). Native FormData/Blob —
+    // no new dependency.
+    if (intent === AUDIO_TRANSCRIBE_INTENT) {
+      const p = (payload as Record<string, unknown>) ?? {};
+      const audioB64 = (p.audio ?? p.audio_b64) as unknown;
+      if (typeof audioB64 !== "string" || !audioB64) {
+        return {
+          error_code: 400,
+          error_message: `${engine}: audio:transcribe requires payload.audio (base64-encoded audio bytes)`,
+        };
+      }
+      const cleaned = audioB64.trim();
+      if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned) || cleaned.length % 4 !== 0) {
+        return { error_code: 400, error_message: `${engine}: payload.audio is not valid base64` };
+      }
+      const audioBytes = Buffer.from(cleaned, "base64");
+      const filename = typeof p.filename === "string" ? p.filename : "audio.wav";
+      const form = new FormData();
+      form.append("file", new Blob([audioBytes]), filename);
+      const reqModel = (typeof p.model === "string" ? p.model : undefined) ?? model;
+      if (reqModel) form.append("model", reqModel);
+      let haveRf = false;
+      for (const k of ["language", "response_format", "prompt", "temperature"]) {
+        if (p[k] !== undefined && p[k] !== null) {
+          if (k === "response_format") haveRf = true;
+          form.append(k, String(p[k]));
+        }
+      }
+      if (!haveRf) form.append("response_format", "json");
+
+      const mpHeaders: Record<string, string> = {};
+      if (apiKey) mpHeaders["Authorization"] = `Bearer ${apiKey}`;
+      const ctrlA = new AbortController();
+      const tA = setTimeout(() => ctrlA.abort(), timeoutMs);
+      let respA: Response;
+      try {
+        respA = await fetch(`${baseUrl}${path}`, {
+          method: "POST",
+          headers: mpHeaders,
+          body: form,
+          signal: ctrlA.signal,
+        });
+      } catch (exc) {
+        clearTimeout(tA);
+        const msg = exc instanceof Error ? exc.message : String(exc);
+        if (ctrlA.signal.aborted) return { error_code: 408, error_message: `${engine}: backend timed out` };
+        return { error_code: 502, error_message: `${engine}: HTTP transport error: ${msg}` };
+      }
+      clearTimeout(tA);
+      if (!respA.ok) {
+        const text = await respA.text().catch(() => "");
+        return {
+          error_code: respA.status,
+          error_message: `${engine}: upstream ${respA.status}: ${text.slice(0, 512)}`,
+        };
+      }
+      const text = await respA.text();
+      try {
+        return { result: JSON.parse(text) };
+      } catch {
+        return { result: { text } }; // response_format=text → plain body
+      }
     }
 
     const body: Record<string, unknown> = { ...((payload as Record<string, unknown>) ?? {}) };

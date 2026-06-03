@@ -58,6 +58,44 @@ describe("openaiCompatHandler", () => {
     assert.equal(r.result.id, "chatcmpl-test");
   });
 
+  it("#414 audio:transcribe → multipart POST /audio/transcriptions returns text", async () => {
+    mockFetchJson({ text: "hello world" });
+    const handler = openaiCompatHandler({ model: "whisper-1" });
+    const audio = Buffer.from("RIFF....fake-wav-bytes").toString("base64");
+    const result = await handler({
+      intent: "urn:iicp:intent:audio:transcribe:v1",
+      payload: { audio, filename: "clip.wav", language: "en" },
+    });
+    assert.equal((result as { error_code?: number }).error_code, undefined);
+    assert.match(lastRequest!.url, /\/audio\/transcriptions$/);
+    const fd = lastRequest!.init!.body as FormData;
+    assert.ok(fd instanceof FormData, "multipart body must be FormData (not JSON)");
+    assert.equal(fd.get("model"), "whisper-1");
+    assert.ok(fd.get("file") instanceof Blob, "file part must be a Blob");
+    const r2 = result as { result: { text: string } };
+    assert.equal(r2.result.text, "hello world");
+  });
+
+  it("#414 audio:transcribe rejects invalid base64", async () => {
+    const handler = openaiCompatHandler({ model: "whisper-1" });
+    const result = await handler({
+      intent: "urn:iicp:intent:audio:transcribe:v1",
+      payload: { audio: "!!not-base64!!" },
+    });
+    assert.equal((result as { error_code: number }).error_code, 400);
+    assert.match((result as { error_message: string }).error_message, /base64/);
+  });
+
+  it("#414 audio:transcribe requires audio field", async () => {
+    const handler = openaiCompatHandler({ model: "whisper-1" });
+    const result = await handler({
+      intent: "urn:iicp:intent:audio:transcribe:v1",
+      payload: {},
+    });
+    assert.equal((result as { error_code: number }).error_code, 400);
+    assert.match((result as { error_message: string }).error_message, /audio/);
+  });
+
   it("#5 api key → Authorization: Bearer header on backend calls", async () => {
     mockFetchJson({ id: "chatcmpl-key", choices: [{ message: { content: "ok" } }] });
     const handler = openaiCompatHandler({
