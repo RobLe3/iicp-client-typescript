@@ -281,6 +281,25 @@ describe("SDK-06 traceparent", () => {
     assert.equal(body.intent, undefined, "flat intent must NOT appear at top level (spec violation)");
   });
 
+  it("#414: register includes the detected backend flavor when set", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-1", node_id: "n-b" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-b",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      backend: "ollama",
+      directoryUrl: "https://iicp.test",
+    });
+    await node.register();
+    restore();
+    assert.equal((captured as Record<string, unknown>).backend, "ollama");
+  });
+
   it("#407 ADR-045: register attaches operator_delegation when configured", async () => {
     const { issueDelegation, generateOperatorKey, verifyDelegation } = await import("../src/delegation.js");
     const delegation = issueDelegation(generateOperatorKey(), "n-1", 3600);

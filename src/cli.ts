@@ -185,6 +185,42 @@ async function checkDependencies(backendUrl: string): Promise<DepIssue[]> {
   return out;
 }
 
+/**
+ * Detect the backend server flavor for the `backend` node-detail field:
+ * ollama / lmstudio / vllm / llamacpp / anthropic / custom. Mirrors
+ * iicp-client-rust + -python. Non-OpenAI dialects use backendType; for
+ * openai_compat it fingerprints /v1/models response headers — X-Powered-By:Express
+ * → lmstudio (LM Studio also serves Ollama-compatible /api/version + /api/tags, so
+ * the Express header is the discriminator), uvicorn/vllm → vllm, llama → llamacpp,
+ * else probe /api/version → ollama, else custom.
+ */
+async function detectBackendFlavor(backendUrl: string, apiKey: string, backendType: string): Promise<string> {
+  if (backendType === "anthropic" || backendType === "vllm" || backendType === "llamacpp") return backendType;
+  const base = backendUrl.replace(/\/$/, "");
+  const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
+  const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  const ok = async (path: string): Promise<Response | null> => {
+    try {
+      const r = await fetch(`${root}${path}`, { headers, signal: AbortSignal.timeout(2500) });
+      return r.ok ? r : null;
+    } catch {
+      return null;
+    }
+  };
+  const models = await ok("/v1/models");
+  if (models) {
+    const powered = (models.headers.get("x-powered-by") || "").toLowerCase();
+    const server = (models.headers.get("server") || "").toLowerCase();
+    if (powered.includes("express")) return "lmstudio";
+    if (server.includes("vllm") || server.includes("uvicorn")) return "vllm";
+    if (server.includes("llama.cpp") || server.includes("llama-server")) return "llamacpp";
+    if (await ok("/api/version")) return "ollama";
+    return "custom";
+  }
+  if (await ok("/api/version")) return "ollama";
+  return "custom";
+}
+
 function printDepStatus(issues: DepIssue[]): void {
   const glyph: Record<string, string> = { ok: "  ✓", optional: "  ○", warn: "  !", missing: "  ✗" };
   for (const i of issues) {
@@ -588,11 +624,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
     }
   }
 
+  const backendFlavor = await detectBackendFlavor(opts.backendUrl, opts.backendApiKey, opts.backendType);
+  process.stderr.write(`backend detected: ${backendFlavor}\n`);
   const node = new IicpNode({
     nodeId,
     endpoint: publicEndpoint,
     intent: opts.intent,
     model: opts.model,
+    backend: backendFlavor,
     region: opts.region,
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
