@@ -6,6 +6,10 @@
 // http://localhost:11434` (the CLI is the recommended path; this example
 // shows the building blocks if you want a custom handler).
 //
+// Backends: openaiCompatHandler (shown here), vllmHandler, llamacppHandler, and
+// anthropicHandler (native Anthropic Messages API → first-class Claude). Select
+// one on the CLI with `--backend-type`, or import the matching factory directly.
+//
 // Prereqs:
 //   - An OpenAI-compatible backend at IICP_BACKEND_URL (Ollama, vLLM, ...)
 //   - Set IICP_BACKEND_URL + IICP_BACKEND_MODEL, or edit the constants below.
@@ -34,7 +38,12 @@ async function main(): Promise<void> {
     region: "local",
     maxConcurrent: 4,
   });
-  const handler = openaiCompatHandler({ baseUrl: backendUrl, model });
+  // The OpenAI-dialect handler appends /chat/completions, so baseUrl must end in
+  // /v1 (Ollama serves the OpenAI dialect at /v1).
+  const baseUrl = backendUrl.replace(/\/$/, "").endsWith("/v1")
+    ? backendUrl
+    : `${backendUrl.replace(/\/$/, "")}/v1`;
+  const handler = openaiCompatHandler({ baseUrl, model });
 
   // In production: `const token = await node.register()` and pass it as
   // `nodeToken` so heartbeats fire. Skipped here for the offline example.

@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.35] — 2026-06-03
+
+### Added — native Anthropic backend + audio chat modality (#414, capability roadmap)
+
+- **`anthropicHandler` / `AnthropicOptions`** — a fourth `--backend-type`, `anthropic`,
+  speaks the Anthropic **Messages API** (`POST /v1/messages`) directly instead of the
+  OpenAI-compat shim. It hoists `system` messages to the top-level `system` field, sets
+  the required `max_tokens` (default 4096), maps `image_url` content parts to Anthropic
+  image blocks, sends the key as `x-api-key`, and maps the response back to the OpenAI
+  chat-completion shape — so a Claude node is indistinguishable from an Ollama/vLLM node
+  to any client. `--backend-type anthropic` defaults `--backend-url` to
+  `https://api.anthropic.com`. No new dependency (built-in `fetch`).
+- **`modalitiesForModel`** now detects **audio** chat models (name contains `audio`,
+  `voxtral`, or `omni`) and advertises `input_modalities: ["audio"]` (or
+  `["image","audio"]` for omni), alongside the existing vision detection. Parity with the
+  Python SDK.
+
+### Added — heartbeat liveness challenge (ADR-047 Part A, #411)
+
+- The heartbeat loop answers the directory's liveness challenge so the directory can
+  distinguish a live node from a stale registration.
+
+## [0.7.34] — 2026-06-03
+
+### Added — operator delegation at registration (ADR-045 Phase A, #407)
+
+- The node signs an **ed25519 operator delegation** and attaches it on `register`, so the
+  directory can verify the node is operated under a known operator key.
+
+## [0.7.33] — 2026-06-03
+
+### Added — multimodal capability advertising (ADR-046, #408)
+
+- **`buildCapabilities` / `modalitiesForModel`** — a node now advertises
+  `input_modalities` derived from the model name: every model serves `text`, and
+  vision-capable models (name contains `vl`, `vision`, `llava`, or `omni`) additionally
+  advertise `image`. One capability entry is emitted per `(intent, input_modalities)`
+  group so clients can pick the right model from discover.
+
+## [0.7.32] — 2026-06-03
+
+### Added — multi-intent advertising (#409)
+
+- A node advertises **every intent its backend serves** (chat + embedding), not just the
+  configured default, by probing the backend's model list. Fixes the backend model probe
+  for authenticated `/v1` OpenAI-compat backends.
+
+## [0.7.31] — 2026-06-02
+
+### Fixed — backend_url precedence regression-lock (#410)
+
+- Regression-lock test confirming `--backend-url` / `IICP_BACKEND_URL` precedence (the TS
+  CLI was already correct; the test prevents future drift).
+
+## [0.7.30] — 2026-06-02
+
+### Added — Bearer auth for OpenAI-compat backends (#5)
+
+- **`--backend-api-key` / `IICP_BACKEND_API_KEY`** — a Bearer key for authenticated
+  backends (LM Studio, hosted gateways). Empty/undefined sends no auth header. The
+  `anthropic` backend (0.7.35) reuses this flag as its `x-api-key`.
+
 ## [0.7.29] — 2026-06-02
 
 ### Fixed — single-instance lock prevents duplicate-node thrash (#405)

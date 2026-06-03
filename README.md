@@ -3,7 +3,7 @@
 [![CI](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml/badge.svg)](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Protocol](https://img.shields.io/badge/IICP-v1.7-indigo.svg)](https://iicp.network/spec)
-[![npm](https://img.shields.io/badge/npm-iicp--client-red?logo=npm)](https://www.npmjs.com/package/iicp-client)
+[![npm](https://img.shields.io/badge/npm-%40iicp%2Fclient-red?logo=npm)](https://www.npmjs.com/package/@iicp/client)
 
 Official TypeScript client library for the [IICP protocol](https://iicp.network) — route AI agent tasks by intent across a self-organising mesh of provider nodes. No central broker. No hardcoded endpoints.
 
@@ -18,9 +18,9 @@ urn:iicp:intent:llm:chat:v1  →  discover  →  select  →  submit
 ## Install
 
 ```bash
-npm install iicp-client
-# yarn add iicp-client
-# pnpm add iicp-client
+npm install @iicp/client
+# yarn add @iicp/client
+# pnpm add @iicp/client
 ```
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
@@ -47,9 +47,10 @@ Consumer and provider can run in the same process. For production provider nodes
 ## Quickstart
 
 ```typescript
-import { IicpClient } from "iicp-client";
+import { IicpClient } from "@iicp/client";
 
-const client = new IicpClient({ directory_url: "https://iicp.network" });
+// directory_url defaults to https://iicp.network/api
+const client = new IicpClient();
 
 // chat() discovers, selects the best node, and submits in one call
 const response = await client.chat(
@@ -75,19 +76,19 @@ const result = await client.submit({
 ## Configuration
 
 ```typescript
-import { IicpClient } from "iicp-client";
+import { IicpClient } from "@iicp/client";
 
 const client = new IicpClient({
-  directory_url : "https://iicp.network",  // IICP directory
-  timeout_ms    : 30_000,                  // max 120 000 (SDK-04)
-  region        : "eu-central",            // prefer nodes in region
-  api_token     : "your-token",            // optional auth token
+  directory_url : "https://iicp.network/api",  // IICP directory
+  timeout_ms    : 30_000,                      // max 120 000 (SDK-04)
+  region        : "eu-central",                // prefer nodes in region
+  api_token     : "your-token",                // optional auth token
 });
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `directory_url` | `"https://iicp.network"` | IICP directory endpoint |
+| `directory_url` | `"https://iicp.network/api"` | IICP directory endpoint |
 | `timeout_ms` | `30000` | Request timeout — max 120 000 ms |
 | `region` | `undefined` | Preferred node region |
 | `api_token` | `undefined` | Bearer token for authenticated nodes |
@@ -98,10 +99,10 @@ const client = new IicpClient({
 
 ```typescript
 const nodes = await client.discover("urn:iicp:intent:llm:chat:v1", {
-  region        : "eu-central",
-  model         : "phi3:mini",
-  min_reputation: 0.7,
-  limit         : 5,
+  region        : "eu-central",  // prefer nodes in this region
+  qos           : "interactive", // quality-of-service hint
+  min_reputation: 0.7,           // floor on directory reputation
+  limit         : 5,             // capped at 50
 });
 ```
 
@@ -110,7 +111,7 @@ const nodes = await client.discover("urn:iicp:intent:llm:chat:v1", {
 ## Error handling
 
 ```typescript
-import { IicpClient, IicpError } from "iicp-client";
+import { IicpClient, IicpError } from "@iicp/client";
 
 const client = new IicpClient();
 try {
@@ -129,7 +130,7 @@ Error codes match the [IICP error reference](https://iicp.network/docs/error-ref
 ## Serving as a provider node
 
 ```typescript
-import { IicpNode } from "iicp-client";
+import { IicpNode } from "@iicp/client";
 
 const node = new IicpNode({
   nodeId  : "my-node-001",
@@ -146,6 +147,93 @@ const stop = node.serve(async (task) => {
 
 process.on("SIGINT", () => { stop(); });
 ```
+
+### Run a node from the CLI
+
+Installing the package puts an `iicp-node` binary on your `PATH`. The CLI wires
+up NAT detection, registration, heartbeats and a backend handler for you:
+
+```bash
+# Ollama on the default port — only --model is required
+iicp-node serve --model qwen2.5:0.5b
+
+# An OpenAI-compatible backend (LM Studio, vLLM, hosted gateway)
+iicp-node serve \
+  --model phi3:mini \
+  --backend-url http://localhost:1234 \
+  --backend-api-key "$BACKEND_API_KEY"
+```
+
+Every flag has an environment-variable equivalent (shown by `iicp-node --help`):
+`--model` / `IICP_BACKEND_MODEL`, `--backend-url` / `IICP_BACKEND_URL`,
+`--backend-type` / `IICP_BACKEND_TYPE`, `--backend-api-key` / `IICP_BACKEND_API_KEY`,
+`--directory-url` / `IICP_DIRECTORY_URL` (default `https://iicp.network/api`),
+`--port` / `IICP_PORT` (default 9484).
+
+### Backend types
+
+`--backend-type` (or the `getBackendHandler(type, opts)` factory) selects how the
+node talks to your model server. All backends present an identical `llm:chat:v1`
+surface to IICP clients:
+
+| `--backend-type` | Handler export | Speaks | Default base URL |
+|------------------|----------------|--------|------------------|
+| `openai_compat` *(default)* | `openaiCompatHandler` | OpenAI `/v1/*` dialect (Ollama, LM Studio, OpenAI) | `http://localhost:11434/v1` |
+| `vllm` | `vllmHandler` | OpenAI dialect, tuned for vLLM | `http://localhost:8000/v1` |
+| `llamacpp` | `llamacppHandler` | OpenAI dialect, tuned for llama.cpp server | `http://localhost:8080/v1` |
+| `anthropic` | `anthropicHandler` | Anthropic Messages API (`POST /v1/messages`) — first-class Claude | `https://api.anthropic.com/v1` |
+
+#### Native Anthropic backend (v0.7.35+)
+
+The `anthropic` backend speaks the Anthropic **Messages API** directly rather than
+going through the OpenAI-compat shim. It translates an IICP `llm:chat:v1` task into a
+Messages request — hoisting `system` messages to the top-level `system` field, setting
+the required `max_tokens` (default 4096), mapping `image_url` content parts to
+Anthropic image blocks — and maps the response back to the OpenAI chat-completion
+shape, so a Claude-backed node is indistinguishable from an Ollama/vLLM node to any
+client. The API key is sent as the `x-api-key` header (not a Bearer token).
+
+```bash
+# Serve Claude to the mesh. --backend-type anthropic defaults --backend-url to
+# https://api.anthropic.com, so you only supply the key and model.
+iicp-node serve \
+  --backend-type anthropic \
+  --backend-api-key "$ANTHROPIC_API_KEY" \
+  --model claude-opus-4-8
+```
+
+In code:
+
+```typescript
+import { IicpNode, anthropicHandler } from "@iicp/client";
+
+const node = new IicpNode({
+  nodeId  : "claude-node-001",
+  endpoint: "http://my.public.host:8020",
+  intent  : "urn:iicp:intent:llm:chat:v1",
+  model   : "claude-opus-4-8",
+});
+const handler = anthropicHandler({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  model : "claude-opus-4-8",
+  // baseUrl defaults to https://api.anthropic.com/v1
+});
+const token = await node.register();
+node.serve(handler, { port: 8020, nodeToken: token });
+```
+
+### Multimodal capabilities — vision and audio
+
+When a node registers, the SDK derives the `input_modalities` it advertises from the
+model name (`buildCapabilities` / `modalitiesForModel`). Every model serves `text`;
+in addition:
+
+- **image** (vision) — model name contains `vl`, `vision`, `llava`, or `omni`
+- **audio** — model name contains `audio`, `voxtral`, or `omni`
+
+A node serving several models advertises one capability entry per
+`(intent, input_modalities)` group, so consumers can pick the right model for a
+multimodal task via discover.
 
 ### Listen port — default 9484, auto-increment (v0.7.5+)
 
@@ -240,7 +328,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 ```bash
 npm install        # install deps
 npm run typecheck  # tsc strict
-npm test           # 184 unit tests
+npm test           # 224 unit tests
 npm run build      # emit to dist/
 ```
 
