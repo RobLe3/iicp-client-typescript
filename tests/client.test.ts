@@ -274,6 +274,8 @@ describe("SDK-06 traceparent", () => {
       intent: "urn:iicp:intent:llm:chat:v1",
       models: ["llama-3-8b"],
       max_tokens: 8192,
+      // #408/ADR-046 — capability declares input modalities (text-only here).
+      input_modalities: ["text"],
     }]);
     assert.equal(body.transport_endpoint, undefined, "transport_endpoint should be absent when not configured");
     assert.equal(body.intent, undefined, "flat intent must NOT appear at top level (spec violation)");
