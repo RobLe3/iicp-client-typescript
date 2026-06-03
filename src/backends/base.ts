@@ -15,6 +15,11 @@
 export const AUDIO_TRANSCRIBE_INTENT = "urn:iicp:intent:audio:transcribe:v1";
 /** #414 — text-to-speech. JSON request but a *binary* audio response (distinct path). */
 export const AUDIO_SPEECH_INTENT = "urn:iicp:intent:audio:speech:v1";
+/** #414 — content moderation. Plain JSON in/out (shared path), but model-OPTIONAL. */
+export const SAFETY_MODERATE_INTENT = "urn:iicp:intent:safety:moderate:v1";
+
+/** Intents whose request body does NOT require a model (the backend supplies it). */
+export const MODEL_OPTIONAL_INTENTS = new Set<string>([SAFETY_MODERATE_INTENT]);
 
 export const INTENT_TO_PATH: Record<string, string> = {
   "urn:iicp:intent:llm:chat:v1": "/chat/completions",
@@ -22,6 +27,7 @@ export const INTENT_TO_PATH: Record<string, string> = {
   "urn:iicp:intent:llm:embedding:v1": "/embeddings",
   [AUDIO_TRANSCRIBE_INTENT]: "/audio/transcriptions",
   [AUDIO_SPEECH_INTENT]: "/audio/speech",
+  [SAFETY_MODERATE_INTENT]: "/moderations",
 };
 
 export interface BackendOptions {
@@ -206,7 +212,7 @@ export function buildOpenAiDialectHandler(
 
     const body: Record<string, unknown> = { ...((payload as Record<string, unknown>) ?? {}) };
     if (body.model === undefined && model !== undefined) body.model = model;
-    if (!body.model) {
+    if (!body.model && !MODEL_OPTIONAL_INTENTS.has(intent)) {
       return {
         error_code: 400,
         error_message:

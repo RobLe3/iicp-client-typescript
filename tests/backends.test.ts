@@ -124,6 +124,24 @@ describe("openaiCompatHandler", () => {
     assert.match((result as { error_message: string }).error_message, /input/);
   });
 
+  it("#414 safety:moderate → /moderations, model-optional", async () => {
+    mockFetchJson({
+      results: [{ flagged: true, categories: { harassment: true }, category_scores: { harassment: 0.99 } }],
+    });
+    const handler = openaiCompatHandler({}); // NO model configured
+    const result = await handler({
+      intent: "urn:iicp:intent:safety:moderate:v1",
+      payload: { input: "bad text" },
+    });
+    assert.equal((result as { error_code?: number }).error_code, undefined);
+    assert.match(lastRequest!.url, /\/moderations$/);
+    const r = result as { result: { results: { flagged: boolean }[] } };
+    assert.equal(r.result.results[0].flagged, true);
+    const body = JSON.parse(lastRequest!.init!.body as string);
+    assert.equal(body.input, "bad text");
+    assert.equal(body.model, undefined); // no model injected for moderation
+  });
+
   it("#5 api key → Authorization: Bearer header on backend calls", async () => {
     mockFetchJson({ id: "chatcmpl-key", choices: [{ message: { content: "ok" } }] });
     const handler = openaiCompatHandler({
