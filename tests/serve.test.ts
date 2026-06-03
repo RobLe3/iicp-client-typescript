@@ -243,4 +243,32 @@ describe("heartbeat self-heal (#404)", () => {
     assert.equal(next, "good-token");
     assert.equal(regCalls, 0, "healthy tick must not re-register");
   });
+
+  // The heartbeat body MUST carry an explicit `available: true` boolean (not only the
+  // `status: "available"` string). The directory keys discover eligibility off the
+  // `available` field, so sending it restores a briefly-dormant node on the next beat —
+  // robust even against directory builds older than v1.10.17.
+  it("sends available:true in the heartbeat body", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const dir = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        captured = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => dir.listen(port, "127.0.0.1", () => r()));
+    try {
+      const node = new IicpNode({ ...cfg(), directoryUrl: `http://127.0.0.1:${port}` } as NodeConfig);
+      await (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat("tok");
+      assert.ok(captured, "directory must have received a heartbeat");
+      assert.equal((captured as Record<string, unknown>).available, true);
+      assert.equal((captured as Record<string, unknown>).status, "available");
+    } finally {
+      await new Promise<void>((r) => dir.close(() => r()));
+    }
+  });
 });
