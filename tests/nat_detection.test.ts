@@ -167,4 +167,22 @@ describe("detectNat tier 0", () => {
     assert.equal(p.tier, 4); // nat-upnp not installed in CI
     assert.ok(p.operatorGuidance);
   });
+
+  it("auto-elects a local IPv6 GUA as tier-0 direct (#416)", async () => {
+    // Host-conditional: exercises the real #416 election on the platform it fixes
+    // (a host with a global IPv6 GUA + a bindable v6 socket). On a v4-only host
+    // (e.g. CI) the election can't fire, so we skip rather than assert a false
+    // negative. Fails before #416 (a v6 GUA was only a tier-1 fallback). Parity
+    // with the Rust/Python SDK tier-0 v6 election.
+    const port = 19484;
+    const v6 = await nat.detectIpv6(port);
+    if (!v6.globalV6Available || !v6.listenerV6Ok) return; // no usable IPv6 here — skip
+    const p = await nat.detectNat({ bindHost: "0.0.0.0", bindPort: port });
+    assert.equal(p.tier, 0);
+    assert.equal(p.transportMethod, "direct");
+    assert.ok(
+      p.publicEndpoint?.startsWith("http://[") && p.publicEndpoint?.endsWith(`:${port}`),
+      `expected bracketed IPv6 endpoint on :${port}, got ${p.publicEndpoint}`
+    );
+  });
 });

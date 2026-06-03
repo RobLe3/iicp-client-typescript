@@ -155,6 +155,33 @@ export async function detectNat(opts: DetectNatOptions): Promise<NatProfile> {
     return t0;
   }
 
+  // Tier 0 (IPv6, #416) — a stable global IPv6 GUA on a dual-stack host with a
+  // working v6 listener is directly reachable when the v6 firewall is open (the
+  // common residential dual-stack case). Auto-advertise it as a Direct endpoint so
+  // the operator needs no manual IICP_PUBLIC_ENDPOINT. Inbound firewall state cannot
+  // be proven locally; the directory's un-hide model (ADR-047) tolerates a node it
+  // cannot dial-back-probe, and clients fall back if a dial fails. Parity with the
+  // Rust/Python SDK tier-0 v6 election (#416).
+  const ipv6Prof = profile.ipv6;
+  if (ipv6Prof && ipv6Prof.globalV6Available && ipv6Prof.listenerV6Ok) {
+    // Prefer a stable (RFC 7217 secured / EUI-64 / manual) GUA over a rotating
+    // RFC 4941 privacy address so the advertised endpoint doesn't churn.
+    const gua = ipv6Prof.addresses.find((a) => !isPrivacyV6(a)) ?? ipv6Prof.addresses[0];
+    if (gua) {
+      const autoUrl = `http://[${gua}]:${bindPort}`;
+      profile.detectionLog.push(
+        `tier-0: auto-detected stable global IPv6 GUA → ${JSON.stringify(autoUrl)} ` +
+          `(direct IPv6; inbound depends on an open v6 firewall)`
+      );
+      const t0 = newProfile(0, "direct");
+      t0.publicEndpoint = autoUrl;
+      t0.internalEndpoint = profile.internalEndpoint;
+      t0.detectionLog = profile.detectionLog;
+      t0.ipv6 = profile.ipv6;
+      return t0;
+    }
+  }
+
   // Tier 1 — UPnP
   const portsToMap: number[] = [bindPort];
   if (transportPort && transportPort !== bindPort) portsToMap.push(transportPort);
