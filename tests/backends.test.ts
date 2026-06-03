@@ -228,8 +228,8 @@ describe("dedicated backends", () => {
 });
 
 describe("getBackendHandler selector", () => {
-  it("BACKEND_TYPES lists all three", () => {
-    assert.deepEqual([...BACKEND_TYPES].sort(), ["llamacpp", "openai_compat", "vllm"]);
+  it("BACKEND_TYPES lists all four", () => {
+    assert.deepEqual([...BACKEND_TYPES].sort(), ["anthropic", "llamacpp", "openai_compat", "vllm"]);
   });
 
   it("returns a callable for each type", () => {
@@ -240,5 +240,103 @@ describe("getBackendHandler selector", () => {
 
   it("throws on unknown type", () => {
     assert.throws(() => getBackendHandler("nope", { model: "m" }), /unknown backend_type/);
+  });
+});
+
+// ── C1: native Anthropic Messages-API backend (#414) ────────────────────────
+
+import { anthropicHandler } from "../src/backends/anthropic.js";
+
+const ANTHROPIC_OK = {
+  id: "msg_01abc",
+  type: "message",
+  role: "assistant",
+  model: "claude-opus-4-8",
+  content: [{ type: "text", text: "PONG" }],
+  stop_reason: "end_turn",
+  usage: { input_tokens: 11, output_tokens: 2 },
+};
+
+describe("anthropicHandler (C1)", () => {
+  it("translates chat request (system hoist + max_tokens default + x-api-key) and maps response to OpenAI shape", async () => {
+    mockFetchJson(ANTHROPIC_OK);
+    const handler = anthropicHandler({ model: "claude-opus-4-8", apiKey: "sk-ant-test" });
+    const result = await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: {
+        messages: [
+          { role: "system", content: "Be terse." },
+          { role: "user", content: "ping" },
+        ],
+      },
+    });
+    assert.match(lastRequest!.url, /\/messages$/);
+    const headers = new Headers(lastRequest!.init!.headers);
+    assert.equal(headers.get("x-api-key"), "sk-ant-test");
+    assert.equal(headers.get("anthropic-version"), "2023-06-01");
+    const body = JSON.parse(lastRequest!.init!.body as string);
+    assert.equal(body.system, "Be terse."); // hoisted out of messages
+    assert.deepEqual(body.messages, [{ role: "user", content: "ping" }]);
+    assert.equal(body.max_tokens, 4096); // defaulted (Anthropic requires it)
+    const r = result as { result: Record<string, unknown> };
+    assert.equal(r.result.object, "chat.completion");
+    const choices = r.result.choices as Array<{ message: { content: string }; finish_reason: string }>;
+    assert.equal(choices[0].message.content, "PONG");
+    assert.equal(choices[0].finish_reason, "stop");
+    assert.deepEqual(r.result.usage, { prompt_tokens: 11, completion_tokens: 2, total_tokens: 13 });
+  });
+
+  it("maps an OpenAI image_url data-URL to an Anthropic base64 image block", async () => {
+    mockFetchJson(ANTHROPIC_OK);
+    const handler = anthropicHandler({ model: "claude-opus-4-8", apiKey: "k" });
+    await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: {
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this?" },
+              { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+            ],
+          },
+        ],
+      },
+    });
+    const body = JSON.parse(lastRequest!.init!.body as string);
+    assert.deepEqual(body.messages[0].content, [
+      { type: "text", text: "what is this?" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } },
+    ]);
+  });
+
+  it("passes through explicit max_tokens + stop → stop_sequences", async () => {
+    mockFetchJson(ANTHROPIC_OK);
+    const handler = anthropicHandler({ model: "claude-opus-4-8", apiKey: "k" });
+    await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [{ role: "user", content: "hi" }], max_tokens: 256, stop: "END" },
+    });
+    const body = JSON.parse(lastRequest!.init!.body as string);
+    assert.equal(body.max_tokens, 256);
+    assert.deepEqual(body.stop_sequences, ["END"]);
+  });
+
+  it("rejects a non-chat intent with 400 (Messages serves only chat)", async () => {
+    const handler = anthropicHandler({ model: "claude-opus-4-8", apiKey: "k" });
+    const result = await handler({ intent: "urn:iicp:intent:llm:embedding:v1", payload: { input: "x" } });
+    assert.equal((result as { error_code: number }).error_code, 400);
+    assert.match((result as { error_message: string }).error_message, /only/);
+  });
+
+  it("surfaces an upstream error verbatim", async () => {
+    mockFetchText('{"error":{"type":"authentication_error"}}', 401);
+    const handler = anthropicHandler({ model: "claude-opus-4-8", apiKey: "bad" });
+    const result = await handler({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [{ role: "user", content: "hi" }] },
+    });
+    assert.equal((result as { error_code: number }).error_code, 401);
+    assert.match((result as { error_message: string }).error_message, /authentication_error/);
   });
 });

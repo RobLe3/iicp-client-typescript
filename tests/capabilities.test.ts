@@ -45,4 +45,19 @@ describe("#409 buildCapabilities", () => {
     assert.deepEqual(caps[1].input_modalities, ["text", "image"]);
     assert.deepEqual(caps[1].models, ["qwen/qwen3-vl-8b"]);
   });
+
+  it("B1/#414 audio model → audio-modality chat capability, distinct from text chat", () => {
+    const caps = buildCapabilities(["qwen2.5:0.5b", "qwen2-audio-7b"], CHAT, 4096);
+    assert.equal(caps.length, 2);
+    assert.deepEqual(caps[0].input_modalities, ["text"]);
+    assert.equal(caps[1].intent, CHAT);
+    assert.deepEqual(caps[1].input_modalities, ["text", "audio"]);
+    assert.deepEqual(caps[1].models, ["qwen2-audio-7b"]);
+  });
+
+  it("B1 omni model → both image and audio modalities", () => {
+    const caps = buildCapabilities(["qwen2.5-omni-7b"], CHAT, 4096);
+    assert.equal(caps.length, 1);
+    assert.deepEqual(caps[0].input_modalities, ["text", "image", "audio"]);
+  });
 });

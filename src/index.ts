@@ -50,6 +50,8 @@ export { vllmHandler } from "./backends/vllm.js";
 export type { VllmOptions } from "./backends/vllm.js";
 export { llamacppHandler } from "./backends/llamacpp.js";
 export type { LlamaCppOptions } from "./backends/llamacpp.js";
+export { anthropicHandler } from "./backends/anthropic.js";
+export type { AnthropicOptions } from "./backends/anthropic.js";
 export { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 export type { BackendType } from "./backends/index.js";
 export type { BackendHandler, BackendOptions } from "./backends/base.js";

@@ -402,7 +402,11 @@ export function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts 
   return {
     ...opts,
     // Onboarding: default to Ollama's well-known local port so only --model is required.
-    backendUrl: opts.backendUrl || saved.backend_url || "http://localhost:11434",
+    // #414/C1 — an `anthropic` backend defaults to the Anthropic API, not localhost.
+    backendUrl:
+      opts.backendUrl ||
+      saved.backend_url ||
+      (opts.backendType === "anthropic" ? "https://api.anthropic.com" : "http://localhost:11434"),
     model: opts.model || saved.model,
     publicEndpoint: opts.publicEndpoint || saved.public_endpoint,
     directoryUrl: opts.directoryUrl || saved.directory_url,
