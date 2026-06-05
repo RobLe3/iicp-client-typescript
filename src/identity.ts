@@ -21,6 +21,12 @@ import {
   createHash,
   type KeyObject,
 } from "node:crypto";
+import {
+  decryptSeed,
+  encryptSeed,
+  passphraseFromEnv,
+  type EncryptedSecret,
+} from "./operator_crypto.js";
 
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 
@@ -66,6 +72,8 @@ export interface OperatorIdentity {
   contact: string;
   operator_secret?: string;
   operator_integrity_hash?: string;
+  // #460 — AES-256-GCM-sealed seed when the operator opts into at-rest encryption.
+  operator_secret_enc?: EncryptedSecret;
 }
 
 export function computeOperatorIntegrityHash(operatorId: string, createdAt: string): string {
@@ -91,19 +99,52 @@ export function generateOperator(opts: { display_name?: string; contact?: string
 
 /** True when operator_id is a real ed25519 pubkey (not a legacy op-<uuid>). */
 export function operatorIsKeyBacked(op: OperatorIdentity): boolean {
-  return !!op.operator_secret && !op.operator_id.startsWith("op-");
+  return (!!op.operator_secret || !!op.operator_secret_enc) && !op.operator_id.startsWith("op-");
 }
 
-/** The ed25519 signing key (KeyObject) for delegations / mutations. Throws on a legacy
- *  keyless identity (regenerate). */
-export function operatorSigningKey(op: OperatorIdentity): KeyObject {
-  if (!op.operator_secret) {
-    throw new Error(
-      "legacy operator identity has no key (operator_id is a UUID, not a public key) — regenerate (#464)",
-    );
+/** #460 — true when the seed is sealed at rest and a passphrase is needed to sign. */
+export function operatorIsEncrypted(op: OperatorIdentity): boolean {
+  return !!op.operator_secret_enc && !op.operator_secret;
+}
+
+/** Resolve the base64 seed: plaintext if present, else decrypt the sealed seed with
+ *  `passphrase` (falling back to $IICP_OPERATOR_PASSPHRASE for headless serve). */
+function operatorSeedB64(op: OperatorIdentity, passphrase?: string): string {
+  if (op.operator_secret) return op.operator_secret;
+  if (op.operator_secret_enc) {
+    const pw = passphrase ?? passphraseFromEnv();
+    if (!pw) {
+      throw new Error(
+        "operator secret is encrypted — set $IICP_OPERATOR_PASSPHRASE (or pass a passphrase) to unlock it (#460)",
+      );
+    }
+    return decryptSeed(pw, op.operator_secret_enc, op.operator_id);
   }
-  const der = Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(op.operator_secret, "base64")]);
+  throw new Error(
+    "legacy operator identity has no key (operator_id is a UUID, not a public key) — regenerate (#464)",
+  );
+}
+
+/** The ed25519 signing key (KeyObject) for delegations / mutations. Decrypts the sealed seed
+ *  when the identity is encrypted (#460). Throws on a legacy keyless identity (regenerate). */
+export function operatorSigningKey(op: OperatorIdentity, passphrase?: string): KeyObject {
+  const seed = operatorSeedB64(op, passphrase);
+  const der = Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(seed, "base64")]);
   return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+}
+
+/** #460 — return a copy with the seed sealed under `passphrase` (operator_secret cleared). */
+export function operatorEncryptAtRest(op: OperatorIdentity, passphrase: string): OperatorIdentity {
+  const enc = encryptSeed(passphrase, operatorSeedB64(op), op.operator_id);
+  return { ...op, operator_secret: "", operator_secret_enc: enc };
+}
+
+/** #460 — return a copy with the plaintext seed restored (operator_secret_enc cleared). */
+export function operatorDecryptAtRest(op: OperatorIdentity, passphrase: string): OperatorIdentity {
+  const seed = operatorSeedB64(op, passphrase);
+  const copy = { ...op, operator_secret: seed };
+  delete copy.operator_secret_enc;
+  return copy;
 }
 
 /** Directory-safe view: never includes operator_secret or contact (private). */
@@ -132,6 +173,8 @@ export function loadOperator(): OperatorIdentity | null {
     // #464 — present on key-backed identities; absent on legacy op-<uuid> files.
     operator_secret: data.operator_secret ?? undefined,
     operator_integrity_hash: data.operator_integrity_hash ?? undefined,
+    // #460 — sealed seed when the operator opted into at-rest encryption.
+    operator_secret_enc: data.operator_secret_enc ?? undefined,
   };
 }
 

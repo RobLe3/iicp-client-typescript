@@ -44,6 +44,9 @@ import {
   listNodes,
   loadNode,
   loadOperator,
+  operatorDecryptAtRest,
+  operatorEncryptAtRest,
+  operatorIsEncrypted,
   operatorIsKeyBacked,
   operatorSigningKey,
   saveNode,
@@ -1274,6 +1277,82 @@ async function runCredits(argv: string[]): Promise<number> {
 }
 
 /**
+ * Resolve a passphrase: $IICP_OPERATOR_PASSPHRASE if set (headless/CI), else an interactive
+ * readline prompt (this command is operator-run, so a prompt is fine here — only `serve` must
+ * stay non-interactive). For `confirm`, the prompt is asked twice and must match.
+ */
+async function operatorPassphrase(prompt: string, confirm: boolean): Promise<string | null> {
+  const env = process.env["IICP_OPERATOR_PASSPHRASE"];
+  if (env) return env;
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const pw = (await rl.question(prompt)).trim();
+    if (confirm && pw !== (await rl.question("Confirm passphrase: ")).trim()) {
+      process.stderr.write("ERROR: passphrases do not match.\n");
+      return null;
+    }
+    return pw || null;
+  } finally {
+    rl.close();
+  }
+}
+
+/** `iicp-node operator encrypt` (#460) — seal the operator secret at rest under a passphrase. */
+async function runOperatorEncrypt(): Promise<number> {
+  const op = loadOperator();
+  if (!op) {
+    process.stderr.write("ERROR: no operator identity — run `iicp-node init` first.\n");
+    return 1;
+  }
+  if (operatorIsEncrypted(op)) {
+    process.stdout.write("Operator secret is already encrypted at rest.\n");
+    return 0;
+  }
+  if (!operatorIsKeyBacked(op)) {
+    process.stderr.write("ERROR: legacy keyless operator identity has nothing to encrypt (#464).\n");
+    return 1;
+  }
+  const pw = await operatorPassphrase("New operator passphrase: ", true);
+  if (!pw) {
+    process.stderr.write("ERROR: a non-empty passphrase is required.\n");
+    return 1;
+  }
+  saveOperator(operatorEncryptAtRest(op, pw));
+  process.stdout.write(
+    "Operator secret encrypted at rest (AES-256-GCM / PBKDF2). Set $IICP_OPERATOR_PASSPHRASE " +
+      "to unlock it headlessly during `serve`.\n",
+  );
+  return 0;
+}
+
+/** `iicp-node operator decrypt` (#460) — restore the plaintext secret at rest. */
+async function runOperatorDecrypt(): Promise<number> {
+  const op = loadOperator();
+  if (!op) {
+    process.stderr.write("ERROR: no operator identity — run `iicp-node init` first.\n");
+    return 1;
+  }
+  if (!operatorIsEncrypted(op)) {
+    process.stdout.write("Operator secret is already stored in plaintext.\n");
+    return 0;
+  }
+  const pw = await operatorPassphrase("Operator passphrase: ", false);
+  if (!pw) {
+    process.stderr.write("ERROR: a passphrase is required to decrypt.\n");
+    return 1;
+  }
+  try {
+    saveOperator(operatorDecryptAtRest(op, pw));
+  } catch (e) {
+    process.stderr.write(`ERROR: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
+  process.stdout.write("Operator secret decrypted (now stored in plaintext at rest).\n");
+  return 0;
+}
+
+/**
  * `iicp-node operator rename <name>` (#460) — change the public, mutable display_name over
  * the immutable operator_id. The operator signs the canonical rename bytes with their own
  * key, so the directory authenticates the change by signature alone (no node token); one
@@ -1282,6 +1361,8 @@ async function runCredits(argv: string[]): Promise<number> {
  */
 async function runOperator(argv: string[]): Promise<number> {
   const sub = argv[0];
+  if (sub === "encrypt") return runOperatorEncrypt();
+  if (sub === "decrypt") return runOperatorDecrypt();
   if (sub !== "rename") {
     process.stderr.write(`unknown operator subcommand: ${sub ?? "(none)"}\n`);
     return 2;
