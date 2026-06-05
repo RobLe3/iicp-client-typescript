@@ -14,9 +14,19 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { randomUUID } from "node:crypto";
+import {
+  randomUUID,
+  generateKeyPairSync,
+  createPrivateKey,
+  createHash,
+  type KeyObject,
+} from "node:crypto";
 
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
+// #464 — PKCS8 DER prefix for an ed25519 private key (16 bytes); + 32 raw seed bytes = 48.
+// Lets us reconstruct the signing KeyObject from the stored base64 seed.
+const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
 function nowIso(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -40,19 +50,69 @@ export function configDir(): string {
   return dir;
 }
 
+/**
+ * #464 — the operator identity is an ed25519 keypair: `operator_id` IS the base64 public
+ * key (== the directory's `operator_pubkey` via the ADR-045 delegation), so it is
+ * cryptographically verifiable rather than a random UUID. `operator_secret` is the base64
+ * 32-byte private seed — LOCAL ONLY (0600 file), never sent to the directory (password-at-rest
+ * = #460). `operator_integrity_hash` binds the immutable fields (pinned by the directory on
+ * first-use; the directory's own clock — not `created_at` — is authoritative for founder
+ * ordinals). `display_name` is the public, mutable handle; `contact` is private.
+ */
 export interface OperatorIdentity {
   operator_id: string;
   created_at: string;
   display_name: string;
   contact: string;
+  operator_secret?: string;
+  operator_integrity_hash?: string;
+}
+
+export function computeOperatorIntegrityHash(operatorId: string, createdAt: string): string {
+  return createHash("sha256").update(`${operatorId}:${createdAt}`).digest("hex");
 }
 
 export function generateOperator(opts: { display_name?: string; contact?: string } = {}): OperatorIdentity {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const pubDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  const privDer = privateKey.export({ type: "pkcs8", format: "der" }) as Buffer;
+  const operator_id = Buffer.from(pubDer.subarray(pubDer.length - 32)).toString("base64");
+  const operator_secret = Buffer.from(privDer.subarray(privDer.length - 32)).toString("base64");
+  const created_at = nowIso();
   return {
-    operator_id: `op-${randomUUID()}`,
-    created_at: nowIso(),
+    operator_id,
+    created_at,
     display_name: opts.display_name ?? "",
     contact: opts.contact ?? "",
+    operator_secret,
+    operator_integrity_hash: computeOperatorIntegrityHash(operator_id, created_at),
+  };
+}
+
+/** True when operator_id is a real ed25519 pubkey (not a legacy op-<uuid>). */
+export function operatorIsKeyBacked(op: OperatorIdentity): boolean {
+  return !!op.operator_secret && !op.operator_id.startsWith("op-");
+}
+
+/** The ed25519 signing key (KeyObject) for delegations / mutations. Throws on a legacy
+ *  keyless identity (regenerate). */
+export function operatorSigningKey(op: OperatorIdentity): KeyObject {
+  if (!op.operator_secret) {
+    throw new Error(
+      "legacy operator identity has no key (operator_id is a UUID, not a public key) — regenerate (#464)",
+    );
+  }
+  const der = Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(op.operator_secret, "base64")]);
+  return createPrivateKey({ key: der, format: "der", type: "pkcs8" });
+}
+
+/** Directory-safe view: never includes operator_secret or contact (private). */
+export function operatorPublicView(op: OperatorIdentity): Record<string, string> {
+  return {
+    operator_id: op.operator_id,
+    created_at: op.created_at,
+    display_name: op.display_name,
+    operator_integrity_hash: op.operator_integrity_hash ?? "",
   };
 }
 
@@ -69,6 +129,9 @@ export function loadOperator(): OperatorIdentity | null {
     created_at: data.created_at,
     display_name: data.display_name ?? "",
     contact: data.contact ?? "",
+    // #464 — present on key-backed identities; absent on legacy op-<uuid> files.
+    operator_secret: data.operator_secret ?? undefined,
+    operator_integrity_hash: data.operator_integrity_hash ?? undefined,
   };
 }
 
