@@ -31,7 +31,7 @@ import * as net from "node:net";
 import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { IicpNode } from "./node.js";
+import { IicpNode, deriveNativeEndpoint } from "./node.js";
 import { IicpClient } from "./client.js";
 import { writeNodeEvent } from "./node_log.js";
 import { configureCipPolicy } from "./cip_policy.js";
@@ -746,6 +746,19 @@ async function runServe(opts: ServeOpts): Promise<number> {
         "Set IICP_PUBLIC_ENDPOINT=<url> or IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to register.",
     );
     opts.skipRegistration = true;
+  }
+
+  // #457 / ADR-040 — advertise the native IICP binary transport. serve() multiplexes it
+  // onto the SAME socket as HTTP (first-byte detection), so transport_endpoint shares the
+  // endpoint's host:port with the iicp:// scheme. Set from the FINAL endpoint (after NAT
+  // profile application); register() only sends it when registering (skipRegistration gates
+  // the non-routable case) → advertise-when-reachable. Opt out with IICP_DISABLE_NATIVE_TRANSPORT=1.
+  if (!opts.skipRegistration && process.env["IICP_DISABLE_NATIVE_TRANSPORT"] !== "1") {
+    const finalEndpoint = (node["_cfg"] as { endpoint?: string }).endpoint;
+    const nativeEndpoint = finalEndpoint ? deriveNativeEndpoint(finalEndpoint) : null;
+    if (nativeEndpoint) {
+      (node["_cfg"] as Record<string, unknown>).transportEndpoint = nativeEndpoint;
+    }
   }
 
   // #404 — register with bounded backoff retry. On persistent failure, pass an

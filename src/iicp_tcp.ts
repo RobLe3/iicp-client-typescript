@@ -250,6 +250,16 @@ export class IicpTcpServer {
     return this._port;
   }
 
+  /**
+   * Handle one already-accepted socket as a native IICP connection (#457). Public so a
+   * shared single-port listener — where `iicp-node serve` multiplexes the HTTP control
+   * plane and the native binary transport on ONE port via first-byte detection — can route
+   * native connections here without this server binding its own port.
+   */
+  async handleConnection(socket: net.Socket): Promise<void> {
+    return this._handleConnection(socket);
+  }
+
   private async _handleConnection(socket: net.Socket): Promise<void> {
     let buf = Buffer.alloc(0);
     // Aggregate incoming TCP bytes into a Buffer queue. The async loop reads
