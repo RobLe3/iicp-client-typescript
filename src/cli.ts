@@ -44,10 +44,13 @@ import {
   listNodes,
   loadNode,
   loadOperator,
+  operatorIsKeyBacked,
+  operatorSigningKey,
   saveNode,
   saveOperator,
   type NodeIdentity,
 } from "./identity.js";
+import { issueDelegation } from "./delegation.js";
 
 export interface ServeOpts {
   backendUrl: string;
@@ -632,6 +635,22 @@ async function runServe(opts: ServeOpts): Promise<number> {
 
   const backendFlavor = await detectBackendFlavor(opts.backendUrl, opts.backendApiKey, opts.backendType);
   process.stderr.write(`backend detected: ${backendFlavor}\n`);
+
+  // #463/#464 — bind the operator identity: issue a delegation FROM the (key-backed) operator
+  // identity for this node and advertise the public display_name. The directory verifies the
+  // delegation (operator_pub == operator_id) and records the operator. Never sends the secret/contact.
+  const _op = loadOperator();
+  let _opDelegation: ReturnType<typeof issueDelegation> | undefined;
+  let _opDisplayName: string | undefined;
+  let _opCreatedAt: string | undefined;
+  let _opIntegrityHash: string | undefined;
+  if (_op && operatorIsKeyBacked(_op)) {
+    _opDelegation = issueDelegation(operatorSigningKey(_op), nodeId);
+    _opDisplayName = _op.display_name || undefined;
+    _opCreatedAt = _op.created_at;
+    _opIntegrityHash = _op.operator_integrity_hash || undefined;
+  }
+
   const node = new IicpNode({
     nodeId,
     endpoint: publicEndpoint,
@@ -642,6 +661,10 @@ async function runServe(opts: ServeOpts): Promise<number> {
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
     relayWorkerEndpoint: opts.relayWorkerEndpoint || undefined,
+    operatorDelegation: _opDelegation,
+    operatorDisplayName: _opDisplayName,
+    operatorCreatedAt: _opCreatedAt,
+    operatorIntegrityHash: _opIntegrityHash,
   });
 
   // Apply collected NAT profile (covers both auto-detect and tier-0 IPv6 cases).
