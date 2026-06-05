@@ -17,7 +17,13 @@
  * same one-liner setup path.
  */
 import { parseArgs } from "node:util";
-import { randomBytes, randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  randomBytes,
+  randomUUID,
+  verify as edVerify,
+} from "node:crypto";
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const SDK_VERSION: string = (require("../package.json") as { version: string }).version;
@@ -895,6 +901,204 @@ async function runQuery(argv: string[]): Promise<number> {
   }
 }
 
+/** SPKI DER prefix for an Ed25519 public key (12 bytes); + 32 raw key bytes = a parseable SPKI key. */
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/**
+ * A JSON value where every number keeps its ORIGINAL source literal (`{ __num }`).
+ * JS loses the int/float distinction on `JSON.parse` (5.0 → 5), but the directory
+ * signs over `serde_json`'s rendering where a whole float is `"5.0"`. By capturing the
+ * literal from the directory's own JSON output — produced by the same serializer as its
+ * canonical form — we reproduce the signed bytes exactly, no matter the value. (#456)
+ */
+type LNode = string | boolean | null | { __num: string } | LNode[] | { [k: string]: LNode };
+
+function isLNum(v: LNode): v is { __num: string } {
+  return typeof v === "object" && v !== null && !Array.isArray(v) && "__num" in v;
+}
+
+/** Minimal recursive-descent JSON parse that preserves number literals verbatim. */
+function losslessParse(text: string): LNode {
+  let i = 0;
+  const ws = (): void => {
+    while (i < text.length && (text[i] === " " || text[i] === "\t" || text[i] === "\n" || text[i] === "\r")) i++;
+  };
+  const parseStr = (): string => {
+    i++; // opening quote
+    let s = "";
+    while (text[i] !== '"') {
+      const ch = text[i]!;
+      if (ch === "\\") {
+        const e = text[++i]!;
+        if (e === "u") {
+          s += String.fromCharCode(parseInt(text.slice(i + 1, i + 5), 16));
+          i += 5;
+        } else {
+          const map: Record<string, string> = {
+            '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t",
+          };
+          s += map[e] ?? e;
+          i++;
+        }
+      } else {
+        s += ch;
+        i++;
+      }
+    }
+    i++; // closing quote
+    return s;
+  };
+  const parseVal = (): LNode => {
+    ws();
+    const c = text[i];
+    if (c === "{") {
+      const o: { [k: string]: LNode } = {};
+      i++;
+      ws();
+      if (text[i] === "}") {
+        i++;
+        return o;
+      }
+      for (;;) {
+        ws();
+        const key = parseStr();
+        ws();
+        i++; // ':'
+        o[key] = parseVal();
+        ws();
+        if (text[i] === ",") {
+          i++;
+          continue;
+        }
+        i++; // '}'
+        break;
+      }
+      return o;
+    }
+    if (c === "[") {
+      const a: LNode[] = [];
+      i++;
+      ws();
+      if (text[i] === "]") {
+        i++;
+        return a;
+      }
+      for (;;) {
+        a.push(parseVal());
+        ws();
+        if (text[i] === ",") {
+          i++;
+          continue;
+        }
+        i++; // ']'
+        break;
+      }
+      return a;
+    }
+    if (c === '"') return parseStr();
+    if (c === "t") {
+      i += 4;
+      return true;
+    }
+    if (c === "f") {
+      i += 5;
+      return false;
+    }
+    if (c === "n") {
+      i += 4;
+      return null;
+    }
+    const start = i;
+    while (i < text.length && "+-0123456789.eE".includes(text[i]!)) i++;
+    return { __num: text.slice(start, i) };
+  };
+  return parseVal();
+}
+
+/**
+ * Canonical JSON byte-for-byte matching the directory (`federation.rs` / PHP `json_encode`):
+ * recursive lexicographic key-sort, no whitespace, `/` and non-ASCII unescaped (JS
+ * `JSON.stringify` already matches for strings), numbers emitted as their source literal.
+ */
+function canonicalJson(node: LNode): string {
+  if (node === null || typeof node === "boolean" || typeof node === "string") return JSON.stringify(node);
+  if (isLNum(node)) return node.__num;
+  if (Array.isArray(node)) return "[" + node.map(canonicalJson).join(",") + "]";
+  const keys = Object.keys(node).sort();
+  return "{" + keys.map((k) => JSON.stringify(k) + ":" + canonicalJson(node[k]!)).join(",") + "}";
+}
+
+/**
+ * #456 --verify: cryptographically confirm this node's CREDIT_AWARD income against the
+ * directory's signed event log (defends against a lying directory). Resolves the directory's
+ * Ed25519 key from /.well-known/did.json and re-derives + verifies each award signature.
+ * Free-tier CREDIT_ALLOCATION is unsigned by design, so it is not counted here (no cry-wolf).
+ */
+export async function verifyCreditAwards(
+  directoryUrl: string,
+  nodeId: string,
+): Promise<{ sum: number; verified: number; failed: number }> {
+  const origin = new URL(directoryUrl).origin; // did.json lives at the host root, not under /api
+  const didResp = await fetch(`${origin}/.well-known/did.json`, { signal: AbortSignal.timeout(20000) });
+  const did = (await didResp.json()) as {
+    verificationMethod?: { publicKeyJwk?: { x?: string } }[];
+  };
+  const x = did.verificationMethod?.[0]?.publicKeyJwk?.x;
+  if (!x) throw new Error("directory did.json has no Ed25519 verification key");
+  const raw = Buffer.from(x, "base64url");
+  if (raw.length !== 32) throw new Error(`bad Ed25519 key length ${raw.length}`);
+  const pubKey = createPublicKey({
+    key: Buffer.concat([ED25519_SPKI_PREFIX, raw]),
+    format: "der",
+    type: "spki",
+  });
+
+  const base = directoryUrl.replace(/\/+$/, "");
+  let sum = 0;
+  let verified = 0;
+  let failed = 0;
+  let since = 0;
+  for (;;) {
+    const url = `${base}/v1/events?event_types=CREDIT_AWARD&since_seq=${since}&limit=500`;
+    const resp = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    const tree = losslessParse(await resp.text()) as { [k: string]: LNode };
+    const events = (tree["events"] as LNode[] | undefined) ?? [];
+    if (events.length === 0) break;
+    let maxSeq = since;
+    for (const evRaw of events) {
+      const ev = evRaw as { [k: string]: LNode };
+      const seqNode = ev["seq"];
+      const seq = isLNum(seqNode) ? Number(seqNode.__num) : 0;
+      maxSeq = Math.max(maxSeq, seq);
+      if (ev["event_type"] !== "CREDIT_AWARD" || ev["node_id"] !== nodeId) continue;
+      const sig = ev["sig"];
+      if (typeof sig !== "string") continue;
+      const payload = ev["payload"]!;
+      const payloadHash = createHash("sha256").update(canonicalJson(payload)).digest("hex");
+      const eventId = typeof ev["event_id"] === "string" ? ev["event_id"] : "";
+      const tsNode = ev["ts_ms"];
+      const tsMs = isLNum(tsNode) ? Number(tsNode.__num) : 0;
+      const msg = createHash("sha256")
+        .update(`${eventId}:CREDIT_AWARD:${seq}:${tsMs}:${payloadHash}`)
+        .digest();
+      const sigBuf = Buffer.from(sig, "hex");
+      if (sigBuf.length === 64 && edVerify(null, msg, pubKey, sigBuf)) {
+        verified++;
+        const amt =
+          typeof payload === "object" && payload !== null && !Array.isArray(payload)
+            ? payload["amount"]
+            : undefined;
+        if (amt !== undefined && isLNum(amt)) sum += Number(amt.__num);
+      } else {
+        failed++;
+      }
+    }
+    if (events.length < 500 || maxSeq <= since) break;
+    since = maxSeq;
+  }
+  return { sum, verified, failed };
+}
+
 /**
  * `iicp-node credits` (#456) — earned / spent / balance from the directory's
  * reconcile-checked GET /v1/credits/summary. Figures come authenticated from the
@@ -994,9 +1198,32 @@ async function runCredits(argv: string[]): Promise<number> {
     );
   }
   if (values["verify"]) {
-    process.stderr.write(
-      "[iicp-node] note: --verify (cryptographic audit vs the signed CREDIT_AWARD log) is the next slice (#456).\n",
+    process.stdout.write("  ── cryptographic verification (signed CREDIT_AWARD log) ──\n");
+    let v: { sum: number; verified: number; failed: number };
+    try {
+      v = await verifyCreditAwards(directoryUrl, nodeId);
+    } catch (e) {
+      process.stderr.write(`[iicp-node] --verify failed: ${e instanceof Error ? e.message : String(e)}\n`);
+      return 1;
+    }
+    if (v.failed > 0) {
+      process.stderr.write(
+        `[iicp-node] ✗ ${v.failed} award event(s) FAILED Ed25519 verification — ` +
+          "tampered or inconsistent event log. Do NOT trust these figures.\n",
+      );
+      return 1;
+    }
+    process.stdout.write(
+      `  ✓ ${v.verified} award(s) cryptographically verified · ${v.sum.toFixed(3)} credits ` +
+        "(Ed25519, signed by the directory)\n",
     );
+    const freeTier = earned - v.sum;
+    if (freeTier > 0.0001) {
+      process.stdout.write(
+        `  · ${freeTier.toFixed(3)} credits are free-tier allocation ` +
+          "(directory-granted, not signed task awards)\n",
+      );
+    }
   }
   return 0;
 }
