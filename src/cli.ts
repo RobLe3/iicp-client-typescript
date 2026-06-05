@@ -754,6 +754,19 @@ async function runServe(opts: ServeOpts): Promise<number> {
         // eslint-disable-next-line no-console
         console.log(`[iicp-node] registered as ${nodeId} (token=${(token ?? "").slice(0, 8)}…)`);
         writeNodeEvent(nodeId, "register_ok", `endpoint=${opts.publicEndpoint || `http://localhost:${opts.port}`}`, logDir);
+        // #456 — cache the token in the saved config so `iicp-node credits` can
+        // authenticate later without re-registering (best-effort).
+        if (opts.node && token) {
+          const saved = loadNode(opts.node);
+          if (saved) {
+            saved.node_token = token;
+            try {
+              saveNode(saved);
+            } catch {
+              /* best-effort cache */
+            }
+          }
+        }
         break;
       } catch (exc) {
         const msg = exc instanceof Error ? exc.message : String(exc);
@@ -882,6 +895,112 @@ async function runQuery(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * `iicp-node credits` (#456) — earned / spent / balance from the directory's
+ * reconcile-checked GET /v1/credits/summary. Figures come authenticated from the
+ * directory (not the local config), so editing the saved file cannot inflate them;
+ * `reconciles` flags a ledger that does not add up.
+ */
+async function runCredits(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      node: { type: "string" },
+      "node-id": { type: "string" },
+      token: { type: "string" },
+      "directory-url": { type: "string" },
+      json: { type: "boolean" },
+      verify: { type: "boolean" },
+    },
+    allowPositionals: false,
+  });
+
+  const nodeName = values["node"] as string | undefined;
+  let directoryUrl = values["directory-url"] as string | undefined;
+  let nodeId = values["node-id"] as string | undefined;
+  let token = (values["token"] as string | undefined) ?? process.env["IICP_NODE_TOKEN"];
+
+  if (nodeName) {
+    const saved = loadNode(nodeName);
+    if (!saved) {
+      process.stderr.write(
+        `ERROR: no saved config at ~/.iicp/nodes/${nodeName}.json — run \`iicp-node init\` / \`serve\` first.\n`,
+      );
+      return 1;
+    }
+    directoryUrl = directoryUrl ?? saved.directory_url;
+    nodeId = nodeId ?? saved.node_id;
+    token = token ?? saved.node_token;
+  }
+  directoryUrl = directoryUrl ?? process.env["IICP_DIRECTORY_URL"] ?? "https://iicp.network/api";
+  if (!nodeId) {
+    process.stderr.write("ERROR: node_id required (use --node NAME or --node-id ID)\n");
+    return 1;
+  }
+  if (!token) {
+    process.stderr.write(
+      "ERROR: no node_token — run `iicp-node serve` once (it caches the token), or pass --token / $IICP_NODE_TOKEN\n",
+    );
+    return 1;
+  }
+
+  const url = `${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}`, "X-Node-Id": nodeId },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    process.stderr.write(`ERROR: request failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await resp.json()) as Record<string, unknown>;
+  } catch {
+    process.stderr.write(`ERROR: bad response (HTTP ${resp.status})\n`);
+    return 1;
+  }
+  if (!resp.ok) {
+    const err = body["error"] as { message?: string } | undefined;
+    process.stderr.write(`ERROR: HTTP ${resp.status}: ${err?.message ?? "request rejected"}\n`);
+    return 1;
+  }
+
+  if (values["json"]) {
+    process.stdout.write(JSON.stringify(body, null, 2) + "\n");
+    return 0;
+  }
+
+  const earned = Number(body["total_earned"] ?? 0);
+  const spent = Number(body["total_spent"] ?? 0);
+  const balance = Number(body["balance"] ?? 0);
+  const tx = Number(body["tx_count"] ?? 0);
+  const reconciles = Boolean(body["reconciles"]);
+  const tpc = Number(body["tokens_per_credit"] ?? 1000);
+  const pad = (n: number): string => n.toFixed(3).padStart(12);
+  const check = reconciles ? "✓ reconciles" : "✗ DOES NOT RECONCILE";
+  process.stdout.write(`IICP credits — ${nodeName ?? nodeId}\n`);
+  process.stdout.write(`  Earned (income) ${pad(earned)}\n`);
+  process.stdout.write(`  Spent           ${pad(spent)}\n`);
+  process.stdout.write("  ─────────────────────────────\n");
+  process.stdout.write(`  Balance         ${pad(balance)}   ${check}   (≈ ${Math.trunc(balance * tpc)} tokens)\n`);
+  process.stdout.write(`  ${tx} transactions · \`iicp-node credits --json\` for raw\n`);
+  if (!reconciles) {
+    process.stderr.write(
+      "[iicp-node] WARNING: balance != earned − spent — the ledger does not reconcile; do not trust these figures.\n",
+    );
+  }
+  if (values["verify"]) {
+    process.stderr.write(
+      "[iicp-node] note: --verify (cryptographic audit vs the signed CREDIT_AWARD log) is the next slice (#456).\n",
+    );
+  }
+  return 0;
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     printHelp();
@@ -896,6 +1015,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (cmd === "init") return runInit();
   if (cmd === "list") return runList();
   if (cmd === "query") return runQuery(argv.slice(1));
+  if (cmd === "credits") return runCredits(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();

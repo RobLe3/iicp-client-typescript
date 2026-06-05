@@ -94,6 +94,12 @@ export interface NodeIdentity {
   public_endpoint: string;
   auto_detect_nat: boolean;
   external_ip_probe_url: string;
+  /**
+   * #456 — node_token cached after register so `iicp-node credits` can authenticate
+   * without re-registering. Bearer credential (not a key); stored in the chmod-0600
+   * config. Optional — absent until the node first registers via `serve`.
+   */
+  node_token?: string;
   created_at: string;
 }
 
