@@ -50,7 +50,7 @@ import {
   saveOperator,
   type NodeIdentity,
 } from "./identity.js";
-import { issueDelegation } from "./delegation.js";
+import { issueDelegation, signRename } from "./delegation.js";
 
 export interface ServeOpts {
   backendUrl: string;
@@ -100,7 +100,9 @@ function printHelp(): void {
       `  init                       Interactive wizard — set up operator + first node config\n` +
       `  list                       List node configs saved under ~/.iicp/nodes/\n` +
       `  serve                      Register and serve a node\n` +
-      `  query <prompt>             Discover mesh nodes and submit a chat task\n\n` +
+      `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
+      `  credits                    Show this node's earned / spent / balance credits\n` +
+      `  operator rename <name>     Change your public display_name (signed by your operator key)\n\n` +
       `Run an IICP provider node backed by an OpenAI-compatible server.\n\n` +
       `serve required (flag or env):\n` +
       `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
@@ -1271,6 +1273,82 @@ async function runCredits(argv: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `iicp-node operator rename <name>` (#460) — change the public, mutable display_name over
+ * the immutable operator_id. The operator signs the canonical rename bytes with their own
+ * key, so the directory authenticates the change by signature alone (no node token); one
+ * signed call updates the single operator record, reflected on every node + the leaderboard.
+ * Updates the local operator.json on success. Never sends the secret/contact.
+ */
+async function runOperator(argv: string[]): Promise<number> {
+  const sub = argv[0];
+  if (sub !== "rename") {
+    process.stderr.write(`unknown operator subcommand: ${sub ?? "(none)"}\n`);
+    return 2;
+  }
+  const { values, positionals } = parseArgs({
+    args: argv.slice(1),
+    options: { "directory-url": { type: "string" } },
+    allowPositionals: true,
+  });
+  const name = positionals[0];
+  // eslint-disable-next-line no-control-regex
+  if (!name || name.length > 64 || /[\u0000-\u001f\u007f]/.test(name)) {
+    process.stderr.write("ERROR: display name must be 1-64 chars with no control characters.\n");
+    return 1;
+  }
+  const op = loadOperator();
+  if (!op) {
+    process.stderr.write("ERROR: no operator identity — run `iicp-node init` first.\n");
+    return 1;
+  }
+  if (!operatorIsKeyBacked(op)) {
+    process.stderr.write(
+      "ERROR: legacy keyless operator identity (operator_id is a UUID, not a key) — " +
+        "cannot sign a rename. Regenerate with a key-backed identity (#464).\n",
+    );
+    return 1;
+  }
+
+  const directoryUrl =
+    (values["directory-url"] as string | undefined) ??
+    process.env["IICP_DIRECTORY_URL"] ??
+    "https://iicp.network/api";
+  const ts = Math.floor(Date.now() / 1000);
+  const sig = signRename(operatorSigningKey(op), name, op.operator_id, ts);
+  const url = `${directoryUrl.replace(/\/+$/, "")}/v1/operator/rename`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_pub: op.operator_id, display_name: name, ts, sig }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    process.stderr.write(`ERROR: request failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await resp.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  if (!resp.ok) {
+    const err = body["error"] as { message?: string } | undefined;
+    process.stderr.write(`ERROR: HTTP ${resp.status}: ${err?.message ?? "request rejected"}\n`);
+    return 1;
+  }
+
+  // Persist the new name locally so the next `serve` re-asserts it at register.
+  op.display_name = (body["display_name"] as string | undefined) ?? name;
+  saveOperator(op);
+  process.stdout.write(`Renamed operator display_name to ${JSON.stringify(op.display_name)}.\n`);
+  return 0;
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     printHelp();
@@ -1286,6 +1364,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (cmd === "list") return runList();
   if (cmd === "query") return runQuery(argv.slice(1));
   if (cmd === "credits") return runCredits(argv.slice(1));
+  if (cmd === "operator") return runOperator(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();

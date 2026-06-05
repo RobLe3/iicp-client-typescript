@@ -3,11 +3,14 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createPublicKey, verify } from "node:crypto";
 import {
   canonicalBytes,
+  canonicalRenameBytes,
   generateOperatorKey,
   issueDelegation,
   operatorPubB64,
+  signRename,
   verifyDelegation,
 } from "../src/delegation.js";
 
@@ -15,6 +18,11 @@ import {
 // OperatorDelegationVerifier::canonicalBytes (and the Python signer) for the
 // same inputs, or directory verification of TS-signed delegations silently fails.
 const KAT = '{"node_id":"node-kat-1","not_after":1893456000,"operator_pub":"T3BQdWJLZXlCYXNlNjQ="}';
+
+// #460 rename KAT — MUST equal PHP OperatorController::canonicalBytes / Rust
+// delegation::canonical_rename_bytes for the same inputs (cross-impl rename).
+const RENAME_KAT = '{"display_name":"New Name","operator_pub":"T3BQdWI=","ts":1893456000}';
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
 describe("#407 ADR-045 delegation (TS)", () => {
   it("canonical bytes match the cross-language KAT", () => {
@@ -44,5 +52,25 @@ describe("#407 ADR-045 delegation (TS)", () => {
     const tok = issueDelegation(generateOperatorKey(), "node-1");
     tok.not_after += 1; // signature no longer covers the bytes
     assert.ok(!verifyDelegation(tok, "node-1"));
+  });
+});
+
+describe("#460 operator rename signing (TS)", () => {
+  it("rename canonical bytes match the cross-language KAT", () => {
+    assert.equal(canonicalRenameBytes("New Name", "T3BQdWI=", 1893456000).toString("utf8"), RENAME_KAT);
+  });
+
+  it("signRename verifies with the operator pubkey (== operator_id)", () => {
+    const op = generateOperatorKey();
+    const pub = operatorPubB64(op);
+    const sig = signRename(op, "Rebel Two", pub, 1893456000);
+    const pk = createPublicKey({
+      key: Buffer.concat([ED25519_SPKI_PREFIX, Buffer.from(pub, "base64")]),
+      format: "der",
+      type: "spki",
+    });
+    assert.ok(
+      verify(null, canonicalRenameBytes("Rebel Two", pub, 1893456000), pk, Buffer.from(sig, "base64")),
+    );
   });
 });

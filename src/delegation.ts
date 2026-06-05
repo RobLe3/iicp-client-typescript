@@ -38,6 +38,35 @@ export function canonicalBytes(nodeId: string, operatorPubB64: string, notAfter:
   );
 }
 
+/**
+ * #460 — exact bytes the operator signs to rename their public `display_name`.
+ * Field order is alphabetical (display_name < operator_pub < ts); JSON.stringify
+ * preserves insertion order, yielding the PHP/Rust byte form. MUST be byte-identical
+ * to `OperatorController::canonicalBytes` (PHP) and every other SDK signer. Do NOT reorder.
+ */
+export function canonicalRenameBytes(displayName: string, operatorPubB64: string, ts: number): Buffer {
+  return Buffer.from(
+    JSON.stringify({ display_name: displayName, operator_pub: operatorPubB64, ts }),
+    "utf8",
+  );
+}
+
+/**
+ * #460 — operator signs a display_name rename; returns base64 of the ed25519 signature.
+ * Only the operator key-holder can produce this, so the directory authenticates the
+ * mutation by the signature alone (no node token).
+ */
+export function signRename(
+  privateKey: KeyObject,
+  displayName: string,
+  operatorPubB64Val: string,
+  ts: number,
+): string {
+  return sign(null, canonicalRenameBytes(displayName, operatorPubB64Val, ts), privateKey).toString(
+    "base64",
+  );
+}
+
 /** Base64 of the operator's raw 32-byte ed25519 public key (as the directory stores). */
 export function operatorPubB64(privateKey: KeyObject): string {
   const der = createPublicKey(privateKey).export({ type: "spki", format: "der" });
