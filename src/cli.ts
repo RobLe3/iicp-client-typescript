@@ -904,6 +904,10 @@ async function runQuery(argv: string[]): Promise<number> {
 /** SPKI DER prefix for an Ed25519 public key (12 bytes); + 32 raw key bytes = a parseable SPKI key. */
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
+/** #458 hash-chain genesis root: SHA256_hex("iicp:dir:event-log:genesis:v1"). The prev_hash
+ *  of a genesis/legacy event; bound into the signing input the directory verifies against. */
+const EVENT_LOG_GENESIS_ROOT = "c44802bedf3e63b5a3f1634c5d19263634f92f26dd15401b09b06dd53a80cf9d";
+
 /**
  * A JSON value where every number keeps its ORIGINAL source literal (`{ __num }`).
  * JS loses the int/float distinction on `JSON.parse` (5.0 → 5), but the directory
@@ -1078,8 +1082,11 @@ export async function verifyCreditAwards(
       const eventId = typeof ev["event_id"] === "string" ? ev["event_id"] : "";
       const tsNode = ev["ts_ms"];
       const tsMs = isLNum(tsNode) ? Number(tsNode.__num) : 0;
+      // #458: prev_hash (tamper-evident chain) is bound into the signing input; the directory
+      // serves it per event, defaulting to GENESIS_ROOT for a genesis/legacy event.
+      const prevHash = typeof ev["prev_hash"] === "string" ? ev["prev_hash"] : EVENT_LOG_GENESIS_ROOT;
       const msg = createHash("sha256")
-        .update(`${eventId}:CREDIT_AWARD:${seq}:${tsMs}:${payloadHash}`)
+        .update(`${eventId}:CREDIT_AWARD:${seq}:${tsMs}:${payloadHash}:${prevHash}`)
         .digest();
       const sigBuf = Buffer.from(sig, "hex");
       if (sigBuf.length === 64 && edVerify(null, msg, pubKey, sigBuf)) {

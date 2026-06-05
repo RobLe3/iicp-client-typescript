@@ -80,9 +80,13 @@ function makeSignedEvents(payload: Record<string, unknown>): {
   const eventId = "11111111-1111-1111-1111-111111111111";
   const seq = 2;
   const tsMs = 1_700_000_000_000;
+  // #458: genesis-case hash-chain link, bound into the signing input.
+  const prevHash = "c44802bedf3e63b5a3f1634c5d19263634f92f26dd15401b09b06dd53a80cf9d";
   const signFor = (p: Record<string, unknown>): string => {
     const ph = createHash("sha256").update(canonForSign(p)).digest("hex");
-    const msg = createHash("sha256").update(`${eventId}:CREDIT_AWARD:${seq}:${tsMs}:${ph}`).digest();
+    const msg = createHash("sha256")
+      .update(`${eventId}:CREDIT_AWARD:${seq}:${tsMs}:${ph}:${prevHash}`)
+      .digest();
     return sign(null, msg, privateKey).toString("hex");
   };
   const events = {
@@ -94,6 +98,7 @@ function makeSignedEvents(payload: Record<string, unknown>): {
         ts_ms: tsMs,
         node_id: "n1",
         payload,
+        prev_hash: prevHash,
         sig: signFor(payload),
       },
     ],
