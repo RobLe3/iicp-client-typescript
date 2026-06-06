@@ -105,7 +105,9 @@ function printHelp(): void {
       `  serve                      Register and serve a node\n` +
       `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
       `  credits                    Show this node's earned / spent / balance credits\n` +
-      `  operator rename <name>     Change your public display_name (signed by your operator key)\n\n` +
+      `  operator rename <name>     Change your public display_name (signed by your operator key)\n` +
+      `  operator encrypt           Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
+      `  operator decrypt           Remove at-rest encryption of the operator secret\n\n` +
       `Run an IICP provider node backed by an OpenAI-compatible server.\n\n` +
       `serve required (flag or env):\n` +
       `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
@@ -1135,7 +1137,7 @@ export async function verifyCreditAwards(
         verified++;
         const amt =
           typeof payload === "object" && payload !== null && !Array.isArray(payload)
-            ? payload["amount"]
+            ? (payload as { [k: string]: LNode })["amount"]
             : undefined;
         if (amt !== undefined && isLNum(amt)) sum += Number(amt.__num);
       } else {
