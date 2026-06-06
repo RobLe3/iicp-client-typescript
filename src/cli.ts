@@ -919,7 +919,8 @@ async function runQuery(argv: string[]): Promise<number> {
       intent,
       payload,
     });
-    if (resp.status === "completed" && resp.result) {
+    // Spec terminal success status is "success" (was "completed"); accept both.
+    if ((resp.status === "success" || resp.status === "completed") && resp.result) {
       const res = resp.result as Record<string, unknown>;
       const content =
         typeof res["content"] === "string"
