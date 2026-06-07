@@ -513,7 +513,7 @@ export function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts 
     nodeId: opts.nodeId || saved.node_id,
     maxConcurrent: opts.maxConcurrent === 4 ? saved.max_concurrent : opts.maxConcurrent,
     port: opts.port === 9484 ? saved.port : opts.port,
-    host: opts.host === "0.0.0.0" ? saved.host : opts.host,
+    host: opts.host === "::" ? saved.host : opts.host,
     autoDetectNat: opts.autoDetectNat || saved.auto_detect_nat,
     externalIpProbeUrl: opts.externalIpProbeUrl || saved.external_ip_probe_url,
   };

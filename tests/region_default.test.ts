@@ -31,3 +31,19 @@ test("no region anywhere is never silently 'eu-central'", () => {
   // The merge leaves it unset; the node defaults it to "unknown" at registration — never eu-central.
   assert.notEqual(merged.region, "eu-central");
 });
+
+// Same class of bug for --host (fixed in Python, missed in TS): the saved-config restore
+// sentinel checked `opts.host === "0.0.0.0"` but --host defaults to "::", so a saved host
+// was never restored. 3-C parity.
+const hostOpts = (host: string): ServeOpts =>
+  ({ host, port: 9484, maxConcurrent: 4 }) as ServeOpts;
+
+test("saved host is restored when --host is left at the default '::'", () => {
+  const merged = applySavedNode(hostOpts("::"), { host: "10.0.0.5" } as NodeIdentity);
+  assert.equal(merged.host, "10.0.0.5", "saved host must be restored (sentinel was '0.0.0.0' vs default '::')");
+});
+
+test("explicit --host wins over a saved host", () => {
+  const merged = applySavedNode(hostOpts("1.2.3.4"), { host: "10.0.0.5" } as NodeIdentity);
+  assert.equal(merged.host, "1.2.3.4");
+});
