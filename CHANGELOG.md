@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.40] — 2026-06-07
+
+### Fixed — CLI usability hardening (no friction for new operators)
+
+- **`proxy` now listed in `iicp-node --help`** + previously-undocumented serve flags
+  (`--with-proxy`, `--relay-worker-endpoint`, `--force`, `--log-dir`, `--no-auto-detect-nat`).
+- **Every subcommand `--help`/`-h` prints usage** instead of crashing — `proxy --help`,
+  `credits --help`, `query --help`, `operator rename --help` no longer dump stack traces.
+- **Friendly parse errors** — unknown flags and bad `--port` values now print
+  `ERROR: …` (exit 2) instead of raw Node stack traces.
+- **`iicp-node serve --model X` works without `--backend-url`** — the `localhost:11434`
+  (or `https://api.anthropic.com` for `--backend-type anthropic`) default is applied
+  unconditionally, matching the Python/Rust clients.
+- **`--no-auto-detect-nat`** off-switch added; `iicp-node help` prints usage;
+  `iicp-node operator` (no subcommand) prints usage; `credits` with no `--node` auto-resolves
+  a single/`default` node and otherwise lists the saved node names. Cross-flavour CLI parity (3-C).
+
 ## [0.7.39] — 2026-06-07
 
 ### Added — unified client: local OpenAI/Ollama/Anthropic-compat proxy (ADR-050, #476)
