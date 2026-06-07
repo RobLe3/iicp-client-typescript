@@ -35,6 +35,7 @@ import { IicpNode, deriveNativeEndpoint } from "./node.js";
 import { IicpClient } from "./client.js";
 import { writeNodeEvent } from "./node_log.js";
 import { configureCipPolicy } from "./cip_policy.js";
+import { runProxy, createProxyServer, type TaskClient } from "./proxy/index.js";
 import { InstanceLock, NodeAlreadyServingError } from "./instance_lock.js";
 import { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 import {
@@ -76,6 +77,7 @@ export interface ServeOpts {
   relayWorkerEndpoint: string;
   node: string;
   logDir?: string;
+  withProxy?: boolean;
 }
 
 function envOr(name: string, fallback?: string): string | undefined {
@@ -482,6 +484,21 @@ async function runServe(opts: ServeOpts): Promise<number> {
       allowWorker: true,
       allowCoordinator: true,
     });
+  }
+
+  // 2-C: co-host the compat proxy on loopback alongside the node, supervised so a
+  // proxy failure logs but never drops the network-facing node. Forced to 127.0.0.1.
+  if (opts.withProxy) {
+    const pport = envInt("IICP_PROXY_PORT", 9483);
+    const pclient = new IicpClient({
+      directory_url: opts.directoryUrl,
+      region: opts.region,
+    }) as unknown as TaskClient;
+    const pserver = createProxyServer(pclient);
+    pserver.on("error", (e) => process.stderr.write(`co-hosted proxy error (node continues): ${String(e)}\n`));
+    pserver.listen(pport, "127.0.0.1", () =>
+      process.stdout.write(`co-hosted proxy → http://127.0.0.1:${pport} (OpenAI/Ollama/Anthropic compat)\n`),
+    );
   }
 
   if (opts.node) {
@@ -1433,6 +1450,31 @@ async function runOperator(argv: string[]): Promise<number> {
   return 0;
 }
 
+// ── proxy (ADR-050) — local compat gateway; consumer, loopback, no registration ──
+async function runProxyCmd(argv: string[]): Promise<number> {
+  const { values } = parseArgs({
+    args: argv,
+    allowPositionals: false,
+    options: {
+      port: { type: "string" },
+      host: { type: "string" },
+      "directory-url": { type: "string" },
+      region: { type: "string" },
+      token: { type: "string" },
+    },
+  });
+  const port = values.port !== undefined ? parseInt(values.port as string, 10) : envInt("IICP_PROXY_PORT", 9483);
+  const host = (values.host as string | undefined) ?? envOr("IICP_PROXY_HOST", "127.0.0.1")!;
+  return runProxy({
+    host,
+    port,
+    directoryUrl:
+      (values["directory-url"] as string | undefined) ?? envOr("IICP_DIRECTORY_URL", "https://iicp.network/api")!,
+    region: (values.region as string | undefined) ?? envOr("IICP_PROXY_PREFERRED_REGION"),
+    token: (values.token as string | undefined) ?? envOr("IICP_NODE_TOKEN"),
+  });
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
     printHelp();
@@ -1449,6 +1491,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   if (cmd === "query") return runQuery(argv.slice(1));
   if (cmd === "credits") return runCredits(argv.slice(1));
   if (cmd === "operator") return runOperator(argv.slice(1));
+  if (cmd === "proxy") return runProxyCmd(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();
@@ -1477,6 +1520,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "external-ip-probe-url": { type: "string" },
       "relay-worker-endpoint": { type: "string" },
       "log-dir": { type: "string" },
+      "with-proxy": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -1527,6 +1571,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     relayWorkerEndpoint:
       (values["relay-worker-endpoint"] as string | undefined) ?? envOr("IICP_RELAY_WORKER_ENDPOINT") ?? "",
     logDir: (values["log-dir"] as string | undefined) ?? envOr("IICP_LOG_DIR"),
+    withProxy: Boolean(values["with-proxy"]) || envBool("IICP_WITH_PROXY"),
   };
   return runServe(opts);
 }
