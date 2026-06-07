@@ -18,8 +18,16 @@ import * as http from "node:http";
 import { IicpClient } from "../client.js";
 import { IicpError } from "../errors.js";
 import type { ChatMessage } from "../types.js";
+import {
+  CIPInsufficientCredits,
+  CIPNoEligibleWorkers,
+  cipConfigFromEnv,
+  computeCipEnvelope,
+} from "./cip.js";
 
 const INTENT = "urn:iicp:intent:llm:chat:v1";
+/** CIP consumer config (env IICP_PROXY_CIP_*); enabled defaults OFF (§2.2 ¶1). */
+const CIP_CONFIG = cipConfigFromEnv();
 const OLLAMA_VERSION = "0.1.0";
 /** The proxy self-identifies as `iicp-proxy` on every response (Server header). */
 const SERVER_ID = "iicp-proxy";
@@ -39,6 +47,10 @@ export interface TaskClient {
     payload: Record<string, unknown>;
     constraints?: Record<string, unknown>;
   }): Promise<{ status: string; result?: unknown; error?: { code?: string } }>;
+  /** Optional — used only for CIP consumer gating (S.12 §2.2) when CIP is enabled. */
+  discover?(
+    intent: string,
+  ): Promise<Array<{ node_id?: string; allow_remote_inference?: boolean; reputation_score?: number }>>;
 }
 
 // ── translators (mirror iicp_client.proxy.*_compat.translator) ───────────────
@@ -123,11 +135,24 @@ async function runChatTask(
   messages: ChatMessage[],
   model: string,
   extra: Record<string, unknown>,
+  body: Record<string, unknown>,
 ): Promise<Outcome> {
   try {
+    let payloadExtra = extra;
+    // CIP consumer gating (§2.2) — only when enabled; throws CIPInsufficientCredits
+    // (E036→402) / CIPNoEligibleWorkers (E022→503), else returns an envelope to attach.
+    if (CIP_CONFIG.enabled && client.discover) {
+      const taskId = `cip-${Date.now()}`;
+      const nodes = await client.discover(INTENT);
+      const balance = ((body.billing as Record<string, unknown>)?.consumer_balance as number) ?? null;
+      const envelope = computeCipEnvelope(nodes, body, CIP_CONFIG, taskId, body.qos as string | undefined, balance);
+      if (envelope) {
+        payloadExtra = { ...extra, cip: { ...((extra.cip as Record<string, unknown>) ?? {}), ...envelope } };
+      }
+    }
     const resp = await client.submit({
       intent: INTENT,
-      payload: { messages, model, ...extra },
+      payload: { messages, model, ...payloadExtra },
       constraints: { timeout_ms: 30000 },
     });
     if (resp.status !== "success" && resp.status !== "completed") {
@@ -135,6 +160,9 @@ async function runChatTask(
     }
     return { kind: "ok", resp };
   } catch (err) {
+    // CIP gating errors map to dedicated statuses (S.12 §2.2 / §10.1).
+    if (err instanceof CIPInsufficientCredits) return { kind: "error", status: 402, code: err.code };
+    if (err instanceof CIPNoEligibleWorkers) return { kind: "error", status: 503, code: err.code };
     if (err instanceof IicpError) {
       // No nodes from discover → IICP-E033 (parity with the Python empty-discover path).
       if (err.code === "SDK-03") return { kind: "error", status: 502, code: "IICP-E033" };
@@ -171,13 +199,20 @@ function extraOf(body: Record<string, unknown>): Record<string, unknown> {
   return e;
 }
 
+function errMsg(status: number): string {
+  if (status === 402) return "Insufficient credits";
+  if (status === 503) return "No eligible workers";
+  if (status === 502) return "Upstream error";
+  return "Internal proxy error";
+}
+
 // ── per-surface handlers ─────────────────────────────────────────────────────
 
 async function handleOpenAIChat(client: TaskClient, req: http.IncomingMessage, res: http.ServerResponse) {
   const body = await readJson(req);
   const model = (body.model as string) ?? "iicp";
-  const out = await runChatTask(client, messagesOf(body), model, extraOf(body));
-  if (out.kind === "error") return sendJson(res, out.status, openaiErr(out.code, out.status === 502 ? "Upstream error" : "Internal proxy error"));
+  const out = await runChatTask(client, messagesOf(body), model, extraOf(body), body);
+  if (out.kind === "error") return sendJson(res, out.status, openaiErr(out.code, errMsg(out.status)));
   return sendJson(res, 200, toOpenAI(out.resp, model));
 }
 
@@ -188,8 +223,8 @@ async function handleOllamaChat(client: TaskClient, req: http.IncomingMessage, r
   const messages: ChatMessage[] = generate
     ? [{ role: "user", content: String(body.prompt ?? "") }]
     : messagesOf(body);
-  const out = await runChatTask(client, messages, model, extraOf(body));
-  if (out.kind === "error") return sendJson(res, out.status, ollamaErr(out.code, out.status === 502 ? "Upstream error" : "Internal proxy error"));
+  const out = await runChatTask(client, messages, model, extraOf(body), body);
+  if (out.kind === "error") return sendJson(res, out.status, ollamaErr(out.code, errMsg(out.status)));
   const payload = generate ? toOllamaGenerate(out.resp, model) : toOllama(out.resp, model);
   if (stream) {
     res.writeHead(200, { "Content-Type": "application/x-ndjson", "Server": SERVER_ID });
@@ -203,8 +238,8 @@ async function handleAnthropicMessages(client: TaskClient, req: http.IncomingMes
   const body = await readJson(req);
   const model = (body.model as string) ?? "iicp";
   const stream = Boolean(body.stream); // Anthropic default false
-  const out = await runChatTask(client, messagesOf(body), model, extraOf(body));
-  if (out.kind === "error") return sendJson(res, out.status, anthropicErr(out.code, out.status === 502 ? "Upstream error" : "Internal proxy error"));
+  const out = await runChatTask(client, messagesOf(body), model, extraOf(body), body);
+  if (out.kind === "error") return sendJson(res, out.status, anthropicErr(out.code, errMsg(out.status)));
   const msg = toAnthropic(out.resp, model, "iicp");
   if (stream) {
     const text = firstMessage(out.resp).content;

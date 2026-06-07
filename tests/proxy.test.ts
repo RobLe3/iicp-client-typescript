@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 
 import { createProxyServer, type TaskClient } from "../src/proxy/index.js";
 import { IicpError } from "../src/errors.js";
+import { CIPInsufficientCredits, CIPNoEligibleWorkers } from "../src/proxy/cip.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const fixtures = JSON.parse(readFileSync(join(__dir, "proxy_fixtures.json"), "utf8")) as {
@@ -23,14 +24,19 @@ const fixtures = JSON.parse(readFileSync(join(__dir, "proxy_fixtures.json"), "ut
   }>;
 };
 
-// CIP gating (402/503) requires the proxy CIP-dispatch port — out of scope for the TS v1 gateway (#482).
-const CIP_SKIP = new Set(["openai_insufficient_credits", "openai_no_eligible_workers", "ollama_insufficient_credits", "anthropic_no_eligible_workers"]);
-
 function mockClient(mock: { kind: string; value?: unknown }): TaskClient {
   return {
     async submit() {
       if (mock.kind === "iicp_response") return mock.value as { status: string; result?: unknown; error?: { code?: string } };
       if (mock.kind === "no_nodes") throw new IicpError("No nodes available", "SDK-03");
+      if (mock.kind === "raise") {
+        // value e.g. "CIPInsufficientCredits:IICP-E036" — simulate the dispatch raising
+        // the CIP gating error; the gateway maps it to 402/503.
+        const [name, code] = String(mock.value).split(":");
+        if (name === "CIPInsufficientCredits") throw new CIPInsufficientCredits(code);
+        if (name === "CIPNoEligibleWorkers") throw new CIPNoEligibleWorkers(code);
+        throw new Error(String(mock.value));
+      }
       throw new IicpError("unexpected mock", "SDK-99");
     },
   };
@@ -62,8 +68,7 @@ async function call(server: ReturnType<typeof createProxyServer>, req: { method:
 
 describe("proxy gateway conformance (golden fixtures)", () => {
   for (const fx of fixtures.cases) {
-    const run = CIP_SKIP.has(fx.name) ? it.skip : it;
-    run(fx.name, async () => {
+    it(fx.name, async () => {
       const server = createProxyServer(mockClient(fx.mock));
       const out = await call(server, fx.request);
       const exp = fx.expect;
