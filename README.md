@@ -352,7 +352,7 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 ```bash
 npm install        # install deps
 npm run typecheck  # tsc strict
-npm test           # 224 unit tests
+npm test           # run the unit suite
 npm run build      # emit to dist/
 ```
 
