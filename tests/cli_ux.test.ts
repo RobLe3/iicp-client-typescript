@@ -27,11 +27,25 @@ import { tmpdir } from "node:os";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const TSX = join(repoRoot, "node_modules/.bin/tsx");
 
+// Track every detached `serve` child so we can guarantee the whole tree is reaped
+// even if a test throws before finish() — a leaked serve process would keep the
+// runner's event loop alive and hang the suite (and `npm test` in the release gate).
+const serveChildren = new Set<ReturnType<typeof spawn>>();
+function killTree(child: ReturnType<typeof spawn>): void {
+  try {
+    if (child.pid) process.kill(-child.pid, "SIGKILL"); // negative pid = the process group
+  } catch {
+    /* already gone */
+  }
+  serveChildren.delete(child);
+}
+
 let tmpHome: string;
 before(() => {
   tmpHome = mkdtempSync(join(tmpdir(), "iicp-cliux-"));
 });
 after(() => {
+  for (const c of [...serveChildren]) killTree(c); // sweep any survivors
   try {
     rmSync(tmpHome, { recursive: true, force: true });
   } catch {
@@ -86,14 +100,20 @@ function runServeUntilSignal(args: string[]): Promise<RunResult> {
         IICP_AUTO_DETECT_NAT: "",
       },
       stdio: ["ignore", "pipe", "pipe"],
+      // Detached → the child is a process-group leader, so we can kill the WHOLE
+      // tree (tsx → node → serve → http/tcp/NAT children). Killing only `child`
+      // leaves those grandchildren alive, holding open handles that wedge the
+      // test runner so it never exits (the 0.7.40-era hang). See finish().
+      detached: true,
     });
+    serveChildren.add(child);
     let stdout = "";
     let stderr = "";
     let settled = false;
     const finish = () => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
+      killTree(child);
       resolve({ code: null, stdout, stderr });
     };
     const onData = () => {
