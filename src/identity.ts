@@ -238,7 +238,7 @@ export function generateNode(opts: {
     backend_url: opts.backend_url,
     model: opts.model,
     intent: opts.intent ?? "urn:iicp:intent:llm:chat:v1",
-    region: opts.region ?? "eu-central",
+    region: opts.region ?? "unknown",
     directory_url: opts.directory_url ?? "https://iicp.network/api",
     max_concurrent: opts.max_concurrent ?? 4,
     port: opts.port ?? 8020,

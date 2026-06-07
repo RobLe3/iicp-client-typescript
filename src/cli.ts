@@ -64,7 +64,7 @@ export interface ServeOpts {
   model: string;
   publicEndpoint: string;
   directoryUrl: string;
-  region: string;
+  region?: string;
   intent: string;
   maxConcurrent: number;
   nodeId: string;
@@ -121,7 +121,7 @@ function printHelp(): void {
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for an auth'd backend (LM Studio, hosted); anthropic uses it as x-api-key\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
-      `  --region REGION            IICP_REGION (default eu-central)\n` +
+      `  --region REGION            IICP_REGION (e.g. us-east; unknown if unset)\n` +
       `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
       `  --max-concurrent N         IICP_MAX_CONCURRENT (default 4)\n` +
       `  --node-id ID               IICP_NODE_ID (auto-generated if absent)\n` +
@@ -348,7 +348,7 @@ async function runInit(): Promise<number> {
     const backend = await ask(rl, "Backend URL (Ollama / vLLM / LM Studio)", "http://localhost:11434");
     const model = await ask(rl, "Backend model", "qwen2.5:0.5b");
     const directory = await ask(rl, "IICP directory URL", "https://iicp.network/api");
-    const region = await ask(rl, "Region tag", "eu-central");
+    const region = await ask(rl, "Region tag (e.g. us-east; blank = unknown)", "unknown");
     const intent = await ask(rl, "Intent URN", "urn:iicp:intent:llm:chat:v1");
     const portStr = await ask(rl, "Listen port", "9484");
     const port = parseInt(portStr, 10) || 9484;
@@ -733,7 +733,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     intent: opts.intent,
     model: opts.model,
     backend: backendFlavor,
-    region: opts.region,
+    region: opts.region || "unknown",
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
     relayWorkerEndpoint: opts.relayWorkerEndpoint || undefined,
@@ -1723,7 +1723,7 @@ async function dispatch(argv: string[]): Promise<number> {
     directoryUrl:
       (values["directory-url"] as string | undefined) ??
       envOr("IICP_DIRECTORY_URL", "https://iicp.network/api")!,
-    region: (values.region as string | undefined) ?? envOr("IICP_REGION", "eu-central")!,
+    region: (values.region as string | undefined) ?? envOr("IICP_REGION"),
     intent: (values.intent as string | undefined) ?? envOr("IICP_INTENT", "urn:iicp:intent:llm:chat:v1")!,
     maxConcurrent:
       values["max-concurrent"] !== undefined
