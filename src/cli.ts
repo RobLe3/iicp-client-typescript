@@ -107,6 +107,7 @@ function printHelp(): void {
       `  serve                      Register and serve a node\n` +
       `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
       `  credits                    Show this node's earned / spent / balance credits\n` +
+      `  proxy                      Run the local OpenAI/Ollama/Anthropic-compat gateway (loopback; no registration)\n` +
       `  operator rename <name>     Change your public display_name (signed by your operator key)\n` +
       `  operator encrypt           Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  operator decrypt           Remove at-rest encryption of the operator secret\n\n` +
@@ -127,8 +128,13 @@ function printHelp(): void {
       `  --port N                   IICP_PORT (default 9484)\n` +
       `  --host HOST                IICP_HOST (default :: — dual-stack IPv4+IPv6)\n` +
       `  --skip-registration        IICP_SKIP_REGISTRATION — register-free dev mode\n` +
-      `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup\n` +
-      `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n\n` +
+      `  --force                    IICP_FORCE — take over the single-instance lock for this node_id\n` +
+      `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup (default on)\n` +
+      `  --no-auto-detect-nat       disable NAT detection at startup\n` +
+      `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n` +
+      `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
+      `  --log-dir DIR              IICP_LOG_DIR — directory for persistent log files (<node_id>.log + events.jsonl)\n` +
+      `  --with-proxy               IICP_WITH_PROXY — also run the loopback compat proxy (127.0.0.1:9483) in-process\n\n` +
       `query optional:\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
@@ -136,6 +142,44 @@ function printHelp(): void {
       `  --max-tokens N             Limit response length\n` +
       `  --timeout-ms N             Request timeout (default 60000)\n`,
   );
+}
+
+/**
+ * Thrown by safeParseArgs / port parsing to signal a clean, user-facing CLI error.
+ * main() catches it and prints a one-line `ERROR:` (exit 2) — never a raw stack trace.
+ */
+class CliError extends Error {}
+
+/**
+ * Wrap node:util parseArgs so unknown options / bad values surface as a friendly
+ * `ERROR: unknown option '--x'` (exit 2) instead of a raw ERR_PARSE_ARGS_* stack trace.
+ */
+function safeParseArgs<T extends Parameters<typeof parseArgs>[0] & object>(
+  config: T,
+): ReturnType<typeof parseArgs<T>> {
+  try {
+    return parseArgs(config);
+  } catch (exc) {
+    const e = exc as { code?: string; message?: string };
+    if (e?.code === "ERR_PARSE_ARGS_UNKNOWN_OPTION") {
+      const m = /Unknown option '([^']*)'/.exec(e.message ?? "");
+      throw new CliError(`unknown option '${m?.[1] ?? "?"}'`);
+    }
+    if (e?.code === "ERR_PARSE_ARGS_INVALID_OPTION_VALUE" || e?.code === "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL") {
+      throw new CliError(e.message ?? "invalid argument");
+    }
+    throw new CliError(e?.message ?? String(exc));
+  }
+}
+
+/** Parse a port flag/env into a number, raising a friendly CliError on a non-numeric value. */
+function parsePort(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = parseInt(raw, 10);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new CliError("--port must be a number between 0 and 65535");
+  }
+  return n;
 }
 
 // ── #346 — dependency checker + auto-install ────────────────────────────────
@@ -510,6 +554,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
       return 2;
     }
     opts = applySavedNode(opts, saved);
+  }
+
+  // #410/#414 — built-in backend-url fallback applied LAST (after flag/env/saved-config),
+  // so a bare `serve --model x` works without --backend-url. An `anthropic` backend
+  // defaults to the Anthropic API, not localhost Ollama. Mirrors Python cli.py ~704.
+  if (!opts.backendUrl) {
+    opts.backendUrl =
+      opts.backendType === "anthropic" ? "https://api.anthropic.com" : "http://localhost:11434";
   }
 
   // Onboarding: if no --model given, auto-select the first model the backend advertises
@@ -893,8 +945,22 @@ async function runServe(opts: ServeOpts): Promise<number> {
   return 0;
 }
 
+function printQueryHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node query <prompt> [options]\n\n` +
+      `Discover mesh nodes and submit a chat task.\n\n` +
+      `options:\n` +
+      `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
+      `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
+      `  --model NAME               Pin to a specific model on the remote node\n` +
+      `  --max-tokens N             Limit response length\n` +
+      `  --timeout-ms N             Request timeout in milliseconds (default 60000)\n` +
+      `  -h, --help                 Show this help and exit\n`,
+  );
+}
+
 async function runQuery(argv: string[]): Promise<number> {
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = safeParseArgs({
     args: argv,
     options: {
       "directory-url": { type: "string" },
@@ -902,14 +968,19 @@ async function runQuery(argv: string[]): Promise<number> {
       model: { type: "string" },
       "max-tokens": { type: "string" },
       "timeout-ms": { type: "string" },
+      help: { type: "boolean", short: "h" },
     },
     allowPositionals: true,
-    strict: false,
   });
+
+  if (values.help) {
+    printQueryHelp();
+    return 0;
+  }
 
   const prompt = positionals.join(" ").trim();
   if (!prompt) {
-    process.stderr.write("Usage: iicp-node query <prompt> [flags]\n");
+    printQueryHelp();
     return 1;
   }
 
@@ -1173,8 +1244,25 @@ export async function verifyCreditAwards(
  * directory (not the local config), so editing the saved file cannot inflate them;
  * `reconciles` flags a ledger that does not add up.
  */
+function printCreditsHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node credits [options]\n\n` +
+      `Show this node's earned / spent / balance credits (authenticated from the directory).\n\n` +
+      `options:\n` +
+      `  --node NAME                Load token + node_id from ~/.iicp/nodes/<NAME>.json\n` +
+      `  --node-id ID               Node id (if not using --node)\n` +
+      `  --token TOKEN              Node token (env IICP_NODE_TOKEN)\n` +
+      `  --directory-url URL        IICP directory base URL (defaults to saved node / env / iicp.network)\n` +
+      `  --json                     Print the raw summary JSON\n` +
+      `  --verify                   Cryptographically audit each award against the signed CREDIT_AWARD log\n` +
+      `  -h, --help                 Show this help and exit\n\n` +
+      `With no --node / --node-id and exactly one saved node (or a node named 'default'),\n` +
+      `that node is used automatically.\n`,
+  );
+}
+
 async function runCredits(argv: string[]): Promise<number> {
-  const { values } = parseArgs({
+  const { values } = safeParseArgs({
     args: argv,
     options: {
       node: { type: "string" },
@@ -1183,14 +1271,41 @@ async function runCredits(argv: string[]): Promise<number> {
       "directory-url": { type: "string" },
       json: { type: "boolean" },
       verify: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
   });
 
-  const nodeName = values["node"] as string | undefined;
+  if (values.help) {
+    printCreditsHelp();
+    return 0;
+  }
+
+  let nodeName = values["node"] as string | undefined;
   let directoryUrl = values["directory-url"] as string | undefined;
   let nodeId = values["node-id"] as string | undefined;
   let token = (values["token"] as string | undefined) ?? process.env["IICP_NODE_TOKEN"];
+
+  // #8 — no --node / --node-id: if exactly one saved node (or a 'default' node) exists,
+  // use it automatically; otherwise emit a clear error listing the saved node names.
+  if (!nodeName && !nodeId) {
+    const saved = listNodes();
+    if (saved.length === 1) {
+      nodeName = saved[0]!.name;
+    } else if (saved.some((n) => n.name === "default")) {
+      nodeName = "default";
+    } else if (saved.length === 0) {
+      process.stderr.write(
+        "ERROR: no saved nodes — run `iicp-node init` / `serve` first, or pass --node-id ID.\n",
+      );
+      return 1;
+    } else {
+      process.stderr.write(
+        `ERROR: multiple saved nodes — pass --node NAME (one of: ${saved.map((n) => n.name).join(", ")}) or --node-id ID.\n`,
+      );
+      return 1;
+    }
+  }
 
   if (nodeName) {
     const saved = loadNode(nodeName);
@@ -1379,19 +1494,45 @@ async function runOperatorDecrypt(): Promise<number> {
  * signed call updates the single operator record, reflected on every node + the leaderboard.
  * Updates the local operator.json on success. Never sends the secret/contact.
  */
+function printOperatorHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node operator <subcommand> [options]\n\n` +
+      `Manage your operator identity.\n\n` +
+      `subcommands:\n` +
+      `  rename <name>              Change your public display_name (signed by your operator key)\n` +
+      `  encrypt                    Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
+      `  decrypt                    Remove at-rest encryption of the operator secret\n\n` +
+      `operator rename options:\n` +
+      `  --directory-url URL        IICP directory base URL (defaults to env / iicp.network)\n` +
+      `  -h, --help                 Show this help and exit\n`,
+  );
+}
+
 async function runOperator(argv: string[]): Promise<number> {
   const sub = argv[0];
+  if (sub === undefined || sub === "--help" || sub === "-h") {
+    printOperatorHelp();
+    return sub === undefined ? 2 : 0;
+  }
   if (sub === "encrypt") return runOperatorEncrypt();
   if (sub === "decrypt") return runOperatorDecrypt();
   if (sub !== "rename") {
-    process.stderr.write(`unknown operator subcommand: ${sub ?? "(none)"}\n`);
+    process.stderr.write(`unknown operator subcommand: ${sub}\n`);
+    printOperatorHelp();
     return 2;
   }
-  const { values, positionals } = parseArgs({
+  const { values, positionals } = safeParseArgs({
     args: argv.slice(1),
-    options: { "directory-url": { type: "string" } },
+    options: {
+      "directory-url": { type: "string" },
+      help: { type: "boolean", short: "h" },
+    },
     allowPositionals: true,
   });
+  if (values.help) {
+    printOperatorHelp();
+    return 0;
+  }
   const name = positionals[0];
   // eslint-disable-next-line no-control-regex
   if (!name || name.length > 64 || /[\u0000-\u001f\u007f]/.test(name)) {
@@ -1451,8 +1592,23 @@ async function runOperator(argv: string[]): Promise<number> {
 }
 
 // ── proxy (ADR-050) — local compat gateway; consumer, loopback, no registration ──
+function printProxyHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node proxy [options]\n\n` +
+      `Run the local OpenAI/Ollama/Anthropic-compat gateway (consumer; loopback;\n` +
+      `does NOT register with the directory).\n\n` +
+      `options:\n` +
+      `  --port N                   Listen port (env IICP_PROXY_PORT, default 9483)\n` +
+      `  --host HOST                Bind host (env IICP_PROXY_HOST, default 127.0.0.1 — loopback)\n` +
+      `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
+      `  --region REGION            Preferred region (env IICP_PROXY_PREFERRED_REGION)\n` +
+      `  --token TOKEN              Node token (env IICP_NODE_TOKEN)\n` +
+      `  -h, --help                 Show this help and exit\n`,
+  );
+}
+
 async function runProxyCmd(argv: string[]): Promise<number> {
-  const { values } = parseArgs({
+  const { values } = safeParseArgs({
     args: argv,
     allowPositionals: false,
     options: {
@@ -1461,9 +1617,17 @@ async function runProxyCmd(argv: string[]): Promise<number> {
       "directory-url": { type: "string" },
       region: { type: "string" },
       token: { type: "string" },
+      help: { type: "boolean", short: "h" },
     },
   });
-  const port = values.port !== undefined ? parseInt(values.port as string, 10) : envInt("IICP_PROXY_PORT", 9483);
+  if (values.help) {
+    printProxyHelp();
+    return 0;
+  }
+  const port =
+    values.port !== undefined
+      ? parsePort(values.port as string, 9483)
+      : parsePort(process.env["IICP_PROXY_PORT"], 9483);
   const host = (values.host as string | undefined) ?? envOr("IICP_PROXY_HOST", "127.0.0.1")!;
   return runProxy({
     host,
@@ -1476,7 +1640,7 @@ async function runProxyCmd(argv: string[]): Promise<number> {
 }
 
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
     printHelp();
     return argv.length === 0 ? 2 : 0;
   }
@@ -1485,6 +1649,19 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 0;
   }
 
+  try {
+    return await dispatch(argv);
+  } catch (exc) {
+    if (exc instanceof CliError) {
+      process.stderr.write(`ERROR: ${exc.message}\n`);
+      return 2;
+    }
+    throw exc;
+  }
+}
+
+/** Command dispatch — separated so main() can wrap parse failures as clean CliError output. */
+async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
   if (cmd === "init") return runInit();
   if (cmd === "list") return runList();
@@ -1498,7 +1675,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     return 2;
   }
 
-  const { values } = parseArgs({
+  const { values } = safeParseArgs({
     args: argv.slice(1),
     options: {
       node: { type: "string" },
@@ -1517,6 +1694,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       "skip-registration": { type: "boolean" },
       force: { type: "boolean" },
       "auto-detect-nat": { type: "boolean" },
+      // Parity with Python's BooleanOptionalAction: an explicit off-switch for NAT
+      // detection (`--auto-detect-nat=false` can't work — it's a no-arg boolean).
+      "no-auto-detect-nat": { type: "boolean" },
       "external-ip-probe-url": { type: "string" },
       "relay-worker-endpoint": { type: "string" },
       "log-dir": { type: "string" },
@@ -1552,17 +1732,22 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     nodeId: (values["node-id"] as string | undefined) ?? envOr("IICP_NODE_ID") ?? "",
     port:
       values.port !== undefined
-        ? parseInt(values.port as string, 10)
-        : envInt("IICP_PORT", 9484),
+        ? parsePort(values.port as string, 9484)
+        : parsePort(process.env["IICP_PORT"], 9484),
     host: (values.host as string | undefined) ?? envOr("IICP_HOST", "::")!,
     skipRegistration:
       Boolean(values["skip-registration"]) || envBool("IICP_SKIP_REGISTRATION"),
     force: Boolean(values["force"]) || envBool("IICP_FORCE"),
-    // Default ON — matches Python CLI behaviour; operator must set IICP_AUTO_DETECT_NAT=false to opt out.
+    // Default ON — matches Python CLI behaviour. Off-switch precedence: explicit
+    // --no-auto-detect-nat > --auto-detect-nat > IICP_AUTO_DETECT_NAT env > default on.
     autoDetectNat:
-      values["auto-detect-nat"] !== undefined
-        ? Boolean(values["auto-detect-nat"])
-        : (process.env.IICP_AUTO_DETECT_NAT !== undefined ? envBool("IICP_AUTO_DETECT_NAT") : true),
+      values["no-auto-detect-nat"]
+        ? false
+        : values["auto-detect-nat"] !== undefined
+          ? Boolean(values["auto-detect-nat"])
+          : process.env.IICP_AUTO_DETECT_NAT !== undefined
+            ? envBool("IICP_AUTO_DETECT_NAT")
+            : true,
     // Default to api.ipify.org so FRITZ!Box/CGNAT detection works out of the box.
     externalIpProbeUrl:
       (values["external-ip-probe-url"] as string | undefined)
@@ -1581,8 +1766,9 @@ if (require.main === module) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error(err);
+      // Clean one-line error — never dump a raw Node stack trace at the user.
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`ERROR: ${msg}\n`);
       process.exit(1);
     });
 }
