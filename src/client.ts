@@ -35,6 +35,12 @@ function _isSsrfSafe(url: string): boolean {
   if (!["http:", "https:"].includes(parsed.protocol)) return false;
   const host = parsed.hostname.toLowerCase();
   if (!host) return false;
+  // Dev/test escape hatch (default OFF): allow loopback/private node endpoints so a
+  // node + proxy can run on one host (local mesh) and for E2E tests. NEVER enable in
+  // production — it re-opens the SSRF surface this guard exists to close.
+  if (["1", "true", "yes"].includes((process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES ?? "").trim().toLowerCase())) {
+    return true;
+  }
   if (["localhost", "0.0.0.0", "::1", "::"].includes(host)) return false;
   const blockedSuffixes = [".local", ".internal", ".lan", ".test", ".invalid", ".localhost"];
   if (blockedSuffixes.some((s) => host.endsWith(s))) return false;
