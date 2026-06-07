@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.39] — 2026-06-07
+
+### Added — unified client: local OpenAI/Ollama/Anthropic-compat proxy (ADR-050, #476)
+
+- **`iicp-node proxy`** — a local compat gateway on `127.0.0.1:9483` (built on `node:http`,
+  no new runtime dependency). Speaks OpenAI (`/v1/chat/completions`, `/v1/models`), Ollama
+  (`/api/chat`, `/api/generate`, `/api/tags`, `/api/version`), and Anthropic (`/v1/messages`)
+  and routes each request across the IICP mesh. Every response carries `Server: iicp-proxy`.
+  Point any existing tool's base URL at it — no code changes. See `/docs/proxy`.
+- **`iicp-node serve --with-proxy`** — co-host the proxy (loopback) next to a provider node
+  in one process, supervised + crash-isolated.
+- **CIP consumer gating** in the proxy path — `IICP-E036` → 402 (insufficient credits),
+  `IICP-E022` → 503 (no eligible workers); full parity with the Python reference (18/18
+  conformance fixtures) + a real-process E2E test.
+- One client now does **node + query + proxy**; the standalone `iicp-proxy` package is retired.
+
+## [0.7.36–0.7.38] — 2026-06-03..06
+
+- Maintenance + lockstep version alignment across the Python/TS/Rust SDKs (3-C); query
+  `status='success'` acceptance fix; operator-identity README/help. No TS API changes.
+
 ## [0.7.35] — 2026-06-03
 
 ### Added — native Anthropic backend + audio chat modality (#414, capability roadmap)
