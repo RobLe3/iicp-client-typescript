@@ -5,11 +5,15 @@
  * credits (figures come authenticated from the directory, not the local config).
  */
 
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import * as http from "node:http";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { main, verifyCreditAwards } from "../src/cli.js";
+import { saveNode } from "../src/identity.js";
 
 /** Single-shot mock of GET /v1/credits/summary on a free port. */
 function serveOnce(status: number, body: string): Promise<number> {
@@ -54,6 +58,88 @@ describe("iicp-node credits", () => {
       "--directory-url", `http://127.0.0.1:${port}`,
     ]);
     assert.equal(rc, 1);
+  });
+});
+
+// --- credits node auto-selection fallback (regression: default.json no token → opaque error) ---
+describe("iicp-node credits — default-no-token fallback", () => {
+  let tmpHome: string;
+  let savedHome: string | undefined;
+
+  function makeTestNode(name: string, nodeToken?: string): void {
+    saveNode({
+      node_id: `node-${name}`,
+      operator_id: "op-test",
+      name,
+      backend_url: "http://localhost:11434",
+      model: "test:1b",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      region: "unknown",
+      directory_url: "https://iicp.network/api",
+      max_concurrent: 4,
+      port: 8020,
+      host: "0.0.0.0",
+      public_endpoint: "",
+      auto_detect_nat: false,
+      external_ip_probe_url: "",
+      node_token: nodeToken,
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  before(() => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-test-"));
+    savedHome = process.env.IICP_HOME;
+    process.env.IICP_HOME = tmpHome;
+  });
+
+  after(() => {
+    if (savedHome === undefined) delete process.env.IICP_HOME;
+    else process.env.IICP_HOME = savedHome;
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("default-no-token + one node with token → falls back and prints hint", async () => {
+    // Regression: default.json exists but has no cached token; exactly one other
+    // node has a token. credits must auto-select that node rather than emitting the
+    // opaque "no node_token — run serve" error.
+    makeTestNode("default", undefined);
+    makeTestNode("ollama", "tok-ollama");
+    const lines: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (s: string | Uint8Array, ...rest: unknown[]) => {
+      lines.push(typeof s === "string" ? s : s.toString());
+      return (origWrite as (...a: unknown[]) => boolean)(s, ...rest);
+    };
+    try {
+      await main(["credits"]);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const err = lines.join("");
+    assert.ok(err.includes("no cached token"), `expected 'no cached token' in: ${err}`);
+    assert.ok(err.includes("ollama"), `expected 'ollama' in: ${err}`);
+    // Specifically check that the "multiple saved nodes — pass --node" ambiguity error is absent.
+    assert.ok(!err.includes("multiple saved nodes"), `unexpected ambiguity error in: ${err}`);
+  });
+
+  it("default-no-token + multiple nodes with tokens → lists them", async () => {
+    makeTestNode("lmstudio", "tok-b");  // ollama + lmstudio already saved above
+    const lines: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (s: string | Uint8Array, ...rest: unknown[]) => {
+      lines.push(typeof s === "string" ? s : s.toString());
+      return (origWrite as (...a: unknown[]) => boolean)(s, ...rest);
+    };
+    try {
+      await main(["credits"]);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const err = lines.join("");
+    assert.ok(err.includes("no cached token"), `expected 'no cached token' in: ${err}`);
+    assert.ok(err.includes("ollama"), `expected 'ollama' in: ${err}`);
+    assert.ok(err.includes("lmstudio"), `expected 'lmstudio' in: ${err}`);
   });
 });
 

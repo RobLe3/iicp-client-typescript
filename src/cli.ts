@@ -1288,22 +1288,44 @@ async function runCredits(argv: string[]): Promise<number> {
 
   // #8 — no --node / --node-id: if exactly one saved node (or a 'default' node) exists,
   // use it automatically; otherwise emit a clear error listing the saved node names.
+  // If 'default' has no cached token, auto-fall-through to the single node with a token.
   if (!nodeName && !nodeId) {
     const saved = listNodes();
     if (saved.length === 1) {
       nodeName = saved[0]!.name;
-    } else if (saved.some((n) => n.name === "default")) {
-      nodeName = "default";
     } else if (saved.length === 0) {
       process.stderr.write(
         "ERROR: no saved nodes — run `iicp-node init` / `serve` first, or pass --node-id ID.\n",
       );
       return 1;
     } else {
-      process.stderr.write(
-        `ERROR: multiple saved nodes — pass --node NAME (one of: ${saved.map((n) => n.name).join(", ")}) or --node-id ID.\n`,
-      );
-      return 1;
+      const defaultNode = saved.find((n) => n.name === "default");
+      if (defaultNode) {
+        if (defaultNode.node_token) {
+          nodeName = "default";
+        } else {
+          const withToken = saved.filter((n) => n.node_token);
+          if (withToken.length === 1) {
+            process.stderr.write(
+              `[iicp-node] '${defaultNode.name}' has no cached token — using '${withToken[0]!.name}' instead\n`,
+            );
+            nodeName = withToken[0]!.name;
+          } else if (withToken.length > 1) {
+            process.stderr.write(
+              `ERROR: '${defaultNode.name}' has no cached token. Pass --node <NAME>.\n` +
+              `  Nodes with a cached token: ${withToken.map((n) => n.name).join(", ")}\n`,
+            );
+            return 1;
+          } else {
+            nodeName = "default"; // no tokens anywhere; "run serve" fires below
+          }
+        }
+      } else {
+        process.stderr.write(
+          `ERROR: multiple saved nodes — pass --node NAME (one of: ${saved.map((n) => n.name).join(", ")}) or --node-id ID.\n`,
+        );
+        return 1;
+      }
     }
   }
 
