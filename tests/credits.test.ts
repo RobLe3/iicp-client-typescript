@@ -123,7 +123,12 @@ describe("iicp-node credits — default-no-token fallback", () => {
     assert.ok(!err.includes("multiple saved nodes"), `unexpected ambiguity error in: ${err}`);
   });
 
-  it("default-no-token + multiple nodes with tokens → lists them", async () => {
+  it("default-no-token + multiple nodes with tokens → shows credits for all (0.7.44)", async () => {
+    // 0.7.44 fix: when multiple nodes have tokens, the command shows credits for ALL
+    // rather than emitting a "no cached token — pass --node" listing error.
+    // Behavior test: if the fix is reverted, "showing credits for all" disappears and
+    // "no cached token" reappears. (Fetch results in network error since no mock server —
+    // that is fine; the intent assertion is on the routing message in stderr.)
     makeTestNode("lmstudio", "tok-b");  // ollama + lmstudio already saved above
     const lines: string[] = [];
     const origWrite = process.stderr.write.bind(process.stderr);
@@ -137,9 +142,9 @@ describe("iicp-node credits — default-no-token fallback", () => {
       process.stderr.write = origWrite;
     }
     const err = lines.join("");
-    assert.ok(err.includes("no cached token"), `expected 'no cached token' in: ${err}`);
-    assert.ok(err.includes("ollama"), `expected 'ollama' in: ${err}`);
-    assert.ok(err.includes("lmstudio"), `expected 'lmstudio' in: ${err}`);
+    // Must route to "show all" path — NOT the old listing-error path
+    assert.ok(err.includes("showing credits for all"), `expected 'showing credits for all' in: ${err}`);
+    assert.ok(!err.includes("no cached token"), `unexpected old listing-error message in: ${err}`);
   });
 });
 

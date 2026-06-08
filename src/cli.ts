@@ -1311,11 +1311,22 @@ async function runCredits(argv: string[]): Promise<number> {
             );
             nodeName = withToken[0]!.name;
           } else if (withToken.length > 1) {
+            // Multiple nodes have tokens — show all of them.
+            const dir =
+              directoryUrl ?? process.env["IICP_DIRECTORY_URL"] ?? "https://iicp.network/api";
             process.stderr.write(
-              `ERROR: '${defaultNode.name}' has no cached token. Pass --node <NAME>.\n` +
-              `  Nodes with a cached token: ${withToken.map((n) => n.name).join(", ")}\n`,
+              `[iicp-node] no --node given — showing credits for all ${withToken.length} nodes:\n`,
             );
-            return 1;
+            for (let i = 0; i < withToken.length; i++) {
+              if (i > 0) process.stdout.write("\n");
+              const n = withToken[i]!;
+              const rc = await fetchAndDisplayCredits(
+                n.directory_url ?? dir, n.node_id, n.node_token!, n.name,
+                Boolean(values["json"]), Boolean(values["verify"]),
+              );
+              if (rc !== 0) return rc;
+            }
+            return 0;
           } else {
             nodeName = "default"; // no tokens anywhere; "run serve" fires below
           }
@@ -1353,6 +1364,19 @@ async function runCredits(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const label = nodeName ?? nodeId;
+  return fetchAndDisplayCredits(directoryUrl, nodeId, token, label, Boolean(values["json"]), Boolean(values["verify"]));
+}
+
+/** Shared fetch+display logic for one node's credits summary. */
+async function fetchAndDisplayCredits(
+  directoryUrl: string,
+  nodeId: string,
+  token: string,
+  label: string,
+  asJson: boolean,
+  verify: boolean,
+): Promise<number> {
   const url = `${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary`;
   let resp: Response;
   try {
@@ -1378,7 +1402,7 @@ async function runCredits(argv: string[]): Promise<number> {
     return 1;
   }
 
-  if (values["json"]) {
+  if (asJson) {
     process.stdout.write(JSON.stringify(body, null, 2) + "\n");
     return 0;
   }
@@ -1391,7 +1415,7 @@ async function runCredits(argv: string[]): Promise<number> {
   const tpc = Number(body["tokens_per_credit"] ?? 1000);
   const pad = (n: number): string => n.toFixed(3).padStart(12);
   const check = reconciles ? "✓ reconciles" : "✗ DOES NOT RECONCILE";
-  process.stdout.write(`IICP credits — ${nodeName ?? nodeId}\n`);
+  process.stdout.write(`IICP credits — ${label}\n`);
   process.stdout.write(`  Earned (income) ${pad(earned)}\n`);
   process.stdout.write(`  Spent           ${pad(spent)}\n`);
   process.stdout.write("  ─────────────────────────────\n");
@@ -1402,7 +1426,7 @@ async function runCredits(argv: string[]): Promise<number> {
       "[iicp-node] WARNING: balance != earned − spent — the ledger does not reconcile; do not trust these figures.\n",
     );
   }
-  if (values["verify"]) {
+  if (verify) {
     process.stdout.write("  ── cryptographic verification (signed CREDIT_AWARD log) ──\n");
     let v: { sum: number; verified: number; failed: number };
     try {
