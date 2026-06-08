@@ -75,6 +75,8 @@ export interface ServeOpts {
   autoDetectNat: boolean;
   externalIpProbeUrl: string;
   relayWorkerEndpoint: string;
+  relayCapable?: boolean;
+  relayAcceptPort?: number;
   node: string;
   logDir?: string;
   withProxy?: boolean;
@@ -133,6 +135,8 @@ function printHelp(): void {
       `  --no-auto-detect-nat       disable NAT detection at startup\n` +
       `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n` +
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
+      `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
+      `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485)\n` +
       `  --log-dir DIR              IICP_LOG_DIR — directory for persistent log files (<node_id>.log + events.jsonl)\n` +
       `  --with-proxy               IICP_WITH_PROXY — also run the loopback compat proxy (127.0.0.1:9483) in-process\n\n` +
       `query optional:\n` +
@@ -737,6 +741,8 @@ async function runServe(opts: ServeOpts): Promise<number> {
     directoryUrl: opts.directoryUrl,
     maxConcurrent: opts.maxConcurrent,
     relayWorkerEndpoint: opts.relayWorkerEndpoint || undefined,
+    relayCapable: opts.relayCapable ?? false,
+    relayAcceptPort: opts.relayAcceptPort ?? 9485,
     operatorDelegation: _opDelegation,
     operatorDisplayName: _opDisplayName,
     operatorCreatedAt: _opCreatedAt,
@@ -1745,6 +1751,8 @@ async function dispatch(argv: string[]): Promise<number> {
       "no-auto-detect-nat": { type: "boolean" },
       "external-ip-probe-url": { type: "string" },
       "relay-worker-endpoint": { type: "string" },
+      "relay-capable": { type: "boolean" },
+      "relay-accept-port": { type: "string" },
       "log-dir": { type: "string" },
       "with-proxy": { type: "boolean" },
       help: { type: "boolean", short: "h" },
@@ -1801,6 +1809,14 @@ async function dispatch(argv: string[]): Promise<number> {
         ?? "https://api.ipify.org",
     relayWorkerEndpoint:
       (values["relay-worker-endpoint"] as string | undefined) ?? envOr("IICP_RELAY_WORKER_ENDPOINT") ?? "",
+    relayCapable:
+      values["relay-capable"] !== undefined
+        ? Boolean(values["relay-capable"])
+        : envBool("IICP_RELAY_CAPABLE"),
+    relayAcceptPort:
+      values["relay-accept-port"] !== undefined
+        ? parseInt(values["relay-accept-port"] as string, 10)
+        : parseInt(envOr("IICP_RELAY_ACCEPT_PORT") ?? "9485", 10),
     logDir: (values["log-dir"] as string | undefined) ?? envOr("IICP_LOG_DIR"),
     withProxy: Boolean(values["with-proxy"]) || envBool("IICP_WITH_PROXY"),
   };

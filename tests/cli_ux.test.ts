@@ -249,3 +249,51 @@ describe("0.7.40 CLI-UX: serve --model parity + NAT off-switch", () => {
     assert.doesNotMatch(r.stderr, STACK_RE, `leaked a raw stack: ${r.stderr}`);
   });
 });
+
+describe("WQ-066 CLI-UX: serve --relay-capable flag (0.7.45)", () => {
+  it("`serve --relay-capable` is accepted without error (0.7.45)", async () => {
+    // Pre-fix: parseArgs didn't include --relay-capable → ERR_PARSE_ARGS crash.
+    // Post-fix: the flag is registered and serve proceeds past arg parsing.
+    const r = await runServeUntilSignal([
+      "--model",
+      "test-model",
+      "--backend-type",
+      "anthropic",
+      "--skip-registration",
+      "--no-auto-detect-nat",
+      "--relay-capable",
+      "--directory-url",
+      "http://127.0.0.1:1",
+    ]);
+    const combined = r.stdout + r.stderr;
+    assert.doesNotMatch(combined, /unknown option|ERR_PARSE_ARGS/i,
+      `--relay-capable was rejected: ${combined}`);
+    assert.doesNotMatch(combined, /Error:.*relay/i,
+      `unexpected relay error: ${combined}`);
+  });
+
+  it("`serve --relay-accept-port 9490` is accepted without error (0.7.45)", async () => {
+    // Pre-fix: --relay-accept-port was not registered → parse crash.
+    const r = await runServeUntilSignal([
+      "--model",
+      "test-model",
+      "--backend-type",
+      "anthropic",
+      "--skip-registration",
+      "--no-auto-detect-nat",
+      "--relay-accept-port",
+      "9490",
+      "--directory-url",
+      "http://127.0.0.1:1",
+    ]);
+    const combined = r.stdout + r.stderr;
+    assert.doesNotMatch(combined, /unknown option|ERR_PARSE_ARGS/i,
+      `--relay-accept-port was rejected: ${combined}`);
+  });
+
+  it("`serve --help` includes --relay-capable (0.7.45)", async () => {
+    const r = await runCli(["serve", "--help"]);
+    assert.match(r.stdout + r.stderr, /--relay-capable/,
+      `--relay-capable missing from serve --help`);
+  });
+});
