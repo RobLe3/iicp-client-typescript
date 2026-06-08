@@ -519,6 +519,58 @@ describe("SDK-06 traceparent", () => {
 });
 
 // ---------------------------------------------------------------------------
+// WQ-066 relay_capable in register payload (0.7.45)
+// ---------------------------------------------------------------------------
+
+describe("WQ-066: relay_capable in register payload (0.7.45)", () => {
+  it("relay_capable=true includes relay_capable + relay_accept_port in payload", async () => {
+    // Pre-fix: relay_capable was wired to the serve() relay server but never
+    // sent to the directory → it wouldn't appear in /v1/discover. Post-fix:
+    // it's included so discover can return relay_capable=true for that node.
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-1", node_id: "n-1" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-1",
+      endpoint: "https://relay.example.com:9484",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      directoryUrl: "https://iicp.test",
+      relayCapable: true,
+      relayAcceptPort: 9490,
+    });
+    await node.register();
+    restore();
+    assert.ok(captured, "no register payload captured");
+    const body = captured as Record<string, unknown>;
+    assert.equal(body.relay_capable, true, "relay_capable must be in register payload");
+    assert.equal(body.relay_accept_port, 9490, "relay_accept_port must be in register payload");
+  });
+
+  it("relay_capable not set → relay_capable absent from payload", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-1", node_id: "n-1" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-1",
+      endpoint: "https://provider.example.com:9484",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      directoryUrl: "https://iicp.test",
+    });
+    await node.register();
+    restore();
+    assert.ok(captured, "no register payload captured");
+    assert.equal((captured as Record<string, unknown>).relay_capable, undefined,
+      "relay_capable must not appear in payload when not set");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ε-greedy provider selection (R4 / #486)
 // ---------------------------------------------------------------------------
 
