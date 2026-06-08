@@ -517,3 +517,66 @@ describe("SDK-06 traceparent", () => {
     restore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// ε-greedy provider selection (R4 / #486)
+// ---------------------------------------------------------------------------
+
+const MULTI_NODE_IPS = ["1.2.3.1", "1.2.3.2", "1.2.3.3", "1.2.3.4", "1.2.3.5"];
+const multiNodes = MULTI_NODE_IPS.map((ip, i) => ({
+  node_id: `node-${String(i + 1).padStart(2, "0")}`,
+  endpoint: `http://${ip}:9484`,
+  score: parseFloat((1.0 - i * 0.1).toFixed(1)),
+  available: true,
+  region: "eu-west",
+}));
+
+describe("ε-greedy provider selection (#486)", () => {
+  it("with ε=1.0 explores non-top nodes across 20 calls", async () => {
+    const hitEndpoints = new Set<string>();
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) {
+        return jsonResponse({ nodes: multiNodes });
+      }
+      hitEndpoints.add(u);
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "http://fake.test", routing_epsilon: 1.0 });
+    for (let i = 0; i < 20; i++) {
+      await client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: {} });
+    }
+    restore();
+    // With ε=1.0 and 5 nodes, 20 draws should hit >1 unique endpoint
+    assert.ok(
+      hitEndpoints.size > 1,
+      `ε-greedy not working: only hit ${JSON.stringify([...hitEndpoints])} — exploration never fired`,
+    );
+  });
+
+  it("with ε=0.0 always picks the top (first) node", async () => {
+    const hitEndpoints = new Set<string>();
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) return jsonResponse({ nodes: multiNodes });
+      hitEndpoints.add(u);
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "http://fake.test", routing_epsilon: 0.0 });
+    for (let i = 0; i < 5; i++) {
+      await client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: {} });
+    }
+    restore();
+    assert.equal(hitEndpoints.size, 1, `ε=0 should only hit one endpoint, got ${JSON.stringify([...hitEndpoints])}`);
+    assert.ok([...hitEndpoints][0].includes("1.2.3.1"), "should always pick the top node (1.2.3.1)");
+  });
+
+  it("IICP_ROUTING_EPSILON env var overrides default", () => {
+    const orig = process.env["IICP_ROUTING_EPSILON"];
+    process.env["IICP_ROUTING_EPSILON"] = "0.0";
+    const client = new IicpClient({ directory_url: "http://fake.test" });
+    assert.equal(client["cfg"].routing_epsilon, 0.0, "env var should set epsilon to 0.0");
+    if (orig === undefined) delete process.env["IICP_ROUTING_EPSILON"];
+    else process.env["IICP_ROUTING_EPSILON"] = orig;
+  });
+});

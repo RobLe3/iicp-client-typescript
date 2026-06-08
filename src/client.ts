@@ -66,10 +66,13 @@ function _isSsrfSafe(url: string): boolean {
   return true;
 }
 
+const DEFAULT_EPSILON = 0.05;
+
 const DEFAULT_CONFIG: ClientConfig = {
   directory_url: "https://iicp.network/api",
   timeout_ms: DEFAULT_TIMEOUT_MS,
   tls_verify: true,
+  routing_epsilon: DEFAULT_EPSILON,
 };
 
 export class IicpClient {
@@ -91,6 +94,15 @@ export class IicpClient {
         "SDK-04",
       );
     }
+    // IICP_ROUTING_EPSILON overrides config; clamp to [0.0, 1.0]
+    const envEps = process.env["IICP_ROUTING_EPSILON"];
+    if (envEps !== undefined) {
+      const parsed = parseFloat(envEps);
+      if (!isNaN(parsed)) {
+        merged.routing_epsilon = Math.max(0, Math.min(1, parsed));
+      }
+    }
+    if (merged.routing_epsilon === undefined) merged.routing_epsilon = DEFAULT_EPSILON;
     this.cfg = merged;
   }
 
@@ -173,7 +185,17 @@ export class IicpClient {
     }
 
     const taskId = req.task_id ?? randomUUID();
-    const candidates = nodes.slice(0, MAX_RETRIES);
+    // ε-greedy provider selection (R4): with probability ε pick a random node
+    // from the full discovered set; otherwise use the directory-sorted top pick.
+    let candidates: typeof nodes;
+    const epsilon = this.cfg.routing_epsilon ?? DEFAULT_EPSILON;
+    if (nodes.length > 1 && Math.random() < epsilon) {
+      const exploreIdx = Math.floor(Math.random() * nodes.length);
+      const exploreNode = nodes[exploreIdx];
+      candidates = [exploreNode, ...nodes.slice(0, MAX_RETRIES).filter((n) => n.node_id !== exploreNode.node_id)].slice(0, MAX_RETRIES);
+    } else {
+      candidates = nodes.slice(0, MAX_RETRIES);
+    }
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (req.auth?.token) {

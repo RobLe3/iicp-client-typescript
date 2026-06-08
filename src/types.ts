@@ -13,6 +13,8 @@ export interface ClientConfig {
   tls_verify: boolean;
   /** IICP-CX S.16: encrypt task payloads when node advertises cx_public_key. Default: false */
   use_confidentiality?: boolean;
+  /** ε-greedy exploration probability for provider selection (R4). Default: 0.05. Override: IICP_ROUTING_EPSILON */
+  routing_epsilon?: number;
 }
 
 export interface TaskConstraints {
