@@ -110,6 +110,7 @@ const client = new IicpClient({
 | `timeout_ms` | `30000` | Request timeout — max 120 000 ms |
 | `region` | `undefined` | Preferred node region |
 | `api_token` | `undefined` | Bearer token for authenticated nodes |
+| `routing_epsilon` | `0.05` | ε-greedy exploration probability — with this probability a random node is selected instead of the top-ranked one, promoting discovery of new providers; `0` disables; override with `IICP_ROUTING_EPSILON` |
 
 ---
 
