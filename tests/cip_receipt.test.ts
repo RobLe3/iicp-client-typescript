@@ -112,24 +112,35 @@ describe("postCipReceipt — TC-9c server-side award path", () => {
     assert.equal(body["amount"] as number, 0.001);
   });
 
-  // #488 — self-query neutrality: querying_node_id forwarded in receipt body.
-  it("includes querying_node_id in request body when provided", async () => {
+  // #488/#490 — querying_node_id in body AND in HMAC canonical message.
+  it("includes querying_node_id in body and HMAC canonical message when provided", async () => {
     const { port, capture } = await captureServer();
+
+    const hmacKey = "key-490";
+    const taskId = "t-self";
+    const tokensUsed = 10;
+    const queryingNodeId = "querying-node-abc";
 
     await postCipReceipt({
       directoryUrl: `http://127.0.0.1:${port}`,
       token: "tok",
-      hmacKey: "key",
+      hmacKey,
       nodeId: "serving-node",
-      taskId: "t-self",
-      tokensUsed: 10,
+      taskId,
+      tokensUsed,
       result: { status: "completed" },
-      queryingNodeId: "querying-node-abc",
+      queryingNodeId,
     });
 
     const { body } = await capture();
-    assert.equal(body["querying_node_id"] as string, "querying-node-abc",
+    assert.equal(body["querying_node_id"] as string, queryingNodeId,
       "querying_node_id must be forwarded to directory for self-query detection");
+
+    // #490 — verify querying_node_id is included in the HMAC canonical message.
+    const expectedMsg = `${taskId}:${tokensUsed}:::${body["nonce"]}:${body["response_hash"]}:${queryingNodeId}`;
+    const expectedSig = createHmac("sha256", hmacKey).update(expectedMsg, "utf8").digest("hex");
+    assert.equal(body["signature"] as string, expectedSig,
+      "HMAC must include querying_node_id to prevent spoofing (#490)");
   });
 
   it("omits querying_node_id from body when not provided", async () => {
