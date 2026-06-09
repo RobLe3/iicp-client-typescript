@@ -206,6 +206,12 @@ export interface NodeIdentity {
    * config. Optional — absent until the node first registers via `serve`.
    */
   node_token?: string;
+  /**
+   * TC-9c — HMAC key for CIPWorkerReceipt signing. Returned by the directory on
+   * registration and persisted here so receipts work immediately on restart without
+   * waiting for the next re-registration cycle. Absent until first `serve`.
+   */
+  node_hmac_key?: string;
   created_at: string;
 }
 

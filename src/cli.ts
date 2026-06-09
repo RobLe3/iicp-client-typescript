@@ -80,6 +80,8 @@ export interface ServeOpts {
   node: string;
   logDir?: string;
   withProxy?: boolean;
+  /** TC-9c — pre-loaded from saved node config; passed to IicpNode so receipts work on restart. */
+  nodeHmacKey?: string;
 }
 
 function envOr(name: string, fallback?: string): string | undefined {
@@ -520,6 +522,7 @@ export function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts 
     host: opts.host === "::" ? saved.host : opts.host,
     autoDetectNat: opts.autoDetectNat || saved.auto_detect_nat,
     externalIpProbeUrl: opts.externalIpProbeUrl || saved.external_ip_probe_url,
+    nodeHmacKey: opts.nodeHmacKey || saved.node_hmac_key || undefined,
   };
 }
 
@@ -743,6 +746,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     relayWorkerEndpoint: opts.relayWorkerEndpoint || undefined,
     relayCapable: opts.relayCapable ?? false,
     relayAcceptPort: opts.relayAcceptPort ?? 9485,
+    nodeHmacKey: opts.nodeHmacKey || undefined,
     operatorDelegation: _opDelegation,
     operatorDisplayName: _opDisplayName,
     operatorCreatedAt: _opCreatedAt,
@@ -878,12 +882,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
         // eslint-disable-next-line no-console
         console.log(`[iicp-node] registered as ${nodeId} (token=${(token ?? "").slice(0, 8)}…)`);
         writeNodeEvent(nodeId, "register_ok", `endpoint=${opts.publicEndpoint || `http://localhost:${opts.port}`}`, logDir);
-        // #456 — cache the token in the saved config so `iicp-node credits` can
-        // authenticate later without re-registering (best-effort).
+        // #456 / TC-9c — cache token + HMAC key in the saved config so `iicp-node credits`
+        // can authenticate later and CIPWorkerReceipts work immediately on restart (best-effort).
         if (opts.node && token) {
           const saved = loadNode(opts.node);
           if (saved) {
             saved.node_token = token;
+            const hmacKey = node.nodeHmacKey;
+            if (hmacKey) saved.node_hmac_key = hmacKey;
             try {
               saveNode(saved);
             } catch {
