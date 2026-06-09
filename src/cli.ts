@@ -1383,11 +1383,11 @@ async function fetchAndDisplayCredits(
   asJson: boolean,
   verify: boolean,
 ): Promise<number> {
-  const url = `${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary`;
+  const url = `${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary?node_id=${encodeURIComponent(nodeId)}`;
   let resp: Response;
   try {
     resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, "X-Node-Id": nodeId },
+      headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(15000),
     });
   } catch (e) {
