@@ -111,4 +111,42 @@ describe("postCipReceipt — TC-9c server-side award path", () => {
     // max(0,1)/1000 = 0.001
     assert.equal(body["amount"] as number, 0.001);
   });
+
+  // #488 — self-query neutrality: querying_node_id forwarded in receipt body.
+  it("includes querying_node_id in request body when provided", async () => {
+    const { port, capture } = await captureServer();
+
+    await postCipReceipt({
+      directoryUrl: `http://127.0.0.1:${port}`,
+      token: "tok",
+      hmacKey: "key",
+      nodeId: "serving-node",
+      taskId: "t-self",
+      tokensUsed: 10,
+      result: { status: "completed" },
+      queryingNodeId: "querying-node-abc",
+    });
+
+    const { body } = await capture();
+    assert.equal(body["querying_node_id"] as string, "querying-node-abc",
+      "querying_node_id must be forwarded to directory for self-query detection");
+  });
+
+  it("omits querying_node_id from body when not provided", async () => {
+    const { port, capture } = await captureServer();
+
+    await postCipReceipt({
+      directoryUrl: `http://127.0.0.1:${port}`,
+      token: "tok",
+      hmacKey: "key",
+      nodeId: "serving-node",
+      taskId: "t-no-qni",
+      tokensUsed: 10,
+      result: { status: "completed" },
+    });
+
+    const { body } = await capture();
+    assert.ok(!("querying_node_id" in body),
+      "querying_node_id must be absent when not provided (backwards compat)");
+  });
 });

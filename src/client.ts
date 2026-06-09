@@ -218,6 +218,8 @@ export class IicpClient {
       } else {
         body["payload"] = req.payload;
       }
+      // #488 — forward requester identity for self-query neutrality at the directory.
+      if (req.source_node_id) body["source_node_id"] = req.source_node_id;
 
       let nodeConnected = true;
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {

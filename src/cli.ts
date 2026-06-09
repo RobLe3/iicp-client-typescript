@@ -980,6 +980,7 @@ async function runQuery(argv: string[]): Promise<number> {
       model: { type: "string" },
       "max-tokens": { type: "string" },
       "timeout-ms": { type: "string" },
+      node: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: true,
@@ -1012,6 +1013,14 @@ async function runQuery(argv: string[]): Promise<number> {
   if (values["model"]) payload["model"] = values["model"];
   if (values["max-tokens"]) payload["max_tokens"] = parseInt(values["max-tokens"] as string, 10);
 
+  // #488 — resolve querying node identity for self-query neutrality.
+  const nodeCfg = (values["node"] as string | undefined) ?? process.env["IICP_NODE"];
+  let sourceNodeId: string | undefined;
+  if (nodeCfg) {
+    const saved = loadNode(nodeCfg);
+    if (saved) sourceNodeId = saved.node_id;
+  }
+
   const client = new IicpClient({ directory_url: directoryUrl, timeout_ms: timeoutMs, tls_verify: true });
   process.stderr.write(`[iicp-node] Discovering nodes for ${intent}...\n`);
 
@@ -1020,6 +1029,7 @@ async function runQuery(argv: string[]): Promise<number> {
       task_id: randomUUID(),
       intent,
       payload,
+      source_node_id: sourceNodeId,
     });
     // Spec terminal success status is "success" (was "completed"); accept both.
     if ((resp.status === "success" || resp.status === "completed") && resp.result) {

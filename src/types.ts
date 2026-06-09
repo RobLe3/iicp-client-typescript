@@ -42,6 +42,8 @@ export interface TaskRequest {
   constraints?: TaskConstraints;
   auth?: TaskAuth;
   task_id?: string;
+  /** #488 — querying node identity for self-query neutrality at the directory. */
+  source_node_id?: string;
 }
 
 export interface TaskResponse {
