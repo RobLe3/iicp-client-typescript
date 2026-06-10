@@ -69,3 +69,35 @@ describe("#464 operator identity = ed25519 key", () => {
     assert.throws(() => operatorSigningKey(legacy));
   });
 });
+
+// ── #503 — anonymous-registration notice ─────────────────────────────────────
+// A node serving without a key-backed operator identity accrues NO founder or
+// recognition standing; the SDK must say so loudly instead of staying silent.
+// Each test fails if the notice helper is removed or stops covering its case.
+describe("#503 anonymous-registration notice", () => {
+  it("fires when no operator identity exists", async () => {
+    const { noIdentityNotice, NO_IDENTITY_NOTICE } = await import("../src/identity.js");
+    const notice = noIdentityNotice(null);
+    assert.equal(notice, NO_IDENTITY_NOTICE);
+    assert.ok(notice!.includes("iicp-node init"));
+    assert.ok(notice!.toLowerCase().includes("founder"));
+  });
+
+  it("fires for a legacy keyless identity", async () => {
+    const { noIdentityNotice } = await import("../src/identity.js");
+    const legacy = {
+      operator_id: "op-12345678-1234-1234-1234-123456789abc",
+      created_at: "2026-01-01T00:00:00Z",
+      display_name: "Legacy",
+      contact: "",
+    } as OperatorIdentity;
+    assert.ok(!operatorIsKeyBacked(legacy));
+    assert.ok(noIdentityNotice(legacy) !== null);
+  });
+
+  it("is silent for a key-backed identity", async () => {
+    const { noIdentityNotice } = await import("../src/identity.js");
+    const op = generateOperator({ display_name: "Keyed", contact: "" });
+    assert.equal(noIdentityNotice(op), null);
+  });
+});

@@ -45,6 +45,7 @@ import {
   listNodes,
   loadNode,
   loadOperator,
+  noIdentityNotice,
   operatorDecryptAtRest,
   operatorEncryptAtRest,
   operatorIsEncrypted,
@@ -727,6 +728,12 @@ async function runServe(opts: ServeOpts): Promise<number> {
   let _opDisplayName: string | undefined;
   let _opCreatedAt: string | undefined;
   let _opIntegrityHash: string | undefined;
+  const _identityNotice = noIdentityNotice(_op);
+  if (_identityNotice !== null) {
+    // #503 — anonymous registration accrues no founder/recognition standing;
+    // say so loudly instead of silently excluding the operator. Non-fatal.
+    process.stderr.write(_identityNotice + "\n");
+  }
   if (_op && operatorIsKeyBacked(_op)) {
     _opDelegation = issueDelegation(operatorSigningKey(_op), nodeId);
     _opDisplayName = _op.display_name || undefined;

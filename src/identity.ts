@@ -287,3 +287,23 @@ export function listNodes(): NodeIdentity[] {
   }
   return out;
 }
+
+// #503 — printed to stderr when serve/register runs without a key-backed operator
+// identity. An anonymous node accrues NO founder/recognition standing and nothing
+// else in the flow would ever tell the operator (the first external operator was
+// silently invisible to the founders program for 3 days).
+export const NO_IDENTITY_NOTICE =
+  "NOTICE: no operator identity - this node is registering anonymously.\n" +
+  "        You will NOT accrue founder or recognition standing.\n" +
+  "        Run `iicp-node init` (takes 30 seconds), then restart, to start\n" +
+  "        your founder clock. Docs: https://iicp.network/docs/operator-identity";
+
+/**
+ * The #503 anonymous-registration notice, or null when the identity is fine.
+ * Fires for BOTH the no-identity case and the legacy keyless case (a UUID
+ * identity cannot sign a delegation, so the node is anonymous either way).
+ */
+export function noIdentityNotice(op: OperatorIdentity | null): string | null {
+  if (op === null || !operatorIsKeyBacked(op)) return NO_IDENTITY_NOTICE;
+  return null;
+}
