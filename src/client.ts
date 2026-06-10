@@ -75,8 +75,12 @@ const DEFAULT_CONFIG: ClientConfig = {
   routing_epsilon: DEFAULT_EPSILON,
 };
 
+const CONSUMER_TOKEN_EXPIRY_BUFFER_S = 30;
+
 export class IicpClient {
   private readonly cfg: ClientConfig;
+  /** Cache: `${nodeToken}|${targetNodeId}|${intent}` → [token, expUnix] */
+  private readonly _ctCache = new Map<string, [string, number]>();
 
   constructor(config?: Partial<ClientConfig>) {
     const merged: ClientConfig = { ...DEFAULT_CONFIG, ...config };
@@ -206,6 +210,13 @@ export class IicpClient {
 
     let lastErr: IicpError | undefined;
     for (const node of candidates) {
+      // Phase 2 (#496): acquire directory-issued consumer token when caller has directory identity.
+      const nodeHeaders = { ...headers };
+      const ct = await this._acquireConsumerToken(node.node_id, req.intent);
+      if (ct) {
+        nodeHeaders["X-IICP-Consumer-Token"] = ct;
+      }
+
       // IICP-CX S.16 §5: build body per node (cx_public_key may differ)
       const shouldEncrypt = this.cfg.use_confidentiality === true && node.cx_public_key != null;
       const body: Record<string, unknown> = {
@@ -228,7 +239,7 @@ export class IicpClient {
             `${node.endpoint}/v1/task`,
             body,
             req.constraints?.timeout_ms ?? this.cfg.timeout_ms,
-            headers,
+            nodeHeaders,
             tp,
           );
           return {
@@ -309,6 +320,58 @@ export class IicpClient {
       usage,
       node_id: String(result.node_id ?? ""),
     };
+  }
+
+  // ------------------------------------------------------------------
+  // Consumer token acquisition (#496)
+  // ------------------------------------------------------------------
+
+  /**
+   * Acquire a directory-issued consumer token for calling targetNodeId.
+   * Caches by (nodeToken, targetNodeId, intent); refreshes when < 30s remain.
+   * Returns null on any failure (callers fall back gracefully).
+   */
+  private async _acquireConsumerToken(
+    targetNodeId: string,
+    intent: string,
+    timeoutMs = 5000,
+  ): Promise<string | null> {
+    const nodeToken = this.cfg.node_token;
+    if (!nodeToken) return null;
+    const cacheKey = `${nodeToken}|${targetNodeId}|${intent}`;
+    const cached = this._ctCache.get(cacheKey);
+    if (cached) {
+      const [tok, exp] = cached;
+      if (Date.now() / 1000 + CONSUMER_TOKEN_EXPIRY_BUFFER_S < exp) return tok;
+    }
+    const url = `${this.cfg.directory_url.replace(/\/api\/?$/, "").replace(/\/$/, "")}/api/v1/consumer-token`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${nodeToken}`,
+        },
+        body: JSON.stringify({ target_node_id: targetNodeId, intent }),
+        signal: controller.signal,
+      });
+      if (res.status === 201) {
+        const data = (await res.json()) as Record<string, unknown>;
+        const token = String(data.token ?? "");
+        const exp = Number(data.expires_at ?? 0);
+        if (token) {
+          this._ctCache.set(cacheKey, [token, exp]);
+          return token;
+        }
+      }
+    } catch {
+      // best-effort; caller proceeds without consumer token
+    } finally {
+      clearTimeout(timer);
+    }
+    return null;
   }
 
   // ------------------------------------------------------------------

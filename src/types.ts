@@ -15,6 +15,8 @@ export interface ClientConfig {
   use_confidentiality?: boolean;
   /** ε-greedy exploration probability for provider selection (R4). Default: 0.05. Override: IICP_ROUTING_EPSILON */
   routing_epsilon?: number;
+  /** Phase 2 (#496): caller's JWT from directory registration, used to acquire consumer tokens. */
+  node_token?: string;
 }
 
 export interface TaskConstraints {
