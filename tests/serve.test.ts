@@ -112,6 +112,34 @@ describe("IicpNode server", () => {
     assert.equal(ps.active, false);
   });
 
+  it("#494 health endpoint exposes models[] containing the primary model", async () => {
+    const { body } = await jsonReq("GET", port, "/iicp/health");
+    const b = body as Record<string, unknown>;
+    assert.ok(Array.isArray(b.models), "/iicp/health must include models[] array");
+    assert.ok((b.models as string[]).includes("test-model"), "primary model must appear in models[]");
+  });
+
+  it("#494 health endpoint models[] includes capabilities", async () => {
+    const p2 = await freePort();
+    const node2 = new IicpNode({
+      nodeId: "multi-node",
+      endpoint: "http://multi.local",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "primary-model",
+      capabilities: ["extra-model"],
+    });
+    const cleanup2 = node2.serve(async () => ({}), { host: "127.0.0.1", port: p2 });
+    await waitPort(p2);
+    try {
+      const { body } = await jsonReq("GET", p2, "/iicp/health");
+      const models = (body as Record<string, unknown>).models as string[];
+      assert.ok(models.includes("primary-model"), "primary model must be in models[]");
+      assert.ok(models.includes("extra-model"), "capability must be in models[]");
+    } finally {
+      cleanup2();
+    }
+  });
+
   it("unknown GET path → 404", async () => {
     const { status } = await jsonReq("GET", port, "/nope");
     assert.equal(status, 404);
