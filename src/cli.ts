@@ -751,6 +751,9 @@ async function runServe(opts: ServeOpts): Promise<number> {
     operatorDisplayName: _opDisplayName,
     operatorCreatedAt: _opCreatedAt,
     operatorIntegrityHash: _opIntegrityHash,
+    // #494 — wire backend URL for live health_models probing in heartbeats.
+    backendUrl: opts.backendUrl || undefined,
+    backendApiKey: opts.backendApiKey || undefined,
   });
 
   // Apply collected NAT profile (covers both auto-detect and tier-0 IPv6 cases).

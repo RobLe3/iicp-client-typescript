@@ -272,3 +272,113 @@ describe("heartbeat self-heal (#404)", () => {
     }
   });
 });
+
+// ── #494 — health_models heartbeat reporting ─────────────────────────────────
+
+describe("health_models heartbeat reporting (#494)", () => {
+  function cfg(): NodeConfig {
+    return {
+      nodeId: "hm-ts-test",
+      endpoint: "http://127.0.0.1:9999",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      directoryUrl: "http://localhost:8888",
+    } as NodeConfig;
+  }
+
+  it("includes health_models in heartbeat when probe returns models", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const dir = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        captured = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => dir.listen(port, "127.0.0.1", () => r()));
+    try {
+      const node = new IicpNode({
+        ...cfg(),
+        directoryUrl: `http://127.0.0.1:${port}`,
+        backendUrl: "http://localhost:11434",
+      } as NodeConfig);
+      // Inject a stub for _probeHealthModels
+      (node as unknown as { _probeHealthModels: () => Promise<string[] | null> })._probeHealthModels =
+        async () => ["llama3:latest", "qwen2.5:0.5b"];
+      await (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat("tok");
+      assert.ok(captured, "heartbeat payload must have been received");
+      assert.deepEqual(
+        (captured as Record<string, unknown>).health_models,
+        ["llama3:latest", "qwen2.5:0.5b"],
+        "health_models must appear in heartbeat when probe succeeds",
+      );
+    } finally {
+      await new Promise<void>((r) => dir.close(() => r()));
+    }
+  });
+
+  it("sends health_models=[] when probe returns empty list", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const dir = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        captured = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => dir.listen(port, "127.0.0.1", () => r()));
+    try {
+      const node = new IicpNode({
+        ...cfg(),
+        directoryUrl: `http://127.0.0.1:${port}`,
+        backendUrl: "http://localhost:11434",
+      } as NodeConfig);
+      (node as unknown as { _probeHealthModels: () => Promise<string[] | null> })._probeHealthModels =
+        async () => [];
+      await (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat("tok");
+      assert.ok(captured, "heartbeat payload must have been received");
+      assert.deepEqual(
+        (captured as Record<string, unknown>).health_models,
+        [],
+        "health_models=[] must be sent when backend reports no models",
+      );
+    } finally {
+      await new Promise<void>((r) => dir.close(() => r()));
+    }
+  });
+
+  it("omits health_models when no backendUrl is configured", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const dir = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        captured = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => dir.listen(port, "127.0.0.1", () => r()));
+    try {
+      const node = new IicpNode({
+        ...cfg(),
+        directoryUrl: `http://127.0.0.1:${port}`,
+        // No backendUrl
+      } as NodeConfig);
+      await (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat("tok");
+      assert.ok(captured, "heartbeat payload must have been received");
+      assert.ok(
+        !Object.hasOwn(captured as Record<string, unknown>, "health_models"),
+        "health_models must be absent when no backendUrl is set",
+      );
+    } finally {
+      await new Promise<void>((r) => dir.close(() => r()));
+    }
+  });
+});

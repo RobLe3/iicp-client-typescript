@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.51] — 2026-06-10
+
+### Added — health_models heartbeat reporting (#494)
+
+- **`NodeConfig.backendUrl` / `backendApiKey`** — when set, each heartbeat probes the
+  backend's live model list (`/api/tags` for Ollama, `/v1/models` for OpenAI-compatible
+  backends) and sends `health_models=[...]` in the heartbeat payload.
+- The directory (≥ v1.10.28) uses `health_models` to filter `?model=` discover queries
+  to nodes whose backend actually has that model loaded, eliminating stale-model routing.
+- Probe failures are soft — heartbeat still fires without `health_models` (backward compat).
+- 3 behavior tests added (`serve.test.ts`).
+
 ## [0.7.40] — 2026-06-07
 
 ### Fixed — CLI usability hardening (no friction for new operators)
