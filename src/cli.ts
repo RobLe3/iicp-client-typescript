@@ -139,7 +139,9 @@ function printHelp(): void {
       `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n` +
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
       `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
-      `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485)\n` +
+      `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485).\n` +
+      `                             Note: relay bind authentication is pending (#510) — only run a relay\n` +
+      `                             accept port on networks you trust until the signed-bind mechanism ships.\n` +
       `  --log-dir DIR              IICP_LOG_DIR — directory for persistent log files (<node_id>.log + events.jsonl)\n` +
       `  --with-proxy               IICP_WITH_PROXY — also run the loopback compat proxy (127.0.0.1:9483) in-process\n\n` +
       `query optional:\n` +

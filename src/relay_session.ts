@@ -98,6 +98,15 @@ export class RelayWorkerSession {
     });
   }
 
+  /**
+   * Whether the underlying worker socket is still alive/writable.
+   * #510 interim hardening: an alive bound session must not be displaced
+   * by a new RELAY_BIND for the same worker_id (unauthenticated bind).
+   */
+  isAlive(): boolean {
+    return !this._socket.destroyed && this._socket.writable;
+  }
+
   /** Called by relay accept server when a RESPONSE arrives from the worker. */
   onResponse(callId: string, result: Record<string, unknown>): void {
     const cb = this._pending.get(callId);
@@ -231,6 +240,25 @@ export class RelayAcceptServer {
     } catch { return; }
     if (!workerId) return;
 
+    // #510 interim hardening: RELAY_BIND is unauthenticated, so refuse to
+    // displace an existing session whose socket is still alive (mid-session
+    // hijack). Rebind after socket death (legitimate reconnect) still works.
+    const existing = this._registry.get(workerId);
+    if (existing && existing.isAlive()) {
+      const remote = `${socket.remoteAddress ?? "?"}:${socket.remotePort ?? "?"}`;
+      console.warn(
+        `[relay-accept] rejected RELAY_BIND for worker=${workerId} from ${remote}: ` +
+        `worker_id already bound to an alive session (#510)`,
+      );
+      socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
+        [1, "error"],
+        [2, workerId],
+        [3, "worker_id already bound to an alive session"],
+      ])) as Buffer));
+      socket.destroy();
+      return;
+    }
+
     const session = new RelayWorkerSession(workerId, socket);
     this._registry.bind(workerId, session);
     console.log(`[relay-accept] worker=${workerId} bound (intent=${intent} models=${models.slice(0, 3).join(",")})`);
@@ -267,7 +295,11 @@ export class RelayAcceptServer {
         }
       }
     } finally {
-      this._registry.unbind(workerId);
+      // Only remove the registry entry if it is still ours — a legitimate
+      // reconnect may already have bound a newer session for this worker_id.
+      if (this._registry.get(workerId) === session) {
+        this._registry.unbind(workerId);
+      }
       console.log(`[relay-accept] session ended for worker=${workerId}`);
       socket.destroy();
     }
