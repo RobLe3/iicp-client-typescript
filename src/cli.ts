@@ -28,6 +28,7 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const SDK_VERSION: string = (require("../package.json") as { version: string }).version;
 import * as net from "node:net";
+import * as http from "node:http";
 import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -113,6 +114,7 @@ function printHelp(): void {
       `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
       `  credits                    Show this node's earned / spent / balance credits\n` +
       `  proxy                      Run the local OpenAI/Ollama/Anthropic-compat gateway (loopback; no registration)\n` +
+      `  mcp-gateway                Bridge a local MCP server as an IICP provider node (registers + serves)\n` +
       `  operator rename <name>     Change your public display_name (signed by your operator key)\n` +
       `  operator encrypt           Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  operator decrypt           Remove at-rest encryption of the operator secret\n\n` +
@@ -1769,6 +1771,185 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
   }
 }
 
+// ── mcp-gateway (#512) ───────────────────────────────────────────────────────
+
+const _MCP_DANGEROUS = new Set(["bash", "shell", "exec", "run_command", "eval"]);
+
+function _toolToIntent(name: string): string {
+  const safe = name.toLowerCase().replace(/[^a-z0-9_]/g, "_");
+  return `urn:iicp:intent:mcp:${safe}:v1`;
+}
+
+async function runMcpGateway(argv: string[]): Promise<number> {
+  const helpFlag = argv.includes("--help") || argv.includes("-h");
+  if (helpFlag) {
+    process.stdout.write(
+      `usage: iicp-node mcp-gateway [options]\n\n` +
+        `Bridge a local MCP server into the IICP mesh as a registered provider node.\n\n` +
+        `Options:\n` +
+        `  --mcp-url URL        IICP_MCP_URL — MCP server base URL (default http://localhost:8001)\n` +
+        `  --tools NAMES        IICP_MCP_TOOLS — comma-separated tool names to advertise (required)\n` +
+        `  --node-id ID         IICP_NODE_ID — auto-generated if absent\n` +
+        `  --public-endpoint U  IICP_PUBLIC_ENDPOINT — externally reachable URL of this gateway\n` +
+        `  --directory-url URL  IICP_DIRECTORY_URL (default https://iicp.network/api/v1)\n` +
+        `  --region REGION      IICP_REGION (default local)\n` +
+        `  --port N             IICP_PORT (default 9484)\n` +
+        `  --host HOST          IICP_HOST (default ::)\n`,
+    );
+    return 0;
+  }
+
+  const { values } = safeParseArgs({
+    args: argv,
+    options: {
+      "mcp-url": { type: "string" },
+      tools: { type: "string" },
+      "node-id": { type: "string" },
+      "public-endpoint": { type: "string" },
+      "directory-url": { type: "string" },
+      region: { type: "string" },
+      port: { type: "string" },
+      host: { type: "string" },
+    },
+    allowPositionals: false,
+  });
+
+  const mcpUrl = ((values["mcp-url"] as string | undefined) ?? envOr("IICP_MCP_URL") ?? "http://localhost:8001").replace(/\/$/, "");
+  const rawTools = ((values["tools"] as string | undefined) ?? envOr("IICP_MCP_TOOLS") ?? "")
+    .split(",").map((t) => t.trim()).filter(Boolean);
+  const activeTools = rawTools.filter((t) => !_MCP_DANGEROUS.has(t.toLowerCase()));
+
+  if (activeTools.length === 0) {
+    process.stderr.write(
+      `ERROR: --tools is required. Provide a comma-separated list of MCP tool names.\n` +
+        `  Example: iicp-node mcp-gateway --tools read_file,list_dir --mcp-url http://localhost:8001\n`,
+    );
+    return 2;
+  }
+
+  const nodeId = (values["node-id"] as string | undefined) ?? envOr("IICP_NODE_ID") ?? `gateway-mcp-${randomBytes(4).toString("hex")}`;
+  const directoryUrl = ((values["directory-url"] as string | undefined) ?? envOr("IICP_DIRECTORY_URL") ?? "https://iicp.network/api/v1").replace(/\/$/, "");
+  const region = (values["region"] as string | undefined) ?? envOr("IICP_REGION") ?? "local";
+  const port = parsePort(values["port"] as string | undefined, 9484);
+  const host = (values["host"] as string | undefined) ?? envOr("IICP_HOST") ?? "::";
+  const publicEndpoint = (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? `http://localhost:${port}`;
+  const intents = activeTools.map(_toolToIntent);
+
+  let nodeToken = envOr("IICP_NODE_TOKEN") ?? "";
+
+  async function doRegister(): Promise<string> {
+    const payload = { node_id: nodeId, region, endpoint: publicEndpoint, intents, mcp_tools: activeTools, protocol_version: "1.0" };
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (nodeToken) headers["Authorization"] = `Bearer ${nodeToken}`;
+    const resp = await fetch(`${directoryUrl}/register`, { method: "POST", headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000) });
+    if (!resp.ok) throw new Error(`register ${resp.status}`);
+    const data = await resp.json() as Record<string, unknown>;
+    return (data["node_token"] as string | undefined) ?? nodeToken;
+  }
+
+  async function doHeartbeat(): Promise<void> {
+    const payload = { node_id: nodeId, intents, load: 0.0, status: "active" };
+    try {
+      await fetch(`${directoryUrl}/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${nodeToken}` },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch {
+      // heartbeat failures are non-fatal
+    }
+  }
+
+  let mcpRpcId = 0;
+  async function callMcp(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    mcpRpcId += 1;
+    const rpc = { jsonrpc: "2.0", id: mcpRpcId, method: "tools/call", params: { name: toolName, arguments: args } };
+    const resp = await fetch(`${mcpUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rpc),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok) throw new Error(`MCP server unreachable: ${resp.status}`);
+    const data = await resp.json() as Record<string, unknown>;
+    if (data["error"]) throw new Error((data["error"] as Record<string, unknown>)["message"] as string ?? "MCP error");
+    return data["result"];
+  }
+
+  try {
+    nodeToken = await doRegister();
+    process.stdout.write(
+      `iicp-node mcp-gateway registered as '${nodeId}' with ${activeTools.length} tool(s): ${activeTools.join(", ")}\n` +
+        `  IICP endpoint: ${publicEndpoint}\n  MCP server:    ${mcpUrl}\n`,
+    );
+  } catch (err) {
+    process.stderr.write(`WARNING: directory registration failed (${(err as Error).message}) — running without listing\n`);
+  }
+
+  const hbInterval = setInterval(() => { void doHeartbeat(); }, 30_000);
+
+  const server = http.createServer(async (req, res) => {
+    if (req.method === "GET" && req.url === "/iicp/health") {
+      const body = JSON.stringify({ status: "ok", node_id: nodeId, active_tools: activeTools, mcp_server: mcpUrl, timestamp: Math.floor(Date.now() / 1000) });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(body);
+      return;
+    }
+    if (req.method === "POST" && req.url === "/v1/task") {
+      const auth = req.headers["authorization"] ?? "";
+      if (!nodeToken || auth !== `Bearer ${nodeToken}`) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unauthorized" }));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      let body: Record<string, unknown>;
+      try { body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>; }
+      catch { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "invalid JSON" })); return; }
+
+      const payload = (body["payload"] ?? {}) as Record<string, unknown>;
+      let toolName = (payload["tool_name"] as string | undefined) ?? "";
+      if (!toolName) {
+        const m = /urn:iicp:intent:mcp:([^:]+):v1/.exec((body["intent"] as string | undefined) ?? "");
+        if (m) toolName = m[1];
+      }
+      if (!toolName) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Cannot determine tool name" })); return; }
+      if (_MCP_DANGEROUS.has(toolName.toLowerCase())) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Tool not permitted" })); return; }
+      if (activeTools.length && !activeTools.includes(toolName)) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Tool not available" })); return; }
+      const taskId = (body["task_id"] as string | undefined) ?? randomUUID();
+      try {
+        const result = await callMcp(toolName, (payload["arguments"] ?? {}) as Record<string, unknown>);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ task_id: taskId, status: "completed", result }));
+      } catch (err) {
+        const msg = (err as Error).message ?? "error";
+        const code = msg.includes("unreachable") ? 502 : 422;
+        res.writeHead(code, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: msg }));
+      }
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+
+  await new Promise<void>((resolve) => {
+    server.listen(port, host === "::" ? "::" : host, () => {
+      process.stdout.write(`  Listening on ${host}:${port}\n`);
+      resolve();
+    });
+  });
+
+  await new Promise<void>((resolve) => {
+    process.on("SIGINT", () => { clearInterval(hbInterval); server.close(); resolve(); });
+    process.on("SIGTERM", () => { clearInterval(hbInterval); server.close(); resolve(); });
+  });
+
+  return 0;
+}
+
 /** Command dispatch — separated so main() can wrap parse failures as clean CliError output. */
 async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
@@ -1778,6 +1959,7 @@ async function dispatch(argv: string[]): Promise<number> {
   if (cmd === "credits") return runCredits(argv.slice(1));
   if (cmd === "operator") return runOperator(argv.slice(1));
   if (cmd === "proxy") return runProxyCmd(argv.slice(1));
+  if (cmd === "mcp-gateway") return runMcpGateway(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();
