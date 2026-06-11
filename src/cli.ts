@@ -1349,6 +1349,9 @@ async function runCredits(argv: string[]): Promise<number> {
             process.stderr.write(
               `[iicp-node] no --node given — showing credits for all ${withToken.length} nodes:\n`,
             );
+            // One node failing must not hide the others — show every node,
+            // then exit non-zero if any failed (2026-06-11).
+            let failed = 0;
             for (let i = 0; i < withToken.length; i++) {
               if (i > 0) process.stdout.write("\n");
               const n = withToken[i]!;
@@ -1356,7 +1359,16 @@ async function runCredits(argv: string[]): Promise<number> {
                 n.directory_url ?? dir, n.node_id, n.node_token!, n.name,
                 Boolean(values["json"]), Boolean(values["verify"]),
               );
-              if (rc !== 0) return rc;
+              if (rc !== 0) {
+                process.stderr.write(
+                  `ERROR: credits fetch failed for node '${n.name}' — continuing with remaining nodes\n`,
+                );
+                failed++;
+              }
+            }
+            if (failed > 0) {
+              process.stderr.write(`ERROR: ${failed}/${withToken.length} node(s) failed\n`);
+              return 1;
             }
             return 0;
           } else {
@@ -1410,22 +1422,39 @@ async function fetchAndDisplayCredits(
   verify: boolean,
 ): Promise<number> {
   const url = `${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary?node_id=${encodeURIComponent(nodeId)}`;
-  let resp: Response;
-  try {
-    resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(15000),
-    });
-  } catch (e) {
-    process.stderr.write(`ERROR: request failed: ${e instanceof Error ? e.message : String(e)}\n`);
-    return 1;
+  // Transient failures (network error, 5xx, undecodable body) get ONE retry
+  // after a short pause — shared-hosting blips and deploy windows otherwise
+  // surface as one-shot CLI errors (observed 2026-06-11).
+  let resp: Response | undefined;
+  let body: Record<string, unknown> | undefined;
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    resp = undefined;
+    body = undefined;
+    try {
+      resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch (e) {
+      lastErr = `request failed: ${e instanceof Error ? e.message : String(e)}`;
+    }
+    if (resp) {
+      try {
+        body = (await resp.json()) as Record<string, unknown>;
+      } catch {
+        lastErr = `bad response (HTTP ${resp.status})`;
+      }
+      if (body !== undefined && resp.status < 500) break; // success or definitive 4xx
+      if (body !== undefined) {
+        const err = body["error"] as { message?: string } | undefined;
+        lastErr = `HTTP ${resp.status}: ${err?.message ?? "request rejected"}`;
+      }
+    }
+    if (attempt === 1) await new Promise((r) => setTimeout(r, 2000));
   }
-
-  let body: Record<string, unknown>;
-  try {
-    body = (await resp.json()) as Record<string, unknown>;
-  } catch {
-    process.stderr.write(`ERROR: bad response (HTTP ${resp.status})\n`);
+  if (!resp || body === undefined || resp.status >= 500) {
+    process.stderr.write(`ERROR: ${lastErr}\n`);
     return 1;
   }
   if (!resp.ok) {

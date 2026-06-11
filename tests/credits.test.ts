@@ -240,3 +240,104 @@ describe("iicp-node credits --verify", () => {
     }
   });
 });
+
+// --- 2026-06-11: transient-failure retry + all-nodes continue-on-error ---
+describe("iicp-node credits — retry + multi-node resilience", () => {
+  const OK_BODY = JSON.stringify({
+    node_id: "n1", total_earned: 5, total_spent: 0, balance: 5,
+    tx_count: 1, reconciles: true, unit: "credit", tokens_per_credit: 1000,
+  });
+  const ERR_BODY = JSON.stringify({
+    error: { code: "server_error", message: "An internal error occurred" },
+  });
+
+  /** Mock server answering successive requests from `responses`; counts calls. */
+  function serveSequence(
+    responses: Array<[number, string]>,
+  ): Promise<{ port: number; calls: () => number; close: () => void }> {
+    return new Promise((resolve) => {
+      let n = 0;
+      const srv = http.createServer((_req, res) => {
+        const [status, body] = responses[Math.min(n, responses.length - 1)]!;
+        n++;
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(body);
+      });
+      srv.listen(0, "127.0.0.1", () => {
+        const addr = srv.address();
+        resolve({
+          port: typeof addr === "object" && addr ? addr.port : 0,
+          calls: () => n,
+          close: () => srv.close(),
+        });
+      });
+    });
+  }
+
+  it("retries once on a transient 500 and succeeds (fails if retry removed)", async () => {
+    const srv = await serveSequence([[500, ERR_BODY], [200, OK_BODY]]);
+    try {
+      const rc = await main([
+        "credits", "--node-id", "n1", "--token", "t",
+        "--directory-url", `http://127.0.0.1:${srv.port}`, "--json",
+      ]);
+      assert.equal(rc, 0, "transient 500 followed by 200 must succeed via retry");
+      assert.equal(srv.calls(), 2);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("does not retry a definitive 4xx", async () => {
+    const srv = await serveSequence([[401, JSON.stringify({ error: { message: "bad token" } })]]);
+    try {
+      const rc = await main([
+        "credits", "--node-id", "n1", "--token", "bad",
+        "--directory-url", `http://127.0.0.1:${srv.port}`,
+      ]);
+      assert.equal(rc, 1);
+      assert.equal(srv.calls(), 1, "definitive 4xx must not be retried");
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("all-nodes listing continues past a failing node and exits non-zero", async () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-test-"));
+    const savedHome = process.env.IICP_HOME;
+    process.env.IICP_HOME = tmpHome;
+    const bad = await serveSequence([[500, ERR_BODY], [500, ERR_BODY]]);
+    const good = await serveSequence([[200, OK_BODY], [200, OK_BODY]]);
+    const outLines: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (s: string | Uint8Array, ...rest: unknown[]) => {
+      outLines.push(typeof s === "string" ? s : s.toString());
+      return (origOut as (...a: unknown[]) => boolean)(s, ...rest);
+    };
+    try {
+      const base = {
+        operator_id: "op-test", backend_url: "http://localhost:11434",
+        model: "test:1b", intent: "urn:iicp:intent:llm:chat:v1", region: "unknown",
+        max_concurrent: 4, port: 8020, host: "0.0.0.0", public_endpoint: "",
+        auto_detect_nat: false, external_ip_probe_url: "",
+        created_at: new Date().toISOString(),
+      };
+      // 'default' without token + ≥2 nodes with tokens → all-nodes path.
+      saveNode({ ...base, node_id: "n-def", name: "default", directory_url: "https://iicp.network/api", node_token: undefined });
+      saveNode({ ...base, node_id: "n-bad", name: "aaa-bad", directory_url: `http://127.0.0.1:${bad.port}`, node_token: "t1" });
+      saveNode({ ...base, node_id: "n-good", name: "zzz-good", directory_url: `http://127.0.0.1:${good.port}`, node_token: "t2" });
+
+      const rc = await main(["credits"]);
+      const out = outLines.join("");
+      assert.ok(out.includes("zzz-good"), `the healthy node must still be displayed; got: ${out}`);
+      assert.equal(rc, 1, "exit must be non-zero when any node failed");
+    } finally {
+      process.stdout.write = origOut;
+      bad.close();
+      good.close();
+      if (savedHome === undefined) delete process.env.IICP_HOME;
+      else process.env.IICP_HOME = savedHome;
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});
