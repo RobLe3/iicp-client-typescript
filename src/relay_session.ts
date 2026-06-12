@@ -117,12 +117,109 @@ export class RelayWorkerSession {
   }
 }
 
+// ── HttpPollWorkerSession (#450 browser workers) ─────────────────────────────
+
+/**
+ * One bound HTTP long-poll relay-worker session.
+ *
+ * Duck-type compatible with RelayWorkerSession (forwardTask / isAlive /
+ * onResponse) so the registry and relay handlers treat both transports
+ * identically. Instead of pushing CALL frames down a TCP socket,
+ * forwardTask() queues the call for the worker's GET /v1/relay/pull
+ * long-poll; the worker posts the result via POST /v1/relay/result.
+ *
+ * Auth: `sessionToken` is issued at bind and presented as a Bearer token on
+ * pull/result/unbind — stronger than the unauthenticated TCP RELAY_BIND
+ * (#510), applied to the new transport from day one.
+ *
+ * Liveness = the worker pulled within `livenessWindowMs`. A dead session is
+ * displaceable by a fresh bind (#510 interim-C: an ALIVE session never is).
+ */
+export class HttpPollWorkerSession {
+  readonly workerId: string;
+  readonly intent: string;
+  readonly models: string[];
+  readonly sessionToken: string;
+  private readonly _queue: Array<{ call_id: string; task: unknown }> = [];
+  private readonly _waiters: Array<(call: { call_id: string; task: unknown } | null) => void> = [];
+  private readonly _pending = new Map<string, (result: Record<string, unknown>) => void>();
+  private _lastPull = Date.now();
+  private readonly _livenessWindowMs: number;
+  private _closed = false;
+
+  constructor(workerId: string, opts: { intent?: string; models?: string[]; livenessWindowMs?: number } = {}) {
+    this.workerId = workerId;
+    this.intent = opts.intent ?? "";
+    this.models = opts.models ?? [];
+    this.sessionToken = randomUUID().replace(/-/g, "");
+    this._livenessWindowMs = opts.livenessWindowMs ?? 90_000;
+  }
+
+  /** Queue a CALL for the polling worker and await its RESPONSE. */
+  async forwardTask(task: unknown, timeoutMs = 120_000): Promise<Record<string, unknown>> {
+    const callId = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._pending.delete(callId);
+        reject(new Error(`relay forward timeout for call ${callId}`));
+      }, timeoutMs);
+      this._pending.set(callId, (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      });
+      const call = { call_id: callId, task };
+      const waiter = this._waiters.shift();
+      if (waiter) waiter(call);
+      else this._queue.push(call);
+    });
+  }
+
+  /** Long-poll: next queued CALL, or null when the window elapses. */
+  nextCall(timeoutMs = 25_000): Promise<{ call_id: string; task: unknown } | null> {
+    this._lastPull = Date.now();
+    const queued = this._queue.shift();
+    if (queued) return Promise.resolve(queued);
+    return new Promise((resolve) => {
+      const waiter = (call: { call_id: string; task: unknown } | null) => {
+        clearTimeout(timer);
+        this._lastPull = Date.now();
+        resolve(call);
+      };
+      const timer = setTimeout(() => {
+        const i = this._waiters.indexOf(waiter);
+        if (i >= 0) this._waiters.splice(i, 1);
+        this._lastPull = Date.now();
+        resolve(null);
+      }, timeoutMs);
+      this._waiters.push(waiter);
+    });
+  }
+
+  isAlive(): boolean {
+    return !this._closed && Date.now() - this._lastPull < this._livenessWindowMs;
+  }
+
+  onResponse(callId: string, result: Record<string, unknown>): void {
+    const cb = this._pending.get(callId);
+    if (cb) {
+      this._pending.delete(callId);
+      cb(result);
+    }
+  }
+
+  close(): void {
+    this._closed = true;
+  }
+}
+
+export type RelaySession = RelayWorkerSession | HttpPollWorkerSession;
+
 // ── RelaySessionRegistry ─────────────────────────────────────────────────────
 
 export class RelaySessionRegistry {
-  private readonly _sessions = new Map<string, RelayWorkerSession>();
+  private readonly _sessions = new Map<string, RelaySession>();
 
-  bind(workerId: string, session: RelayWorkerSession): void {
+  bind(workerId: string, session: RelaySession): void {
     this._sessions.set(workerId, session);
   }
 
@@ -130,8 +227,17 @@ export class RelaySessionRegistry {
     this._sessions.delete(workerId);
   }
 
-  get(workerId: string): RelayWorkerSession | undefined {
+  get(workerId: string): RelaySession | undefined {
     return this._sessions.get(workerId);
+  }
+
+  /** Find an HTTP-poll session by its bearer token (pull/result auth). */
+  getByToken(token: string): HttpPollWorkerSession | undefined {
+    if (!token) return undefined;
+    for (const sess of this._sessions.values()) {
+      if (sess instanceof HttpPollWorkerSession && sess.sessionToken === token) return sess;
+    }
+    return undefined;
   }
 
   isBound(workerId: string): boolean {
@@ -149,12 +255,19 @@ export class RelayAcceptServer {
   private readonly _registry: RelaySessionRegistry;
   private readonly _host: string;
   private readonly _port: number;
+  /** The relay's public HTTP task port — advertised in RELAY_ACK (field 4)
+   * so workers can register {relay}:{httpPort}/v1/relay-for/<wid>. */
+  readonly httpPort: number;
   private _server?: net.Server;
 
-  constructor(registry: RelaySessionRegistry, opts: { host?: string; port?: number } = {}) {
+  constructor(
+    registry: RelaySessionRegistry,
+    opts: { host?: string; port?: number; httpPort?: number } = {},
+  ) {
     this._registry = registry;
     this._host = opts.host ?? "0.0.0.0";
     this._port = opts.port ?? 9485;
+    this.httpPort = opts.httpPort ?? 9484;
   }
 
   start(): Promise<void> {
@@ -262,7 +375,10 @@ export class RelayAcceptServer {
     const session = new RelayWorkerSession(workerId, socket);
     this._registry.bind(workerId, session);
     console.log(`[relay-accept] worker=${workerId} bound (intent=${intent} models=${models.slice(0, 3).join(",")})`);
-    socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([[1, "ok"], [2, workerId]])) as Buffer));
+    // Field 4 (additive, #450): the relay's HTTP task port, so the worker can
+    // register {relay_host}:{http_port}/v1/relay-for/{worker_id} with the
+    // directory. Old workers ignore unknown CBOR keys.
+    socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([[1, "ok"], [2, workerId], [4, this.httpPort]])) as Buffer));
 
     // Step 3: relay-worker frame loop
     try {

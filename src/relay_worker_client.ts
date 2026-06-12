@@ -79,7 +79,9 @@ export class RelayWorkerClient {
     relayPort: number;
     handler: RelayTaskHandler;
     models?: string[];
-    /** Called after a successful RELAY_ACK — use to re-register with the directory (#358). */
+    /** Called after a successful RELAY_ACK with (relayHost, relayHttpPort, workerId) —
+     * the HTTP port comes from RELAY_ACK field 4 (fallback 9484). Use to re-register
+     * with the directory advertising {relay}/v1/relay-for/{workerId} (#358/#450). */
     onBind?: (relayHost: string, relayPort: number, workerId: string) => Promise<void>;
   }) {
     this._workerId = opts.workerId;
@@ -182,11 +184,15 @@ export class RelayWorkerClient {
     if (!rack || rack[0] !== MT_RELAY_ACK) throw new Error(`Expected RELAY_ACK, got ${rack?.[0]}`);
     const ackBody = _dec(rack[1]);
     if (ackBody[1] !== "ok") throw new Error(`RELAY_ACK not ok: ${JSON.stringify(ackBody)}`);
+    // Field 4 (#450): the relay's HTTP task port — used for directory
+    // registration ({relay}:{httpPort}/v1/relay-for/{workerId}). Relays
+    // predating the field default to the standard task port.
+    const relayHttpPort = typeof ackBody[4] === "number" ? (ackBody[4] as number) : 9484;
 
     console.log(`[relay-worker] ${this._workerId}: bound to relay ${this._relayHost}:${this._relayPort}`);
     if (this._onBind) {
       try {
-        await this._onBind(this._relayHost, this._relayPort, this._workerId);
+        await this._onBind(this._relayHost, relayHttpPort, this._workerId);
       } catch (exc) {
         console.warn(`[relay-worker] onBind callback failed: ${exc instanceof Error ? exc.message : exc}`);
       }
