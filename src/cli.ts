@@ -78,6 +78,8 @@ export interface ServeOpts {
   externalIpProbeUrl: string;
   relayWorkerEndpoint: string;
   relayCapable?: boolean;
+  /** #520 rung 5 tri-state: true=forced, false=disabled, undefined=auto. */
+  tunnel?: boolean;
   relayAcceptPort?: number;
   node: string;
   logDir?: string;
@@ -640,6 +642,36 @@ async function runServe(opts: ServeOpts): Promise<number> {
 
   let publicEndpoint = opts.publicEndpoint || `http://localhost:${opts.port}`;
 
+  // #520 rung 5 — Quick Tunnel escalation state (see src/tunnel.ts).
+  const tunnelPref: boolean | undefined = opts.tunnel;
+  let tunnelHandle: import("./tunnel.js").QuickTunnel | null = null;
+  const openTunnelRung = async (
+    localPort: number,
+    forced: boolean,
+  ): Promise<import("./tunnel.js").QuickTunnel | null> => {
+    const { INSTALL_HINT, cloudflaredPath, openQuickTunnel } = await import("./tunnel.js");
+    if (!cloudflaredPath()) {
+      // eslint-disable-next-line no-console
+      console.warn(`[iicp-node] ${INSTALL_HINT}`);
+      return null;
+    }
+    try {
+      const t = await openQuickTunnel(localPort);
+      // eslint-disable-next-line no-console
+      console.log(
+        `[iicp-node] NAT rung 5${forced ? " (forced)" : ""}: public https endpoint via ` +
+          `Quick Tunnel — ${t.url} (zero-account; URL rotates on restart)`,
+      );
+      return t;
+    } catch (exc) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[iicp-node] Quick Tunnel failed to start: ${exc instanceof Error ? exc.message : exc} — continuing without it`,
+      );
+      return null;
+    }
+  };
+
   // ADR-043 §5 / #343 — Tier-0 IPv6 pinhole attempt. Runs unconditionally
   // when the operator's public_endpoint is bracketed-IPv6, even without
   // --auto-detect-nat. Mirrors Python's cli.py path: try AddPinhole on
@@ -706,11 +738,23 @@ async function runServe(opts: ServeOpts): Promise<number> {
           opts = { ...opts, relayWorkerEndpoint: `${relayHost}:${relayPort}` };
           // eslint-disable-next-line no-console
           console.log(`[iicp-node] auto-elected relay: ${relayHost}:${relayPort}`);
+        } else if (tunnelPref !== false) {
+          // #520 rung 5: no relay anywhere → Quick Tunnel (zero-account),
+          // unless disabled via --no-tunnel / IICP_TUNNEL=0.
+          tunnelHandle = await openTunnelRung(opts.port, false);
+          if (tunnelHandle) publicEndpoint = tunnelHandle.url;
+          if (!tunnelHandle) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[iicp-node] NAT tier=${natProfile.tier}: no relay-capable peers and no tunnel ` +
+              `available. Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
+            );
+          }
         } else {
           // eslint-disable-next-line no-console
           console.warn(
-            `[iicp-node] NAT tier=${natProfile.tier}: no relay-capable peers in directory. ` +
-            `Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
+            `[iicp-node] NAT tier=${natProfile.tier}: no relay-capable peers in directory ` +
+            `(tunnel escalation disabled). Set IICP_RELAY_WORKER_ENDPOINT to specify a relay.`,
           );
         }
       }
@@ -719,6 +763,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
       // eslint-disable-next-line no-console
       console.warn(`[iicp-node] NAT auto-detect failed: ${msg} — continuing with configured endpoint`);
     }
+  }
+
+  // #520 — `--tunnel` forces rung 5 regardless of NAT tier (e.g. an operator
+  // who KNOWS they're unreachable, or wants an https endpoint for browser
+  // consumers without touching the router).
+  if (tunnelPref === true && tunnelHandle === null) {
+    tunnelHandle = await openTunnelRung(opts.port, true);
+    if (tunnelHandle) publicEndpoint = tunnelHandle.url;
   }
 
   const backendFlavor = await detectBackendFlavor(opts.backendUrl, opts.backendApiKey, opts.backendType);
@@ -937,6 +989,30 @@ async function runServe(opts: ServeOpts): Promise<number> {
   writeNodeEvent(nodeId, "serve_start", `port=${opts.port} model=${opts.model} intent=${opts.intent}`, logDir);
   // serve() returns a stop() handle but never resolves on its own; we wait for
   // SIGINT/SIGTERM to terminate.
+  if (tunnelHandle) {
+    // The endpoint was already the tunnel URL at construction; mark the
+    // transport and arm the watchdog (URL rotates per process → re-register).
+    (node["_cfg"] as Record<string, unknown>).transportMethod = "external_tunnel";
+    tunnelHandle.watch(
+      (url) => {
+        (node["_cfg"] as Record<string, unknown>).endpoint = url;
+        void node.register().catch((exc) => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[iicp-node] tunnel re-register failed: ${exc instanceof Error ? exc.message : exc}`,
+          );
+        });
+      },
+      () => {
+        // eslint-disable-next-line no-console
+        console.error(
+          "[iicp-node] Quick Tunnel permanently down — this node is no longer " +
+            "publicly reachable. Restart `iicp-node serve` to recover.",
+        );
+      },
+    );
+  }
+
   const stop = node.serve(handler, { host: opts.host, port: opts.port, nodeToken: token });
   await new Promise<void>((resolve) => {
     const shutdown = async (sig: string) => {
@@ -959,6 +1035,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
         console.warn(`[iicp-node] deregister failed: ${deregMsg}`);
         writeNodeEvent(nodeId, "deregister_fail", `error=${deregMsg}`, logDir);
       }
+      tunnelHandle?.close(); // #520 — tear the Quick Tunnel down with the node
       stop();
       instanceLock.release(); // #405 — free the pidfile on shutdown
       resolve();
@@ -1983,6 +2060,8 @@ async function dispatch(argv: string[]): Promise<number> {
       port: { type: "string" },
       host: { type: "string" },
       "skip-registration": { type: "boolean" },
+      tunnel: { type: "boolean" },
+      "no-tunnel": { type: "boolean" },
       force: { type: "boolean" },
       "auto-detect-nat": { type: "boolean" },
       // Parity with Python's BooleanOptionalAction: an explicit off-switch for NAT
@@ -2048,6 +2127,14 @@ async function dispatch(argv: string[]): Promise<number> {
         ?? "https://api.ipify.org",
     relayWorkerEndpoint:
       (values["relay-worker-endpoint"] as string | undefined) ?? envOr("IICP_RELAY_WORKER_ENDPOINT") ?? "",
+    // #520 rung 5 tri-state: --tunnel > --no-tunnel > IICP_TUNNEL env > auto (undefined).
+    tunnel: values["tunnel"]
+      ? true
+      : values["no-tunnel"]
+        ? false
+        : process.env.IICP_TUNNEL !== undefined
+          ? envBool("IICP_TUNNEL")
+          : undefined,
     relayCapable:
       values["relay-capable"] !== undefined
         ? Boolean(values["relay-capable"])
