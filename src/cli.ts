@@ -559,6 +559,9 @@ async function runServe(opts: ServeOpts): Promise<number> {
     );
   }
 
+  // Phase 2 (#529/#55) — capture any cached node_token so the node can prove
+  // ownership on re-registration (IICP-E050 token path).
+  let savedNodeToken: string | undefined;
   if (opts.node) {
     const saved = loadNode(opts.node);
     if (!saved) {
@@ -567,6 +570,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
       );
       return 2;
     }
+    savedNodeToken = saved.node_token ?? undefined;
     opts = applySavedNode(opts, saved);
   }
 
@@ -818,6 +822,10 @@ async function runServe(opts: ServeOpts): Promise<number> {
     backendUrl: opts.backendUrl || undefined,
     backendApiKey: opts.backendApiKey || undefined,
   });
+
+  // Phase 2 (#529/#55) — seed the cached node_token so a re-registration (e.g.
+  // after a tunnel-URL rotation) proves ownership via current_node_token.
+  if (savedNodeToken) node.seedToken(savedNodeToken);
 
   // Apply collected NAT profile (covers both auto-detect and tier-0 IPv6 cases).
   if (natProfile) {
