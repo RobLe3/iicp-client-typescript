@@ -2028,6 +2028,26 @@ async function runMcpGateway(argv: string[]): Promise<number> {
 }
 
 /** Command dispatch — separated so main() can wrap parse failures as clean CliError output. */
+// #521 P1 — read-only version check. Exit 10 when a newer release exists
+// (so cron/scripts can act), 0 when current/unreachable. Never installs.
+async function runUpdate(): Promise<number> {
+  const { checkUpdate, latestNpmVersion } = await import("./updater.js");
+  const latest = await latestNpmVersion();
+  const v = checkUpdate(SDK_VERSION, latest);
+  if (latest === null) {
+    process.stdout.write(`@iicp/client ${v.current} — could not reach npm to check for updates.\n`);
+    return 0;
+  }
+  if (v.outdated) {
+    process.stdout.write(
+      `@iicp/client ${v.current} — a newer release is available: ${v.latest}\n  upgrade:  ${v.command}\n`,
+    );
+    return 10;
+  }
+  process.stdout.write(`@iicp/client ${v.current} — up to date (latest: ${v.latest}).\n`);
+  return 0;
+}
+
 async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
   if (cmd === "init") return runInit();
@@ -2037,6 +2057,7 @@ async function dispatch(argv: string[]): Promise<number> {
   if (cmd === "operator") return runOperator(argv.slice(1));
   if (cmd === "proxy") return runProxyCmd(argv.slice(1));
   if (cmd === "mcp-gateway") return runMcpGateway(argv.slice(1));
+  if (cmd === "update") return runUpdate();
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();
