@@ -1858,7 +1858,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
 // ── mcp-gateway (#512) ───────────────────────────────────────────────────────
 
-const _MCP_DANGEROUS = new Set(["bash", "shell", "exec", "run_command", "eval"]);
+// Backstop denylist on top of the operator's explicit --tools allowlist
+// (red-team pass 3): shells/interpreters/exec primitives never to expose, even
+// by accident. The required --tools allowlist + allow_tool_execution opt-in are
+// the primary controls; this is a best-effort safety net.
+const _MCP_DANGEROUS = new Set([
+  "bash", "sh", "zsh", "fish", "shell", "powershell", "pwsh", "cmd",
+  "exec", "execute", "run_command", "run", "system", "eval",
+  "python", "python3", "node", "ruby", "perl", "subprocess", "popen", "spawn",
+]);
 
 function _toolToIntent(name: string): string {
   const safe = name.toLowerCase().replace(/[^a-z0-9_]/g, "_");
