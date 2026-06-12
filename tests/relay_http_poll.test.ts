@@ -251,3 +251,52 @@ describe("relay HTTP-poll endpoints", () => {
     assert.ok((resp.headers.get("access-control-allow-headers") ?? "").includes("Authorization"));
   });
 });
+
+// ── Node-wide CORS (browser consumers, 2026-06-12) ───────────────────────────
+// Web pages dispatch /v1/task to https nodes directly — every endpoint must
+// answer preflights and carry CORS (fails if node-wide CORS is reverted).
+describe("node-wide CORS", () => {
+  let port: number;
+  let stop: () => void;
+  let base: string;
+
+  before(async () => {
+    port = await freePort();
+    const node = new IicpNode({
+      nodeId: "cors-node",
+      endpoint: "http://cors.local",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "m",
+      directoryUrl: "https://iicp.test",
+    });
+    stop = node.serve(async () => ({ result: { echo: true } }), { host: "127.0.0.1", port });
+    base = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 40; i++) {
+      try { await fetch(`${base}/iicp/health`); break; }
+      catch { await new Promise((r) => setTimeout(r, 50)); }
+    }
+  });
+
+  after(() => stop());
+
+  it("OPTIONS /v1/task preflight → 204 + CORS", async () => {
+    const r = await fetch(`${base}/v1/task`, { method: "OPTIONS" });
+    assert.equal(r.status, 204);
+    assert.equal(r.headers.get("access-control-allow-origin"), "*");
+  });
+
+  it("/iicp/health carries CORS", async () => {
+    const r = await fetch(`${base}/iicp/health`);
+    assert.equal(r.status, 200);
+    assert.equal(r.headers.get("access-control-allow-origin"), "*");
+  });
+
+  it("/v1/task response carries CORS", async () => {
+    const r = await fetch(`${base}/v1/task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: "t-cors", intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } }),
+    });
+    assert.equal(r.headers.get("access-control-allow-origin"), "*");
+  });
+});
