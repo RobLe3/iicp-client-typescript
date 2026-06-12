@@ -216,8 +216,23 @@ export type RelaySession = RelayWorkerSession | HttpPollWorkerSession;
 
 // ── RelaySessionRegistry ─────────────────────────────────────────────────────
 
+// Red-team F5 (2026-06-12): cap concurrent relay sessions so a bind-flood
+// can't exhaust relay memory / starve legitimate workers.
+export const MAX_RELAY_SESSIONS = 256;
+
 export class RelaySessionRegistry {
   private readonly _sessions = new Map<string, RelaySession>();
+  constructor(private readonly _max: number = MAX_RELAY_SESSIONS) {}
+
+  /** True if a NEW worker_id can't be admitted (cap reached). A rebind of an
+   * already-bound worker_id is always allowed (F5). */
+  atCapacity(workerId: string): boolean {
+    return !this._sessions.has(workerId) && this._sessions.size >= this._max;
+  }
+
+  count(): number {
+    return this._sessions.size;
+  }
 
   bind(workerId: string, session: RelaySession): void {
     this._sessions.set(workerId, session);
@@ -367,6 +382,16 @@ export class RelayAcceptServer {
         [1, "error"],
         [2, workerId],
         [3, "worker_id already bound to an alive session"],
+      ])) as Buffer));
+      socket.destroy();
+      return;
+    }
+
+    // Red-team F5: cap concurrent sessions (bind-flood DoS). Rebind exempt.
+    if (this._registry.atCapacity(workerId)) {
+      console.warn(`[relay-accept] at session capacity — rejecting bind for ${workerId}`);
+      socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
+        [1, "error"], [2, workerId], [3, "relay at session capacity"],
       ])) as Buffer));
       socket.destroy();
       return;

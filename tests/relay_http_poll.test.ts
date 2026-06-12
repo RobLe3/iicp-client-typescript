@@ -300,3 +300,16 @@ describe("node-wide CORS", () => {
     assert.equal(r.headers.get("access-control-allow-origin"), "*");
   });
 });
+
+// ── Red-team F5: session-cap DoS protection (2026-06-12) ─────────────────────
+describe("session cap (F5)", () => {
+  it("atCapacity excludes rebind of an existing worker", async () => {
+    const { RelaySessionRegistry, HttpPollWorkerSession } = await import("../src/relay_session.js");
+    const reg = new RelaySessionRegistry(2);
+    reg.bind("a", new HttpPollWorkerSession("a"));
+    reg.bind("b", new HttpPollWorkerSession("b"));
+    assert.equal(reg.count(), 2);
+    assert.equal(reg.atCapacity("c"), true);  // new → capped
+    assert.equal(reg.atCapacity("a"), false); // rebind → exempt
+  });
+});
