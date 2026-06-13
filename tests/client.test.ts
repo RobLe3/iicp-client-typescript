@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { IicpClient } from "../src/client.js";
 import { IicpError } from "../src/errors.js";
 import { IicpNode } from "../src/node.js";
+import { generateKeyPairSync } from "node:crypto";
 
 // Helper: mock globalThis.fetch for a test
 function mockFetch(handler: (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>) {
@@ -630,5 +631,51 @@ describe("ε-greedy provider selection (#486)", () => {
     assert.equal(client["cfg"].routing_epsilon, 0.0, "env var should set epsilon to 0.0");
     if (orig === undefined) delete process.env["IICP_ROUTING_EPSILON"];
     else process.env["IICP_ROUTING_EPSILON"] = orig;
+  });
+});
+
+// P0a (#360): mandatory encryption — no opt-out (parity with Python behaviour guards)
+describe("P0a mandatory encryption (#360)", () => {
+  function cxKey() {
+    const { publicKey } = generateKeyPairSync("x25519");
+    const x = (publicKey.export({ format: "jwk" }) as { x: string }).x;
+    return { algorithm: "X25519", key: x, key_id: "cx-1" };
+  }
+  const OK_TASK = {
+    task_id: "t", status: "success",
+    result: { choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { total_tokens: 1 }, model: "m" },
+    usage: { total_tokens: 1 },
+  };
+
+  it("encrypts even with use_confidentiality off (no opt-out)", async () => {
+    let body: Record<string, unknown> | null = null;
+    const restore = mockFetch((url, init) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover"))
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", cx_public_key: cxKey() }] });
+      if (u.includes("/v1/task")) { body = JSON.parse(String(init?.body ?? "{}")); return jsonResponse(OK_TASK); }
+      return new Response("404", { status: 404 });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test", use_confidentiality: false });
+    await client.chat([{ role: "user", content: "secret" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
+    restore();
+    assert.ok(body && (body as Record<string, unknown>)["iicp_conf"], "must encrypt when node advertises a key");
+    assert.equal((body as Record<string, unknown>)["payload"], undefined, "plaintext payload must be absent");
+  });
+
+  it("no key → transitional plaintext", async () => {
+    let body: Record<string, unknown> | null = null;
+    const restore = mockFetch((url, init) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover"))
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu" }] });
+      if (u.includes("/v1/task")) { body = JSON.parse(String(init?.body ?? "{}")); return jsonResponse(OK_TASK); }
+      return new Response("404", { status: 404 });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await client.chat([{ role: "user", content: "hi" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
+    restore();
+    assert.ok(body && (body as Record<string, unknown>)["payload"], "plaintext payload present");
+    assert.equal((body as Record<string, unknown>)["iicp_conf"], undefined);
   });
 });
