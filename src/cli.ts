@@ -1982,6 +1982,29 @@ async function runMcpGateway(argv: string[]): Promise<number> {
 
   const hbInterval = setInterval(() => { void doHeartbeat(); }, 30_000);
 
+  // #521 P2 — background self-updater. Default-on; IICP_AUTO_UPDATE=0 opts out. Once a
+  // node reaches the first release carrying this updater, every future release
+  // self-propagates (no manual upgrade by the operator). Loop-safe + failure-isolated.
+  void (async () => {
+    const u = await import("./updater.js");
+    if (!u.autoUpdateEnabled()) return;
+    const t = setInterval(() => {
+      void (async () => {
+        try {
+          await u.autoUpdateTick(
+            SDK_VERSION,
+            await u.latestNpmVersion(),
+            true,
+            () => u.performSelfUpdate(),
+            () => u.reexecCli(),
+            (m: string) => console.log(`  [iicp-node] ${m}`),
+          );
+        } catch { /* the updater must never take the node down */ }
+      })();
+    }, u.autoUpdateIntervalMs());
+    t.unref(); // daemon timer — must not keep the process alive on its own
+  })();
+
   const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/iicp/health") {
       const body = JSON.stringify({ status: "ok", node_id: nodeId, active_tools: activeTools, mcp_server: mcpUrl, timestamp: Math.floor(Date.now() / 1000) });

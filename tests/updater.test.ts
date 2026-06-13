@@ -30,3 +30,35 @@ describe("checkUpdate", () => {
     assert.equal(checkUpdate("0.7.57", null).outdated, false);
   });
 });
+
+// ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
+import { autoUpdateTick } from "../src/updater.js";
+
+describe("autoUpdateTick (#521 P2)", () => {
+  it("upgrades and re-execs when a newer release exists", async () => {
+    let reexeced = 0;
+    const r = await autoUpdateTick("0.7.59", "0.7.60", true,
+      async () => true, () => { reexeced += 1; }, () => {});
+    assert.equal(r, "upgraded");
+    assert.equal(reexeced, 1);
+  });
+  it("is a no-op when already current", async () => {
+    const r = await autoUpdateTick("0.7.60", "0.7.60", true,
+      async () => { throw new Error("must not upgrade"); },
+      () => { throw new Error("must not reexec"); }, () => {});
+    assert.equal(r, "current");
+  });
+  it("respects the opt-out", async () => {
+    assert.equal(await autoUpdateTick("0.7.59", "0.7.60", false, async () => true, () => {}, () => {}), "disabled");
+  });
+  it("treats unknown latest as a no-op", async () => {
+    assert.equal(await autoUpdateTick("0.7.59", null, true, async () => true, () => {}, () => {}), "unknown");
+  });
+  it("does not re-exec when the upgrade fails", async () => {
+    let reexeced = 0;
+    const r = await autoUpdateTick("0.7.59", "0.7.60", true,
+      async () => false, () => { reexeced += 1; }, () => {});
+    assert.equal(r, "upgrade-failed");
+    assert.equal(reexeced, 0);
+  });
+});
