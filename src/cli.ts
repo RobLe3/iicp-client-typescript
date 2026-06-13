@@ -2016,7 +2016,7 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   void (async () => {
     const u = await import("./updater.js");
     if (!u.autoUpdateEnabled()) return;
-    const t = setInterval(() => {
+    const tick = () => {
       void (async () => {
         try {
           await u.autoUpdateTick(
@@ -2029,7 +2029,12 @@ async function runMcpGateway(argv: string[]): Promise<number> {
           );
         } catch { /* the updater must never take the node down */ }
       })();
-    }, u.autoUpdateIntervalMs());
+    };
+    // First check soon after startup (≤5 min) so a freshly-published release propagates fast +
+    // observably, instead of waiting a full interval (default 6h); then the regular cadence.
+    const t0 = setTimeout(tick, Math.min(u.autoUpdateIntervalMs(), 5 * 60_000));
+    t0.unref();
+    const t = setInterval(tick, u.autoUpdateIntervalMs());
     t.unref(); // daemon timer — must not keep the process alive on its own
   })();
 
