@@ -217,16 +217,22 @@ export class IicpClient {
         nodeHeaders["X-IICP-Consumer-Token"] = ct;
       }
 
-      // IICP-CX S.16 §5: build body per node (cx_public_key may differ)
-      const shouldEncrypt = this.cfg.use_confidentiality === true && node.cx_public_key != null;
+      // IICP-CX S.16: encryption is MANDATORY (privacy-first #360) — no opt-out.
+      // Always encrypt when the node advertises a cx_public_key. During the migration
+      // window (#532) a node with no key yet gets a loud warning + plaintext; fail-closed
+      // at P0b once the mesh is key-ready. use_confidentiality no longer gates this.
       const body: Record<string, unknown> = {
         task_id: taskId,
         intent: req.intent,
         constraints: req.constraints ?? {},
       };
-      if (shouldEncrypt && node.cx_public_key) {
+      if (node.cx_public_key) {
         body["iicp_conf"] = encryptPayload(req.payload, node.cx_public_key, taskId, req.intent);
       } else {
+        console.warn(
+          `IICP-CX: node ${node.node_id} advertises no encryption key — sending UNENCRYPTED. ` +
+            "This is transitional; it will be refused once the mesh is key-ready.",
+        );
         body["payload"] = req.payload;
       }
       // #488 — forward requester identity for self-query neutrality at the directory.
