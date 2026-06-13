@@ -134,3 +134,35 @@ export function decryptPayload(
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   return JSON.parse(plaintext.toString());
 }
+
+// ── Tier-2 §5a.3: bidirectional (response) encryption ────────────────────────
+// Byte-compatible with the adapter/Python response primitives: response sealed under
+// the request's session shared secret with a distinct HKDF label so request/response
+// keys differ. Pure primitives (take the shared secret); wiring is a later step.
+const RESP_INFO_PREFIX = "IICP-CX-RESP-v1";
+
+/** Seal a node's RESPONSE under the request's session shared secret (IICP-CX §5a.3). */
+export function encryptResponse(response: unknown, sharedSecret: Buffer, taskId: string): Record<string, unknown> {
+  const nonce = randomBytes(12);
+  const key = hkdfSha256(sharedSecret, nonce, Buffer.from(`${RESP_INFO_PREFIX}${taskId}`), 32);
+  const aad = Buffer.from(`${taskId}|resp`);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(aad);
+  const ct = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(response))), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return { version: 1, nonce: b64urlEncode(nonce), encrypted_body: b64urlEncode(Buffer.concat([ct, tag])) };
+}
+
+/** Open a node's encrypted RESPONSE (CX-Consumer side, IICP-CX §5a.3). */
+export function decryptResponse(env: Record<string, unknown>, sharedSecret: Buffer, taskId: string): unknown {
+  const nonce = b64urlDecode(String(env["nonce"]));
+  const key = hkdfSha256(sharedSecret, nonce, Buffer.from(`${RESP_INFO_PREFIX}${taskId}`), 32);
+  const aad = Buffer.from(`${taskId}|resp`);
+  const encBody = b64urlDecode(String(env["encrypted_body"]));
+  const ct = encBody.slice(0, -16);
+  const tag = encBody.slice(-16);
+  const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+  decipher.setAAD(aad);
+  decipher.setAuthTag(tag);
+  return JSON.parse(Buffer.concat([decipher.update(ct), decipher.final()]).toString());
+}

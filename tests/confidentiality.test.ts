@@ -63,3 +63,15 @@ describe("IICP-CX confidentiality", () => {
     assert.throws(() => encryptPayload({}, badKey, "t1", "urn:iicp:intent:llm:chat:v1"), /Unsupported/);
   });
 });
+
+describe("IICP-CX Tier-2 §5a.3 response encryption", () => {
+  it("response round-trips under a shared secret", () => {
+    const { randomBytes } = require("node:crypto");
+    const { encryptResponse, decryptResponse } = require("../src/confidentiality.js");
+    const shared = randomBytes(32);
+    const resp = { choices: [{ message: { role: "assistant", content: "answer" } }] };
+    const env = encryptResponse(resp, shared, "task-resp-1");
+    assert.deepEqual(Object.keys(env).sort(), ["encrypted_body", "nonce", "version"]);
+    assert.deepEqual(decryptResponse(env, shared, "task-resp-1"), resp);
+  });
+});
