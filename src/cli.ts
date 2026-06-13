@@ -430,6 +430,23 @@ function runList(): number {
 
 // ── serve helpers ───────────────────────────────────────────────────────────
 
+/**
+ * Pure reachability escalation planner (tunnel-FIRST, relay = last resort; maintainer
+ * 2026-06-13). Returns the ordered attempt sequence for a tier-≥3 node with no explicitly
+ * configured relay; empty for tier<3 or an operator-configured relay. A self-hosted Quick
+ * Tunnel is more autonomous than a third-party relay (no relay metadata/#510, one less hop);
+ * --no-tunnel / IICP_TUNNEL=0 (tunnelEnabled=false) restores relay-first. Parity with the
+ * Python/Rust planners; unit-tested so the reorder can't silently break.
+ */
+export function planReachability(
+  tier: number,
+  relayConfigured: boolean,
+  tunnelEnabled: boolean,
+): Array<"tunnel" | "relay" | "gossip"> {
+  if (tier < 3 || relayConfigured) return [];
+  return [...(tunnelEnabled ? (["tunnel"] as const) : []), "relay", "gossip"];
+}
+
 /** Query directory for relay-capable peers and elect one deterministically.
  *  Used when NAT detection returns tier≥3 (CGNAT + no usable IPv6).
  *  Returns [relayHost, relayPort] or null if no relay-capable peer is found.
@@ -732,18 +749,19 @@ async function runServe(opts: ServeOpts): Promise<number> {
       // A Quick Tunnel gives the node its OWN public endpoint — more autonomous than a
       // third-party relay (no relay metadata/#510, one less hop); rotation mitigated by #538.
       // --no-tunnel / IICP_TUNNEL=0 opts out → relay becomes first again.
-      if (natProfile.tier >= 3 && !opts.relayWorkerEndpoint) {
-        // (1) Quick Tunnel (rung 5) — the autonomous public endpoint.
-        if (tunnelPref !== false) {
+      // Escalation order from the pure, unit-tested planner (tested order == used order).
+      for (const step of planReachability(natProfile.tier, !!opts.relayWorkerEndpoint, tunnelPref !== false)) {
+        if (step === "tunnel") {
           // eslint-disable-next-line no-console
           console.log(
             `[iicp-node] NAT tier=${natProfile.tier}: opening Quick Tunnel (rung 5) for an autonomous public endpoint…`,
           );
           tunnelHandle = await openTunnelRung(opts.port, false);
-          if (tunnelHandle) publicEndpoint = tunnelHandle.url;
-        }
-        // (2) Relay = last resort — only if no tunnel (disabled or unavailable).
-        if (!tunnelHandle) {
+          if (tunnelHandle) {
+            publicEndpoint = tunnelHandle.url;
+            break;
+          }
+        } else if (step === "relay") {
           // eslint-disable-next-line no-console
           console.log(
             `[iicp-node] NAT tier=${natProfile.tier}: no tunnel — auto-electing a relay from directory (last resort)…`,
@@ -758,13 +776,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
             opts = { ...opts, relayWorkerEndpoint: `${relayHost}:${relayPort}` };
             // eslint-disable-next-line no-console
             console.log(`[iicp-node] auto-elected relay (last resort): ${relayHost}:${relayPort}`);
-          } else {
-            // eslint-disable-next-line no-console
-            console.warn(
-              `[iicp-node] NAT tier=${natProfile.tier}: no tunnel and no relay-capable peers. ` +
-              `Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
-            );
+            break;
           }
+        } else if (step === "gossip") {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[iicp-node] NAT tier=${natProfile.tier}: no tunnel and no relay-capable peers. ` +
+            `Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
+          );
         }
       }
     } catch (exc) {
