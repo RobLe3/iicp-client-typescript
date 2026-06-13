@@ -727,39 +727,44 @@ async function runServe(opts: ServeOpts): Promise<number> {
       );
       if (natProfile.publicEndpoint) publicEndpoint = natProfile.publicEndpoint as string;
 
-      // Tier ≥ 3 (CGNAT + no usable IPv6 path) and no relay configured:
-      // auto-elect a relay from the directory so we can register via relay.
+      // Tier ≥ 3 (CGNAT + no usable IPv6 path), no relay configured → TUNNEL-FIRST,
+      // relay = last resort (maintainer 2026-06-13 choreography: tunnel → relay → gossip).
+      // A Quick Tunnel gives the node its OWN public endpoint — more autonomous than a
+      // third-party relay (no relay metadata/#510, one less hop); rotation mitigated by #538.
+      // --no-tunnel / IICP_TUNNEL=0 opts out → relay becomes first again.
       if (natProfile.tier >= 3 && !opts.relayWorkerEndpoint) {
-        // eslint-disable-next-line no-console
-        console.log(`[iicp-node] NAT tier=${natProfile.tier}: auto-electing relay from directory…`);
-        const elected = await _autoElectRelay(
-          opts.directoryUrl ?? "https://iicp.network/api",
-          opts.intent,
-          nodeId,
-        );
-        if (elected) {
-          const [relayHost, relayPort] = elected;
-          opts = { ...opts, relayWorkerEndpoint: `${relayHost}:${relayPort}` };
+        // (1) Quick Tunnel (rung 5) — the autonomous public endpoint.
+        if (tunnelPref !== false) {
           // eslint-disable-next-line no-console
-          console.log(`[iicp-node] auto-elected relay: ${relayHost}:${relayPort}`);
-        } else if (tunnelPref !== false) {
-          // #520 rung 5: no relay anywhere → Quick Tunnel (zero-account),
-          // unless disabled via --no-tunnel / IICP_TUNNEL=0.
+          console.log(
+            `[iicp-node] NAT tier=${natProfile.tier}: opening Quick Tunnel (rung 5) for an autonomous public endpoint…`,
+          );
           tunnelHandle = await openTunnelRung(opts.port, false);
           if (tunnelHandle) publicEndpoint = tunnelHandle.url;
-          if (!tunnelHandle) {
+        }
+        // (2) Relay = last resort — only if no tunnel (disabled or unavailable).
+        if (!tunnelHandle) {
+          // eslint-disable-next-line no-console
+          console.log(
+            `[iicp-node] NAT tier=${natProfile.tier}: no tunnel — auto-electing a relay from directory (last resort)…`,
+          );
+          const elected = await _autoElectRelay(
+            opts.directoryUrl ?? "https://iicp.network/api",
+            opts.intent,
+            nodeId,
+          );
+          if (elected) {
+            const [relayHost, relayPort] = elected;
+            opts = { ...opts, relayWorkerEndpoint: `${relayHost}:${relayPort}` };
+            // eslint-disable-next-line no-console
+            console.log(`[iicp-node] auto-elected relay (last resort): ${relayHost}:${relayPort}`);
+          } else {
             // eslint-disable-next-line no-console
             console.warn(
-              `[iicp-node] NAT tier=${natProfile.tier}: no relay-capable peers and no tunnel ` +
-              `available. Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
+              `[iicp-node] NAT tier=${natProfile.tier}: no tunnel and no relay-capable peers. ` +
+              `Set IICP_RELAY_WORKER_ENDPOINT=<host>:<port> to specify a relay manually.`,
             );
           }
-        } else {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[iicp-node] NAT tier=${natProfile.tier}: no relay-capable peers in directory ` +
-            `(tunnel escalation disabled). Set IICP_RELAY_WORKER_ENDPOINT to specify a relay.`,
-          );
         }
       }
     } catch (exc) {
