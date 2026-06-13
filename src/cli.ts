@@ -141,6 +141,10 @@ function printHelp(): void {
       `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup (default on)\n` +
       `  --no-auto-detect-nat       disable NAT detection at startup\n` +
       `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n` +
+      `  --tunnel / --no-tunnel     IICP_TUNNEL — #520 rung 5: zero-account Cloudflare Quick Tunnel for the\n` +
+      `                             node's own public endpoint (needs cloudflared on PATH). Default auto: on\n` +
+      `                             tier ≥ 3 the node tries a tunnel FIRST, relay only if it fails. --tunnel\n` +
+      `                             forces it on; --no-tunnel disables it (relay-first).\n` +
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
       `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
       `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485).\n` +
