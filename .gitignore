@@ -5,3 +5,4 @@ dist/
 
 # local publish token — never commit
 .npmrc.publish
+.codegraph/

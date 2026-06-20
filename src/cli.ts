@@ -2032,10 +2032,17 @@ async function runMcpGateway(argv: string[]): Promise<number> {
     };
     // First check soon after startup (≤5 min) so a freshly-published release propagates fast +
     // observably, instead of waiting a full interval (default 6h); then the regular cadence.
-    const t0 = setTimeout(tick, Math.min(u.autoUpdateIntervalMs(), 5 * 60_000));
-    t0.unref();
-    const t = setInterval(tick, u.autoUpdateIntervalMs());
-    t.unref(); // daemon timer — must not keep the process alive on its own
+    const intervalMs = u.autoUpdateIntervalMs();
+    const firstDelayMs = u.autoUpdateInitialDelayMs(intervalMs);
+    const t0 = setTimeout(() => {
+      tick();
+      // Start the regular cadence only after the first check. Starting an
+      // interval at process launch makes the minimum 5-minute configuration
+      // fire both timeout and interval simultaneously.
+      const t = setInterval(tick, intervalMs);
+      t.unref();
+    }, firstDelayMs);
+    t0.unref(); // daemon timer — must not keep the process alive on its own
   })();
 
   const server = http.createServer(async (req, res) => {

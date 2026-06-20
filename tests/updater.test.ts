@@ -32,7 +32,7 @@ describe("checkUpdate", () => {
 });
 
 // ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
-import { autoUpdateTick } from "../src/updater.js";
+import { autoUpdateInitialDelayMs, autoUpdateTick } from "../src/updater.js";
 
 describe("autoUpdateTick (#521 P2)", () => {
   it("upgrades and re-execs when a newer release exists", async () => {
@@ -60,5 +60,13 @@ describe("autoUpdateTick (#521 P2)", () => {
       async () => false, () => { reexeced += 1; }, () => {});
     assert.equal(r, "upgrade-failed");
     assert.equal(reexeced, 0);
+  });
+});
+
+describe("autoUpdateInitialDelayMs", () => {
+  it("checks within five minutes without changing the regular cadence", () => {
+    assert.equal(autoUpdateInitialDelayMs(300_000), 300_000);
+    assert.equal(autoUpdateInitialDelayMs(900_000), 300_000);
+    assert.equal(autoUpdateInitialDelayMs(21_600_000), 300_000);
   });
 });

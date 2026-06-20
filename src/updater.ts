@@ -132,6 +132,11 @@ export function autoUpdateIntervalMs(defaultS = 21600): number {
   return (Number.isFinite(n) ? Math.max(300, n) : defaultS) * 1000;
 }
 
+/** Delay before the first background check; never later than five minutes. */
+export function autoUpdateInitialDelayMs(intervalMs: number): number {
+  return Math.min(intervalMs, 5 * 60_000);
+}
+
 /** One evaluation of the auto-update rule. Pure orchestration — all I/O injected so
  * the decision is unit-testable. Returns the action taken. */
 export async function autoUpdateTick(
