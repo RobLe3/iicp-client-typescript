@@ -8,8 +8,12 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import * as http from "node:http";
 import * as net from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { IicpNode } from "../src/node.js";
 import type { NodeConfig } from "../src/node.js";
+import { encryptPayload, loadOrCreateNodeCxKey } from "../src/confidentiality.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -164,6 +168,41 @@ describe("IicpNode server", () => {
     const b = body as Record<string, unknown>;
     assert.equal(b.status, "completed");
     assert.equal(b.task_id, "t-001");
+  });
+
+  it("decrypts iicp_conf before invoking the task handler", async () => {
+    const oldCxDir = process.env.IICP_CX_KEY_DIR;
+    const cxDir = mkdtempSync(join(tmpdir(), "iicp-cx-"));
+    process.env.IICP_CX_KEY_DIR = cxDir;
+    const cxPort = await freePort();
+    const nodeId = "cx-server";
+    const endpoint = "http://cx.local";
+    const cx = loadOrCreateNodeCxKey(nodeId, endpoint);
+    let captured: Record<string, unknown> = {};
+    const cxNode = new IicpNode({ ...cfg, nodeId, endpoint });
+    const cxCleanup = cxNode.serve(async (task) => {
+      captured = task;
+      return { result: { payload: task.payload } };
+    }, { host: "127.0.0.1", port: cxPort });
+    try {
+      await waitPort(cxPort);
+      const payload = { messages: [{ role: "user", content: "secret" }] };
+      const env = encryptPayload(payload, cx.publicKey, "cx-ts-1", cfg.intent);
+      const { status, body } = await jsonReq("POST", cxPort, "/v1/task", {
+        task_id: "cx-ts-1",
+        intent: cfg.intent,
+        iicp_conf: env,
+      });
+      assert.equal(status, 200);
+      assert.equal((body as Record<string, unknown>).status, "completed");
+      assert.deepEqual(captured.payload, payload);
+      assert.equal(captured._cx_encrypted, true);
+    } finally {
+      cxCleanup();
+      if (oldCxDir === undefined) delete process.env.IICP_CX_KEY_DIR;
+      else process.env.IICP_CX_KEY_DIR = oldCxDir;
+      rmSync(cxDir, { recursive: true, force: true });
+    }
   });
 
   // ── Concurrency gate (IICP-E021) ────────────────────────────────────────────

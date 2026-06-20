@@ -12,8 +12,12 @@ import {
   generateKeyPairSync,
   createPublicKey,
   createPrivateKey,
+  createHash,
   randomBytes,
 } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { CxPublicKey } from "./types.js";
 
 function b64urlEncode(buf: Buffer): string {
@@ -22,6 +26,57 @@ function b64urlEncode(buf: Buffer): string {
 
 function b64urlDecode(s: string): Buffer {
   return Buffer.from(s, "base64url");
+}
+
+function cxKeyDir(): string {
+  if (process.env.IICP_CX_KEY_DIR) return path.resolve(process.env.IICP_CX_KEY_DIR);
+  return path.join(process.env.IICP_HOME ?? path.join(os.homedir(), ".iicp"), "cx");
+}
+
+function cxKeyPath(nodeId: string, endpoint = ""): string {
+  const stable = nodeId || endpoint || "default";
+  const digest = createHash("sha256").update(stable, "utf8").digest("hex").slice(0, 24);
+  return path.join(cxKeyDir(), `${digest}.json`);
+}
+
+function publicKeyFromRaw(publicKeyBytes: Buffer): CxPublicKey {
+  return {
+    algorithm: "X25519",
+    encoding: "base64url",
+    key: b64urlEncode(publicKeyBytes),
+    key_id: `cx-${createHash("sha256").update(publicKeyBytes).digest("hex").slice(0, 16)}`,
+  };
+}
+
+export function loadOrCreateNodeCxKey(nodeId: string, endpoint = ""): {
+  publicKey: CxPublicKey;
+  privateKeyBytes: Buffer;
+  publicKeyBytes: Buffer;
+} {
+  const file = cxKeyPath(nodeId, endpoint);
+  if (fs.existsSync(file)) {
+    const data = JSON.parse(fs.readFileSync(file, "utf8")) as { private_key: string; public_key: CxPublicKey };
+    const privateKeyBytes = b64urlDecode(data.private_key);
+    const publicKeyBytes = b64urlDecode(data.public_key.key);
+    return { publicKey: publicKeyFromRaw(publicKeyBytes), publicKeyBytes, privateKeyBytes };
+  }
+
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const { privateKey } = generateKeyPairSync("x25519");
+  const jwk = privateKey.export({ format: "jwk" }) as { d: string; x: string };
+  const privateKeyBytes = b64urlDecode(jwk.d);
+  const publicKeyBytes = b64urlDecode(jwk.x);
+  const publicKey = publicKeyFromRaw(publicKeyBytes);
+  fs.writeFileSync(
+    file,
+    JSON.stringify(
+      { version: 1, algorithm: "X25519", private_key: b64urlEncode(privateKeyBytes), public_key: publicKey },
+      null,
+      2,
+    ),
+    { mode: 0o600 },
+  );
+  return { publicKey, publicKeyBytes, privateKeyBytes };
 }
 
 /** HKDF-SHA256 with HMAC-based extract+expand (RFC 5869). */

@@ -64,6 +64,7 @@ export interface DiscoverOptions {
 
 export interface CxPublicKey {
   algorithm: string;
+  encoding?: string;
   key: string;
   key_id: string;
 }

@@ -9,7 +9,9 @@ import { IicpClient } from "../src/client.js";
 import { IicpError } from "../src/errors.js";
 import { IicpNode } from "../src/node.js";
 import { generateKeyPairSync } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
@@ -252,23 +254,32 @@ describe("SDK-06 traceparent", () => {
 
   it("iter-1412: node.register sends spec-compliant payload (capabilities array of objects)", async () => {
     let captured: Record<string, unknown> | null = null;
+    const oldCxDir = process.env.IICP_CX_KEY_DIR;
+    const cxDir = mkdtempSync(join(tmpdir(), "iicp-cx-"));
+    process.env.IICP_CX_KEY_DIR = cxDir;
     const restore = mockFetch((_url, init) => {
       captured = JSON.parse(init?.body as string);
       return jsonResponse({ node_token: "tok-1", node_id: "n-1" }, 201);
     });
-    const node = new IicpNode({
-      nodeId: "n-1",
-      endpoint: "https://provider.example.com:8080",
-      intent: "urn:iicp:intent:llm:chat:v1",
-      model: "llama-3-8b",
-      region: "eu-central",
-      directoryUrl: "https://iicp.test",
-      maxConcurrent: 2,
-      tokensPerMin: 2000,
-      maxTokens: 8192,
-    });
-    await node.register();
-    restore();
+    try {
+      const node = new IicpNode({
+        nodeId: "n-1",
+        endpoint: "https://provider.example.com:8080",
+        intent: "urn:iicp:intent:llm:chat:v1",
+        model: "llama-3-8b",
+        region: "eu-central",
+        directoryUrl: "https://iicp.test",
+        maxConcurrent: 2,
+        tokensPerMin: 2000,
+        maxTokens: 8192,
+      });
+      await node.register();
+    } finally {
+      restore();
+      if (oldCxDir === undefined) delete process.env.IICP_CX_KEY_DIR;
+      else process.env.IICP_CX_KEY_DIR = oldCxDir;
+      rmSync(cxDir, { recursive: true, force: true });
+    }
     assert.ok(captured, "no register payload captured");
     const body = captured as Record<string, unknown>;
     assert.equal(body.endpoint, "https://provider.example.com:8080");
@@ -283,6 +294,9 @@ describe("SDK-06 traceparent", () => {
     }]);
     assert.equal(body.transport_endpoint, undefined, "transport_endpoint should be absent when not configured");
     assert.equal(body.sdk_version, PACKAGE_VERSION, "register sdk_version must match package.json");
+    assert.equal((body.cx_public_key as Record<string, unknown>).algorithm, "X25519");
+    assert.equal((body.cx_public_key as Record<string, unknown>).encoding, "base64url");
+    assert.match(String((body.cx_public_key as Record<string, unknown>).key_id), /^cx-/);
     assert.equal(body.intent, undefined, "flat intent must NOT appear at top level (spec violation)");
   });
 
