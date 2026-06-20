@@ -9,6 +9,9 @@ import { IicpClient } from "../src/client.js";
 import { IicpError } from "../src/errors.js";
 import { IicpNode } from "../src/node.js";
 import { generateKeyPairSync } from "node:crypto";
+import { readFileSync } from "node:fs";
+
+const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 // Helper: mock globalThis.fetch for a test
 function mockFetch(handler: (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>) {
@@ -279,6 +282,7 @@ describe("SDK-06 traceparent", () => {
       input_modalities: ["text"],
     }]);
     assert.equal(body.transport_endpoint, undefined, "transport_endpoint should be absent when not configured");
+    assert.equal(body.sdk_version, PACKAGE_VERSION, "register sdk_version must match package.json");
     assert.equal(body.intent, undefined, "flat intent must NOT appear at top level (spec violation)");
   });
 
