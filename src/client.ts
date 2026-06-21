@@ -67,12 +67,17 @@ function _isSsrfSafe(url: string): boolean {
 }
 
 const DEFAULT_EPSILON = 0.05;
+const DEFAULT_ROUTING_TOP_K = 3;
+const DEFAULT_ROUTING_SOFTMAX_TAU = 0.04;
 
 const DEFAULT_CONFIG: ClientConfig = {
   directory_url: "https://iicp.network/api",
   timeout_ms: DEFAULT_TIMEOUT_MS,
   tls_verify: true,
   routing_epsilon: DEFAULT_EPSILON,
+  routing_strategy: "epsilon",
+  routing_top_k: DEFAULT_ROUTING_TOP_K,
+  routing_softmax_tau: DEFAULT_ROUTING_SOFTMAX_TAU,
 };
 
 const CONSUMER_TOKEN_EXPIRY_BUFFER_S = 30;
@@ -106,8 +111,52 @@ export class IicpClient {
         merged.routing_epsilon = Math.max(0, Math.min(1, parsed));
       }
     }
+    const envStrategy = process.env["IICP_ROUTING_STRATEGY"];
+    if (envStrategy === "deterministic" || envStrategy === "epsilon" || envStrategy === "softmax_top_k") {
+      merged.routing_strategy = envStrategy;
+    }
+    const envTopK = process.env["IICP_ROUTING_TOP_K"];
+    if (envTopK !== undefined) {
+      const parsed = parseInt(envTopK, 10);
+      if (!isNaN(parsed)) merged.routing_top_k = Math.max(1, parsed);
+    }
+    const envTau = process.env["IICP_ROUTING_SOFTMAX_TAU"];
+    if (envTau !== undefined) {
+      const parsed = parseFloat(envTau);
+      if (!isNaN(parsed)) merged.routing_softmax_tau = Math.max(0.001, parsed);
+    }
     if (merged.routing_epsilon === undefined) merged.routing_epsilon = DEFAULT_EPSILON;
+    if (merged.routing_strategy === undefined) merged.routing_strategy = "epsilon";
+    if (merged.routing_top_k === undefined) merged.routing_top_k = DEFAULT_ROUTING_TOP_K;
+    if (merged.routing_softmax_tau === undefined) merged.routing_softmax_tau = DEFAULT_ROUTING_SOFTMAX_TAU;
     this.cfg = merged;
+  }
+
+
+  private _selectCandidates(nodes: Node[], maxRetries: number): Node[] {
+    const strategy = this.cfg.routing_strategy ?? "epsilon";
+    if (strategy === "deterministic" || nodes.length <= 1) return nodes.slice(0, maxRetries);
+    if (strategy === "softmax_top_k") {
+      const topK = Math.max(1, Math.min(nodes.length, this.cfg.routing_top_k ?? DEFAULT_ROUTING_TOP_K));
+      const pool = nodes.slice(0, topK);
+      const tau = Math.max(0.001, this.cfg.routing_softmax_tau ?? DEFAULT_ROUTING_SOFTMAX_TAU);
+      const maxScore = Math.max(...pool.map((n) => n.score));
+      const weights = pool.map((n) => Math.exp((n.score - maxScore) / tau));
+      const total = weights.reduce((a, b) => a + b, 0);
+      let r = Math.random() * total;
+      let chosen = pool[0];
+      for (let i = 0; i < pool.length; i++) {
+        r -= weights[i];
+        if (r <= 0) { chosen = pool[i]; break; }
+      }
+      return [chosen, ...nodes.slice(0, maxRetries).filter((n) => n.node_id !== chosen.node_id)].slice(0, maxRetries);
+    }
+    const epsilon = this.cfg.routing_epsilon ?? DEFAULT_EPSILON;
+    if (Math.random() < epsilon) {
+      const exploreNode = nodes[Math.floor(Math.random() * nodes.length)];
+      return [exploreNode, ...nodes.slice(0, maxRetries).filter((n) => n.node_id !== exploreNode.node_id)].slice(0, maxRetries);
+    }
+    return nodes.slice(0, maxRetries);
   }
 
   // ------------------------------------------------------------------
@@ -189,17 +238,7 @@ export class IicpClient {
     }
 
     const taskId = req.task_id ?? randomUUID();
-    // ε-greedy provider selection (R4): with probability ε pick a random node
-    // from the full discovered set; otherwise use the directory-sorted top pick.
-    let candidates: typeof nodes;
-    const epsilon = this.cfg.routing_epsilon ?? DEFAULT_EPSILON;
-    if (nodes.length > 1 && Math.random() < epsilon) {
-      const exploreIdx = Math.floor(Math.random() * nodes.length);
-      const exploreNode = nodes[exploreIdx];
-      candidates = [exploreNode, ...nodes.slice(0, MAX_RETRIES).filter((n) => n.node_id !== exploreNode.node_id)].slice(0, MAX_RETRIES);
-    } else {
-      candidates = nodes.slice(0, MAX_RETRIES);
-    }
+    const candidates = this._selectCandidates(nodes, MAX_RETRIES);
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (req.auth?.token) {

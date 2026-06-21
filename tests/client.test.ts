@@ -650,6 +650,22 @@ describe("ε-greedy provider selection (#486)", () => {
     if (orig === undefined) delete process.env["IICP_ROUTING_EPSILON"];
     else process.env["IICP_ROUTING_EPSILON"] = orig;
   });
+
+  it("routing strategy env vars configure softmax top-k", () => {
+    const origStrategy = process.env["IICP_ROUTING_STRATEGY"];
+    const origTopK = process.env["IICP_ROUTING_TOP_K"];
+    const origTau = process.env["IICP_ROUTING_SOFTMAX_TAU"];
+    process.env["IICP_ROUTING_STRATEGY"] = "softmax_top_k";
+    process.env["IICP_ROUTING_TOP_K"] = "2";
+    process.env["IICP_ROUTING_SOFTMAX_TAU"] = "0.02";
+    const client = new IicpClient({ directory_url: "http://fake.test" });
+    assert.equal(client["cfg"].routing_strategy, "softmax_top_k");
+    assert.equal(client["cfg"].routing_top_k, 2);
+    assert.equal(client["cfg"].routing_softmax_tau, 0.02);
+    if (origStrategy === undefined) delete process.env["IICP_ROUTING_STRATEGY"]; else process.env["IICP_ROUTING_STRATEGY"] = origStrategy;
+    if (origTopK === undefined) delete process.env["IICP_ROUTING_TOP_K"]; else process.env["IICP_ROUTING_TOP_K"] = origTopK;
+    if (origTau === undefined) delete process.env["IICP_ROUTING_SOFTMAX_TAU"]; else process.env["IICP_ROUTING_SOFTMAX_TAU"] = origTau;
+  });
 });
 
 // P0a (#360): mandatory encryption — no opt-out (parity with Python behaviour guards)
