@@ -12,12 +12,27 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import * as net from "node:net";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { IicpNode } from "../src/node.js";
 import {
   HttpPollWorkerSession,
   RelayAcceptServer,
   RelaySessionRegistry,
 } from "../src/relay_session.js";
+
+function b64url(s: string): string {
+  return Buffer.from(s).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function signedTicket(workerId: string, relayId: string): { token: string; publicKeyHex: string } {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyHex = (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-32).toString("hex");
+  const payload = b64url(JSON.stringify({
+    v: 1, typ: "relay-bind-ticket", iss: "test", sub: workerId, aud: relayId, iat: 1, exp: 9_999_999_999,
+  }));
+  const sigHex = sign(null, Buffer.from("iicp:relay-bind-ticket:v1\n" + payload), privateKey).toString("hex");
+  return { token: `${payload}.${sigHex}`, publicKeyHex };
+}
 
 function freePort(): Promise<number> {
   return new Promise((resolve) => {
@@ -122,11 +137,11 @@ describe("relay HTTP-poll endpoints", () => {
 
   after(() => stop());
 
-  async function bind(workerId: string, models: string[] = ["tinyllama-1.1b"]) {
+  async function bind(workerId: string, models: string[] = ["tinyllama-1.1b"], extra: Record<string, unknown> = {}) {
     return fetch(`${base}/v1/relay/bind`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ worker_id: workerId, intent: "urn:iicp:intent:llm:chat:v1", models }),
+      body: JSON.stringify({ worker_id: workerId, intent: "urn:iicp:intent:llm:chat:v1", models, ...extra }),
     });
   }
 
@@ -145,6 +160,28 @@ describe("relay HTTP-poll endpoints", () => {
     assert.equal(resp2.status, 409);
     const body = await resp2.json();
     assert.equal(body.error.code, "IICP-E038");
+  });
+
+  it("strict bind ticket mode accepts valid HTTP-poll tickets and rejects wrong workers", async () => {
+    const good = signedTicket("w-http-ticket", "relay-node");
+    const bad = signedTicket("attacker", "relay-node");
+    const oldKey = process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"];
+    const oldRequire = process.env["IICP_RELAY_REQUIRE_BIND_TICKET"];
+    process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"] = good.publicKeyHex;
+    process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] = "1";
+    try {
+      const ok = await bind("w-http-ticket", [], { bind_ticket: good.token });
+      assert.equal(ok.status, 200);
+      const wrong = await bind("w-http-ticket-2", [], { bind_ticket: bad.token });
+      assert.equal(wrong.status, 401);
+      const body = await wrong.json();
+      assert.equal(body.error.code, "IICP-E040");
+      const missing = await bind("w-http-ticket-missing");
+      assert.equal(missing.status, 401);
+    } finally {
+      if (oldKey === undefined) delete process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"]; else process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"] = oldKey;
+      if (oldRequire === undefined) delete process.env["IICP_RELAY_REQUIRE_BIND_TICKET"]; else process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] = oldRequire;
+    }
   });
 
   it("bind requires worker_id", async () => {

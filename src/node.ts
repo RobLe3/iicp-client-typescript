@@ -22,6 +22,8 @@ import { getCipPolicy } from "./cip_policy.js"; // #403 — per-task admission g
 import type { Delegation } from "./delegation.js"; // #407 — ADR-045 operator delegation
 import type { CxPublicKey } from "./types.js";
 import { decryptPayload, loadOrCreateNodeCxKey } from "./confidentiality.js";
+import { verifyRelayBindTicket } from "./relay_ticket.js";
+import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -354,6 +356,7 @@ export class IicpNode {
   private _tasksCounter: PromCounter | null = null;
   private _latencyHistogram: PromHistogram | null = null;
   private _tokensCounter: PromCounter | null = null;
+  private _backendStability = new BackendStabilityObservation();
   private _promLoaded = false;
   private readonly _cxPublicKey: CxPublicKey | undefined;
   private readonly _cxPrivateKeyBytes: Buffer | undefined;
@@ -511,6 +514,30 @@ export class IicpNode {
     }
   }
 
+  private _backendStabilitySnapshot(): BackendStabilityObservation {
+    return this._backendStability;
+  }
+
+  private _setBackendStability(observation: BackendStabilityObservation): void {
+    // Keep an active drain until it expires unless the new observation is also
+    // draining; a transient probe miss must not prematurely reopen admission.
+    if (this._backendStability.isDraining() && !observation.isDraining()) return;
+    this._backendStability = observation;
+  }
+
+  private async _observeBackendStability(): Promise<BackendStabilityObservation> {
+    const obs = this._cfg.backendUrl
+      ? await observeBackendStability({
+          backendUrl: this._cfg.backendUrl,
+          backend: this._cfg.backend,
+          expectedModel: this._cfg.model,
+          apiKey: this._cfg.backendApiKey ?? "",
+        })
+      : new BackendStabilityObservation();
+    this._setBackendStability(obs);
+    return obs;
+  }
+
   // ── Directory operations ───────────────────────────────────────────────────
 
   /** Phase 2 (#529/#55) — seed a previously-cached node_token so the next
@@ -666,6 +693,8 @@ export class IicpNode {
     if (this._cfg.backendUrl) {
       const healthModels = await this._probeHealthModels();
       if (healthModels !== null) payload.health_models = healthModels;
+      const stability = await this._observeBackendStability();
+      payload.backend_stability = stability.publicDict();
     }
 
     const resp = await fetch(
@@ -1009,6 +1038,8 @@ export class IicpNode {
           relayPort,
           handler: handler as never,
           models: this._cfg.model ? [this._cfg.model] : [],
+          directoryUrl: this._cfg.directoryUrl,
+          nodeToken: currentToken,
           onBind,
         });
         stopRelayWorker = rwc.start();
@@ -1147,7 +1178,7 @@ export class IicpNode {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      let payload: { worker_id?: string; intent?: string; models?: unknown };
+      let payload: { worker_id?: string; intent?: string; models?: unknown; bind_ticket?: unknown };
       try {
         payload = JSON.parse(Buffer.concat(chunks).toString() || "{}");
       } catch {
@@ -1159,6 +1190,22 @@ export class IicpNode {
         this._relayJson(res, 422, { error: { code: "IICP-E001", message: "worker_id is required" } });
         return;
       }
+      const bindTicket = typeof payload.bind_ticket === "string" ? payload.bind_ticket : "";
+      const ticketPublicKey = process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"] ?? "";
+      const requireBindTicket = process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] === "1";
+      if (bindTicket && ticketPublicKey) {
+        const claims = verifyRelayBindTicket(bindTicket, ticketPublicKey, workerId, this._cfg.nodeId);
+        if (!claims) {
+          this._relayJson(res, 401, { error: { code: "IICP-E040", message: "relay bind ticket invalid" } });
+          return;
+        }
+      } else if (requireBindTicket) {
+        this._relayJson(res, 401, { error: { code: "IICP-E040", message: "relay bind ticket required" } });
+        return;
+      } else if (!bindTicket) {
+        console.warn(`[iicp-node] HTTP-poll relay bind without ticket: ${workerId}`);
+      }
+
       // #510 interim-C parity: never displace an ALIVE bound session.
       const existing = this._relaySessions.get(workerId);
       if (existing && existing.isAlive()) {
@@ -1326,6 +1373,7 @@ export class IicpNode {
       models: allModels,
       intent: this._cfg.intent,
       pinhole_state: pinholeState,
+      backend_stability: this._backendStabilitySnapshot().publicDict(),
     });
     res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
     res.end(body);
@@ -1442,6 +1490,27 @@ export class IicpNode {
             },
           }),
         );
+        return;
+      }
+
+      // #553 / WQ-179 — provider-local backend drain guard.
+      const stability = this._backendStabilitySnapshot();
+      const retryAfter = stability.retryAfterS();
+      if (stability.isDraining() && retryAfter !== null) {
+        const body = JSON.stringify({
+          error: {
+            code: "IICP-E024",
+            message: "backend temporarily draining",
+            reason: stability.reasonClass,
+            retry_after_ms: retryAfter * 1000,
+          },
+        });
+        res.writeHead(503, {
+          "Content-Type": "application/json",
+          "Retry-After": String(retryAfter),
+          "Content-Length": Buffer.byteLength(body),
+        });
+        res.end(body);
         return;
       }
 

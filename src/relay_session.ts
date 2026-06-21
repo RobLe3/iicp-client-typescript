@@ -10,6 +10,7 @@
 
 import * as net from "node:net";
 import { randomUUID } from "node:crypto";
+import { verifyRelayBindTicket } from "./relay_ticket.js";
 
 const IICP_MAGIC = Buffer.from("IICP");
 const FRAMING_VERSION = 0x01;
@@ -273,16 +274,25 @@ export class RelayAcceptServer {
   /** The relay's public HTTP task port — advertised in RELAY_ACK (field 4)
    * so workers can register {relay}:{httpPort}/v1/relay-for/<wid>. */
   readonly httpPort: number;
+  private readonly _requireBindTicket: boolean;
+  private readonly _bindTicketPublicKeyHex?: string;
+  private readonly _relayNodeId: string;
   private _server?: net.Server;
 
   constructor(
     registry: RelaySessionRegistry,
-    opts: { host?: string; port?: number; httpPort?: number } = {},
+    opts: {
+      host?: string; port?: number; httpPort?: number;
+      requireBindTicket?: boolean; bindTicketPublicKeyHex?: string; relayNodeId?: string;
+    } = {},
   ) {
     this._registry = registry;
     this._host = opts.host ?? "0.0.0.0";
     this._port = opts.port ?? 9485;
     this.httpPort = opts.httpPort ?? 9484;
+    this._requireBindTicket = opts.requireBindTicket ?? (process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] === "1");
+    this._bindTicketPublicKeyHex = opts.bindTicketPublicKeyHex ?? process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"];
+    this._relayNodeId = opts.relayNodeId ?? process.env["IICP_NODE_ID"] ?? "*";
   }
 
   start(): Promise<void> {
@@ -359,14 +369,38 @@ export class RelayAcceptServer {
     if (rmt !== MT_RELAY_BIND) return;
     const rbuf = rlen > 0 ? await readExactly(rlen) : Buffer.alloc(0);
     if (!rbuf) return;
-    let workerId: string, intent: string, models: string[];
+    let workerId: string, intent: string, models: string[], bindTicket: string;
     try {
       const body = _dec(rbuf) as Record<number, unknown>;
       workerId = String(body[1] ?? "");
       intent = String(body[2] ?? "");
       models = Array.isArray(body[3]) ? (body[3] as unknown[]).map(String) : [];
+      bindTicket = typeof body[4] === "string" ? body[4] as string : "";
     } catch { return; }
     if (!workerId) return;
+
+    // #510 full-mechanism additive rung: workers may present a short-lived
+    // directory-signed bind ticket in RELAY_BIND field 4. Soft mode accepts
+    // legacy unsigned binds with a warning; strict mode is opt-in until adoption
+    // is measured.
+    if (bindTicket && this._bindTicketPublicKeyHex) {
+      const claims = verifyRelayBindTicket(bindTicket, this._bindTicketPublicKeyHex, workerId, this._relayNodeId);
+      if (!claims) {
+        socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
+          [1, "error"], [2, workerId], [3, "relay bind ticket invalid"],
+        ])) as Buffer));
+        socket.destroy();
+        return;
+      }
+    } else if (this._requireBindTicket) {
+      socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
+        [1, "error"], [2, workerId], [3, "relay bind ticket required"],
+      ])) as Buffer));
+      socket.destroy();
+      return;
+    } else if (!bindTicket) {
+      console.warn(`[relay-accept] unsigned RELAY_BIND for worker=${workerId}; #510 ticket auth not yet enforced`);
+    }
 
     // #510 interim hardening: RELAY_BIND is unauthenticated, so refuse to
     // displace an existing session whose socket is still alive (mid-session

@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import * as net from "node:net";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { RelayAcceptServer, RelaySessionRegistry, RelayWorkerSession } from "../src/relay_session.js";
 
 // ── frame type constants ─────────────────────────────────────────────────────
@@ -160,27 +161,42 @@ class WireWorker {
   }
 
   /** INIT/ACK + RELAY_BIND; returns the decoded RELAY_ACK body. */
-  async bind(workerId: string): Promise<Record<number, unknown>> {
+  async bind(workerId: string, bindTicket?: string): Promise<Record<number, unknown>> {
     const { enc, dec } = await _cbor();
     this.sock.write(_mkFrame(MT_INIT, enc(new Map<number, unknown>([[1, 0x01]]))));
     const ack = await this.readFrame();
     assert.equal(ack.msgType, 0x02, "expected ACK after INIT");
-    this.sock.write(_mkFrame(MT_RELAY_BIND, enc(new Map<number, unknown>([
+    const bind = new Map<number, unknown>([
       [1, workerId],
       [2, "urn:iicp:intent:llm:chat:v1"],
       [3, []],
-    ]))));
+    ]);
+    if (bindTicket) bind.set(4, bindTicket);
+    this.sock.write(_mkFrame(MT_RELAY_BIND, enc(bind)));
     const rack = await this.readFrame();
     assert.equal(rack.msgType, MT_RELAY_ACK, "expected RELAY_ACK after RELAY_BIND");
     return dec(rack.payload);
   }
 }
 
-async function _startServer(reg: RelaySessionRegistry): Promise<{ srv: RelayAcceptServer; port: number }> {
-  const srv = new RelayAcceptServer(reg, { host: "127.0.0.1", port: 0 });
+async function _startServer(
+  reg: RelaySessionRegistry,
+  opts: ConstructorParameters<typeof RelayAcceptServer>[1] = {},
+): Promise<{ srv: RelayAcceptServer; port: number }> {
+  const srv = new RelayAcceptServer(reg, { host: "127.0.0.1", port: 0, ...opts });
   await srv.start();
   const addr = (srv as unknown as { _server: net.Server })._server.address() as net.AddressInfo;
   return { srv, port: addr.port };
+}
+
+function _signedTicket(workerId: string, relayId: string) {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const pubHex = (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-32).toString("hex");
+  const payload = Buffer.from(JSON.stringify({
+    v: 1, typ: "relay-bind-ticket", iss: "test", sub: workerId, aud: relayId, iat: 1, exp: 9_999_999_999,
+  })).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const sig = sign(null, Buffer.from("iicp:relay-bind-ticket:v1\n" + payload), privateKey).toString("hex");
+  return { token: `${payload}.${sig}`, publicKeyHex: pubHex };
 }
 
 describe("RelayAcceptServer bind hardening (#510)", () => {
@@ -249,6 +265,35 @@ describe("RelayAcceptServer bind hardening (#510)", () => {
       assert.equal(ackB[1], "ok", "rebind after socket death must succeed");
       assert.equal(reg.isBound("w-reconnect"), true);
       assert.equal(reg.get("w-reconnect")?.isAlive(), true);
+    } finally {
+      for (const s of cleanup) s.destroy();
+      await srv.stop();
+    }
+  });
+
+  it("strict #510 mode accepts valid relay bind ticket and rejects wrong worker", async () => {
+    const reg = new RelaySessionRegistry();
+    const good = _signedTicket("w-ticket", "relay-test");
+    const badWorker = _signedTicket("attacker", "relay-test");
+    const { srv, port } = await _startServer(reg, {
+      requireBindTicket: true,
+      bindTicketPublicKeyHex: good.publicKeyHex,
+      relayNodeId: "relay-test",
+    });
+    const cleanup: net.Socket[] = [];
+    try {
+      const worker = await WireWorker.connect(port);
+      cleanup.push(worker.sock);
+      const ack = await worker.bind("w-ticket", good.token);
+      assert.equal(ack[1], "ok");
+      worker.sock.destroy();
+      await new Promise((r) => setTimeout(r, 20));
+
+      const attacker = await WireWorker.connect(port);
+      cleanup.push(attacker.sock);
+      const badAck = await attacker.bind("w-ticket", badWorker.token);
+      assert.equal(badAck[1], "error");
+      assert.equal(badAck[3], "relay bind ticket invalid");
     } finally {
       for (const s of cleanup) s.destroy();
       await srv.stop();

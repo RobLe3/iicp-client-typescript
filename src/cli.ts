@@ -29,6 +29,8 @@ import {
 const SDK_VERSION: string = (require("../package.json") as { version: string }).version;
 import * as net from "node:net";
 import * as http from "node:http";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -117,6 +119,7 @@ function printHelp(): void {
       `  credits                    Show this node's earned / spent / balance credits\n` +
       `  proxy                      Run the local OpenAI/Ollama/Anthropic-compat gateway (loopback; no registration)\n` +
       `  mcp-gateway                Bridge a local MCP server as an IICP provider node (registers + serves)\n` +
+      `  service                    Generate/install OS supervisor units for unattended node serving\n` +
       `  operator rename <name>     Change your public display_name (signed by your operator key)\n` +
       `  operator encrypt           Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  operator decrypt           Remove at-rest encryption of the operator secret\n\n` +
@@ -2127,6 +2130,61 @@ async function runUpdate(): Promise<number> {
   return 0;
 }
 
+async function runService(argv: string[]): Promise<number> {
+  const subcmd = argv[0];
+  if (!subcmd || subcmd === "--help" || subcmd === "-h" || subcmd === "help") {
+    process.stdout.write(
+      `usage: iicp-node service <install|status|restart|uninstall> --node NAME [options]\n\n` +
+        `Generate user-level launchd/systemd supervisor units. The service runs foreground:\n` +
+        `  iicp-node serve --node <NAME>\n\n` +
+        `Options:\n` +
+        `  --node NAME        Saved node name to serve (required)\n` +
+        `  --name NAME        Override service label/unit name\n` +
+        `  --platform KIND    auto | launchd | systemd (default auto)\n` +
+        `  --dry-run          For install: print the generated unit without writing files\n`,
+    );
+    return subcmd ? 0 : 2;
+  }
+  if (!["install", "status", "restart", "uninstall"].includes(subcmd)) {
+    throw new CliError(`unknown service subcommand '${subcmd}'`);
+  }
+  const { values } = safeParseArgs({
+    args: argv.slice(1),
+    options: {
+      node: { type: "string" },
+      name: { type: "string" },
+      platform: { type: "string" },
+      "dry-run": { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  });
+  if (values.help) return runService(["help"]);
+  const node = values.node as string | undefined;
+  if (!node) throw new CliError("service requires --node NAME");
+  const { renderServiceUnit } = await import("./service.js");
+  const unit = renderServiceUnit(node, values.name as string | undefined, (values.platform as string | undefined) ?? "auto");
+
+  if (subcmd === "install") {
+    if (values["dry-run"]) {
+      process.stdout.write(`# ${unit.platform} service: ${unit.name}\n# path: ${unit.path}\n${unit.content}`);
+    } else {
+      fs.mkdirSync(path.dirname(unit.path), { recursive: true });
+      fs.writeFileSync(unit.path, unit.content);
+      process.stdout.write(`Installed ${unit.platform} service unit: ${unit.path}\n`);
+    }
+    process.stdout.write(`status:   ${unit.statusHint}\n`);
+    process.stdout.write(`restart:  ${unit.restartHint}\n`);
+    process.stdout.write(`logs:     ${unit.logHint}\n`);
+    process.stdout.write("Note: no classic --daemon fork is used; the OS supervisor runs foreground `iicp-node serve`.\n");
+    return 0;
+  }
+  if (subcmd === "status") process.stdout.write(`${unit.statusHint}\n`);
+  if (subcmd === "restart") process.stdout.write(`${unit.restartHint}\n`);
+  if (subcmd === "uninstall") process.stdout.write(`${unit.uninstallHint}\n`);
+  return 0;
+}
+
 async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
   if (cmd === "init") return runInit();
@@ -2137,6 +2195,7 @@ async function dispatch(argv: string[]): Promise<number> {
   if (cmd === "proxy") return runProxyCmd(argv.slice(1));
   if (cmd === "mcp-gateway") return runMcpGateway(argv.slice(1));
   if (cmd === "update") return runUpdate();
+  if (cmd === "service") return runService(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
     printHelp();

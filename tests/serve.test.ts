@@ -476,3 +476,36 @@ describe("health_models heartbeat reporting (#494)", () => {
     }
   });
 });
+
+describe("IicpNode backend stability drain", () => {
+  it("health exposes redacted backend_stability and task admission returns Retry-After while draining", async () => {
+    const { BackendStabilityObservation } = await import("../src/backend_stability.js");
+    const p = await freePort();
+    const node = new IicpNode({ ...cfg, nodeId: "drain-node", model: "test-model" });
+    (node as unknown as { _setBackendStability(o: unknown): void })._setBackendStability(
+      new BackendStabilityObservation({
+        backendState: "draining",
+        reasonClass: "backend_loading",
+        drainUntilMs: Date.now() + 30_000,
+        diagnostics: { model_size_bytes: 123, loaded_instances: [{ id: "secret" }] },
+      }),
+    );
+    const stop = node.serve(async () => ({ result: {} }), { host: "127.0.0.1", port: p });
+    await waitPort(p);
+    try {
+      const health = await jsonReq("GET", p, "/iicp/health");
+      const publicState = (health.body as Record<string, unknown>).backend_stability as Record<string, unknown>;
+      assert.equal(publicState.backend_state, "draining");
+      assert.equal(publicState.reason_class, "backend_loading");
+      assert.equal("model_size_bytes" in publicState, false);
+      assert.equal("loaded_instances" in publicState, false);
+
+      const task = await jsonReq("POST", p, "/v1/task", { task_id: "t-drain", intent: cfg.intent, payload: {} });
+      assert.equal(task.status, 503);
+      assert.equal(task.headers["retry-after"] !== undefined, true);
+      assert.equal(((task.body as Record<string, unknown>).error as Record<string, unknown>).code, "IICP-E024");
+    } finally {
+      stop();
+    }
+  });
+});

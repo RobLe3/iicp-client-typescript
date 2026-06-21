@@ -18,10 +18,15 @@ urn:iicp:intent:llm:chat:v1  →  discover  →  select  →  submit
 ## Install
 
 ```bash
-npm install @iicp/client
-# yarn add @iicp/client
-# pnpm add @iicp/client
+npm install @iicp/client@latest
+# yarn add @iicp/client@latest
+# pnpm add @iicp/client@latest
 ```
+
+> **Upgrade note (0.7.65)** — upgrade clients and nodes so discovery prefers the canonical
+> IICP-CX `cx_public_key` field while still accepting the temporary `public_key` alias.
+> This prevents keyed live nodes from being treated as plaintext-only during the migration
+> and prepares your install for the later removal of the ambiguous alias.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
 > TCP transport on port 9484, upgrade to `^0.5.3`. Releases 0.5.0–0.5.2

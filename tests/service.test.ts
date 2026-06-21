@@ -1,0 +1,71 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import { renderLaunchd, renderSystemd } from "../src/service.js";
+
+describe("service supervisor unit rendering", () => {
+  it("launchd unit runs foreground serve with hourly auto-update defaults", () => {
+    delete process.env.IICP_AUTO_UPDATE;
+    delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+    const unit = renderLaunchd("mynode");
+
+    assert.equal(unit.platform, "launchd");
+    assert.ok(unit.path.endsWith("network.iicp.node.mynode.plist"));
+    assert.ok(unit.content.includes("<string>serve</string>"));
+    assert.ok(unit.content.includes("<string>--node</string>"));
+    assert.ok(unit.content.includes("<string>mynode</string>"));
+    assert.ok(unit.content.includes("<key>IICP_AUTO_UPDATE</key><string>1</string>"));
+    assert.ok(unit.content.includes("<key>IICP_AUTO_UPDATE_INTERVAL_S</key><string>3600</string>"));
+    assert.ok(unit.content.includes("<key>KeepAlive</key><true/>"));
+    assert.ok(!unit.content.includes("--daemon"));
+  });
+
+  it("systemd unit runs foreground serve with hourly auto-update defaults", () => {
+    delete process.env.IICP_AUTO_UPDATE;
+    delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+    const unit = renderSystemd("mynode");
+
+    assert.equal(unit.platform, "systemd");
+    assert.ok(unit.path.endsWith("network.iicp.node.mynode.service"));
+    assert.ok(unit.content.includes("ExecStart=iicp-node serve --node mynode"));
+    assert.ok(unit.content.includes("Environment=IICP_AUTO_UPDATE=1"));
+    assert.ok(unit.content.includes("Environment=IICP_AUTO_UPDATE_INTERVAL_S=3600"));
+    assert.ok(unit.content.includes("Restart=on-failure"));
+    assert.ok(!unit.content.includes("--daemon"));
+  });
+});
+
+describe("iicp-node service CLI", () => {
+  it("install --dry-run prints unit, hints and no daemon note without writing", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-service-"));
+    const oldHome = process.env.HOME;
+    process.env.HOME = tmp;
+    const lines: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk: string | Uint8Array, ...rest: unknown[]) => {
+      if (typeof chunk === "string") lines.push(chunk);
+      return orig(chunk, ...(rest as [BufferEncoding?, (() => void)?]));
+    };
+    try {
+      const { main } = await import("../src/cli.js");
+      const rc = await main(["service", "install", "--node", "mynode", "--platform", "systemd", "--dry-run"]);
+      const out = lines.join("");
+      assert.equal(rc, 0);
+      assert.ok(out.includes("ExecStart=iicp-node serve --node mynode"));
+      assert.ok(out.includes("IICP_AUTO_UPDATE_INTERVAL_S=3600"));
+      assert.ok(out.includes("status:"));
+      assert.ok(out.includes("restart:"));
+      assert.ok(out.includes("logs:"));
+      assert.ok(out.includes("no classic --daemon fork"));
+      assert.equal(fs.existsSync(path.join(tmp, ".config", "systemd", "user", "network.iicp.node.mynode.service")), false);
+    } finally {
+      process.stdout.write = orig;
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

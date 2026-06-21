@@ -191,7 +191,10 @@ export class IicpClient {
         );
         continue;
       }
-      const rawCx = node.cx_public_key as Record<string, string> | undefined;
+      // Directory discover now treats `cx_public_key` as canonical;
+      // `public_key` is accepted only as a deprecated compatibility alias.
+      // Accept both so live keyed nodes do not get treated as plaintext-only.
+      const rawCx = (node.cx_public_key ?? node.public_key) as Record<string, string> | undefined;
       nodes.push({
         node_id: String(node.node_id),
         endpoint,

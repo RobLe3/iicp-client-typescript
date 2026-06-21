@@ -10,6 +10,7 @@
  */
 
 import * as net from "node:net";
+import { fetchRelayBindTicket } from "./relay_ticket.js";
 
 const IICP_MAGIC = Buffer.from("IICP");
 const FRAMING_VERSION = 0x01;
@@ -70,6 +71,10 @@ export class RelayWorkerClient {
   private readonly _handler: RelayTaskHandler;
   private readonly _models: string[];
   private readonly _onBind?: (relayHost: string, relayPort: number, workerId: string) => Promise<void>;
+  private readonly _bindTicket?: string;
+  private readonly _directoryUrl?: string;
+  private readonly _nodeToken?: string;
+  private readonly _relayNodeId?: string;
   private _stopped = false;
 
   constructor(opts: {
@@ -79,6 +84,13 @@ export class RelayWorkerClient {
     relayPort: number;
     handler: RelayTaskHandler;
     models?: string[];
+    /** Additive #510 ticket. If omitted but directoryUrl+nodeToken are set, the
+     * client tries POST /v1/relay/ticket before each bind. Legacy relays ignore
+     * unknown RELAY_BIND field 4. */
+    bindTicket?: string;
+    directoryUrl?: string;
+    nodeToken?: string;
+    relayNodeId?: string;
     /** Called after a successful RELAY_ACK with (relayHost, relayHttpPort, workerId) —
      * the HTTP port comes from RELAY_ACK field 4 (fallback 9484). Use to re-register
      * with the directory advertising {relay}/v1/relay-for/{workerId} (#358/#450). */
@@ -91,6 +103,10 @@ export class RelayWorkerClient {
     this._handler = opts.handler;
     this._models = opts.models ?? [];
     this._onBind = opts.onBind;
+    this._bindTicket = opts.bindTicket;
+    this._directoryUrl = opts.directoryUrl;
+    this._nodeToken = opts.nodeToken;
+    this._relayNodeId = opts.relayNodeId;
   }
 
   /** Start the reconnect loop. Returns a stop() function. */
@@ -175,11 +191,26 @@ export class RelayWorkerClient {
     if (!ack || ack[0] !== MT_ACK) throw new Error(`Expected ACK, got ${ack?.[0]}`);
 
     // Step 2: RELAY_BIND → RELAY_ACK
-    socket.write(makeFrame(MT_RELAY_BIND, _enc(new Map<number, unknown>([
+    let bindTicket = this._bindTicket;
+    if (!bindTicket && this._directoryUrl && this._nodeToken) {
+      try {
+        bindTicket = await fetchRelayBindTicket({
+          directoryUrl: this._directoryUrl,
+          nodeToken: this._nodeToken,
+          workerId: this._workerId,
+          relayNodeId: this._relayNodeId,
+        });
+      } catch {
+        // Additive migration: lack of a ticket must not break legacy relays yet.
+      }
+    }
+    const bindFields = new Map<number, unknown>([
       [1, this._workerId],
       [2, this._intent],
       [3, this._models],
-    ]))));
+    ]);
+    if (bindTicket) bindFields.set(4, bindTicket);
+    socket.write(makeFrame(MT_RELAY_BIND, _enc(bindFields)));
     const rack = await readFrame();
     if (!rack || rack[0] !== MT_RELAY_ACK) throw new Error(`Expected RELAY_ACK, got ${rack?.[0]}`);
     const ackBody = _dec(rack[1]);

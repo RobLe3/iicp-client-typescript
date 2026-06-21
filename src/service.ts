@@ -1,0 +1,149 @@
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * OS supervisor unit rendering for `iicp-node service` (#551).
+ *
+ * The node stays a foreground process (`iicp-node serve --node <name>`).
+ * launchd/systemd own restart-on-failure, logs and background resilience.
+ */
+import * as os from "node:os";
+import * as path from "node:path";
+
+export interface ServiceUnit {
+  platform: "launchd" | "systemd";
+  name: string;
+  path: string;
+  content: string;
+  statusHint: string;
+  restartHint: string;
+  uninstallHint: string;
+  logHint: string;
+}
+
+const SAFE_RE = /[^A-Za-z0-9_.-]+/g;
+
+export function sanitizeServiceName(value: string): string {
+  const cleaned = value.trim().replace(SAFE_RE, "-").replace(/^[-.]+|[-.]+$/g, "");
+  if (!cleaned) throw new Error("service/node name must contain at least one safe character");
+  return cleaned.slice(0, 80);
+}
+
+export function serviceLabel(node: string, name?: string): string {
+  return sanitizeServiceName(name ?? `network.iicp.node.${sanitizeServiceName(node)}`);
+}
+
+function envValue(key: string, fallback: string): string {
+  return process.env[key] ?? fallback;
+}
+
+export function detectPlatform(requested = "auto"): "launchd" | "systemd" {
+  if (requested === "launchd" || requested === "systemd") return requested;
+  if (requested !== "auto") throw new Error("platform must be auto, launchd or systemd");
+  return process.platform === "darwin" ? "launchd" : "systemd";
+}
+
+function xmlEscape(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function renderLaunchd(node: string, name?: string, executable = "iicp-node"): ServiceUnit {
+  const label = serviceLabel(node, name);
+  const home = os.homedir();
+  const logDir = envValue("IICP_LOG_DIR", path.join(home, ".iicp", "logs"));
+  const plist = path.join(home, "Library", "LaunchAgents", `${label}.plist`);
+  const env: Record<string, string> = {
+    IICP_NODE_NAME: node,
+    IICP_AUTO_UPDATE: envValue("IICP_AUTO_UPDATE", "1"),
+    IICP_AUTO_UPDATE_INTERVAL_S: envValue("IICP_AUTO_UPDATE_INTERVAL_S", "3600"),
+    IICP_LOG_DIR: logDir,
+  };
+  const envXml = Object.entries(env)
+    .map(([k, v]) => `    <key>${xmlEscape(k)}</key><string>${xmlEscape(v)}</string>`)
+    .join("\n");
+  const outLog = path.join(logDir, `${label}.out.log`);
+  const errLog = path.join(logDir, `${label}.err.log`);
+  const content = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${xmlEscape(label)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xmlEscape(executable)}</string>
+    <string>serve</string>
+    <string>--node</string>
+    <string>${xmlEscape(node)}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+${envXml}
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>${xmlEscape(outLog)}</string>
+  <key>StandardErrorPath</key><string>${xmlEscape(errLog)}</string>
+</dict>
+</plist>
+`;
+  return {
+    platform: "launchd",
+    name: label,
+    path: plist,
+    content,
+    statusHint: `launchctl print gui/$(id -u)/${label}`,
+    restartHint: `launchctl kickstart -k gui/$(id -u)/${label}`,
+    uninstallHint: `launchctl bootout gui/$(id -u) ${shellQuote(plist)}; rm -f ${shellQuote(plist)}`,
+    logHint: `tail -f ${shellQuote(outLog)} ${shellQuote(errLog)}`,
+  };
+}
+
+export function renderSystemd(node: string, name?: string, executable = "iicp-node"): ServiceUnit {
+  const label = serviceLabel(node, name);
+  const home = os.homedir();
+  const unitPath = path.join(home, ".config", "systemd", "user", `${label}.service`);
+  const logDir = envValue("IICP_LOG_DIR", path.join(home, ".iicp", "logs"));
+  const env: Record<string, string> = {
+    IICP_NODE_NAME: node,
+    IICP_AUTO_UPDATE: envValue("IICP_AUTO_UPDATE", "1"),
+    IICP_AUTO_UPDATE_INTERVAL_S: envValue("IICP_AUTO_UPDATE_INTERVAL_S", "3600"),
+    IICP_LOG_DIR: logDir,
+  };
+  const envLines = Object.entries(env).map(([k, v]) => `Environment=${k}=${shellQuote(v)}`).join("\n");
+  const content = `[Unit]
+Description=IICP node ${node}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=${executable} serve --node ${shellQuote(node)}
+${envLines}
+Restart=on-failure
+RestartSec=30
+WorkingDirectory=${shellQuote(home)}
+
+[Install]
+WantedBy=default.target
+`;
+  return {
+    platform: "systemd",
+    name: label,
+    path: unitPath,
+    content,
+    statusHint: `systemctl --user status ${label}.service`,
+    restartHint: `systemctl --user restart ${label}.service`,
+    uninstallHint: `systemctl --user disable --now ${label}.service; rm -f ${shellQuote(unitPath)}; systemctl --user daemon-reload`,
+    logHint: `journalctl --user -u ${label}.service -f`,
+  };
+}
+
+export function renderServiceUnit(node: string, name?: string, platform = "auto", executable = "iicp-node"): ServiceUnit {
+  return detectPlatform(platform) === "launchd"
+    ? renderLaunchd(node, name, executable)
+    : renderSystemd(node, name, executable);
+}

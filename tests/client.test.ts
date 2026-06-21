@@ -697,6 +697,22 @@ describe("P0a mandatory encryption (#360)", () => {
     assert.equal((body as Record<string, unknown>)["payload"], undefined, "plaintext payload must be absent");
   });
 
+  it("encrypts when directory exposes the deprecated public_key alias", async () => {
+    let body: Record<string, unknown> | null = null;
+    const restore = mockFetch((url, init) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover"))
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", public_key: cxKey() }] });
+      if (u.includes("/v1/task")) { body = JSON.parse(String(init?.body ?? "{}")); return jsonResponse(OK_TASK); }
+      return new Response("404", { status: 404 });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await client.chat([{ role: "user", content: "secret" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
+    restore();
+    assert.ok(body && (body as Record<string, unknown>)["iicp_conf"], "must encrypt when directory exposes deprecated public_key alias");
+    assert.equal((body as Record<string, unknown>)["payload"], undefined, "plaintext payload must be absent");
+  });
+
   it("no key → transitional plaintext", async () => {
     let body: Record<string, unknown> | null = null;
     const restore = mockFetch((url, init) => {
