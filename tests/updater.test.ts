@@ -32,7 +32,7 @@ describe("checkUpdate", () => {
 });
 
 // ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
-import { autoUpdateInitialDelayMs, autoUpdateTick } from "../src/updater.js";
+import { autoUpdateEnabled, autoUpdateInitialDelayMs, autoUpdateIntervalMs, autoUpdateTick } from "../src/updater.js";
 
 describe("autoUpdateTick (#521 P2)", () => {
   it("upgrades and re-execs when a newer release exists", async () => {
@@ -68,5 +68,41 @@ describe("autoUpdateInitialDelayMs", () => {
     assert.equal(autoUpdateInitialDelayMs(300_000), 300_000);
     assert.equal(autoUpdateInitialDelayMs(900_000), 300_000);
     assert.equal(autoUpdateInitialDelayMs(21_600_000), 300_000);
+  });
+});
+
+
+describe("autoUpdate env controls", () => {
+  it("defaults on and respects IICP_AUTO_UPDATE opt-out values", () => {
+    const oldValue = process.env.IICP_AUTO_UPDATE;
+    try {
+      delete process.env.IICP_AUTO_UPDATE;
+      assert.equal(autoUpdateEnabled(), true);
+      for (const value of ["0", "false", "no", "off"]) {
+        process.env.IICP_AUTO_UPDATE = value;
+        assert.equal(autoUpdateEnabled(), false);
+      }
+      process.env.IICP_AUTO_UPDATE = "1";
+      assert.equal(autoUpdateEnabled(), true);
+    } finally {
+      if (oldValue === undefined) delete process.env.IICP_AUTO_UPDATE;
+      else process.env.IICP_AUTO_UPDATE = oldValue;
+    }
+  });
+  it("floors interval to five minutes and falls back on bad values", () => {
+    const oldValue = process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+    try {
+      delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+      assert.equal(autoUpdateIntervalMs(), 21_600_000);
+      process.env.IICP_AUTO_UPDATE_INTERVAL_S = "42";
+      assert.equal(autoUpdateIntervalMs(), 300_000);
+      process.env.IICP_AUTO_UPDATE_INTERVAL_S = "900";
+      assert.equal(autoUpdateIntervalMs(), 900_000);
+      process.env.IICP_AUTO_UPDATE_INTERVAL_S = "not-a-number";
+      assert.equal(autoUpdateIntervalMs(), 21_600_000);
+    } finally {
+      if (oldValue === undefined) delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+      else process.env.IICP_AUTO_UPDATE_INTERVAL_S = oldValue;
+    }
   });
 });
