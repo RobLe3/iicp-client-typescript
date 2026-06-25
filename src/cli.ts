@@ -210,9 +210,9 @@ function printHelp(): void {
       `  --no-auto-detect-nat       disable NAT detection at startup\n` +
       `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n` +
       `  --tunnel / --no-tunnel     IICP_TUNNEL — #520 rung 5: zero-account Cloudflare Quick Tunnel for the\n` +
-      `                             node's own public endpoint (needs cloudflared on PATH). Default auto: on\n` +
-      `                             tier ≥ 3 the node tries a tunnel FIRST, relay only if it fails. --tunnel\n` +
-      `                             forces it on; --no-tunnel disables it (relay-first).\n` +
+      `                             node's own public endpoint (needs cloudflared on PATH). Default auto: use\n` +
+      `                             tunnel when direct IPv4/IPv6/pinhole reachability is unavailable or\n` +
+      `                             unverified, then relay. --tunnel forces it; --no-tunnel disables fallback.\n` +
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
       `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
       `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485).\n` +
@@ -517,6 +517,35 @@ export function planReachability(
 ): Array<"tunnel" | "relay" | "gossip"> {
   if (tier < 3 || relayConfigured) return [];
   return [...(tunnelEnabled ? (["tunnel"] as const) : []), "relay", "gossip"];
+}
+
+export function endpointIsLocalOrPrivate(endpoint: string): boolean {
+  const ep = endpoint.toLowerCase();
+  return ep.includes("://localhost") ||
+    ep.includes("://127.") ||
+    ep.includes("://0.0.0.0") ||
+    ep.includes("://192.168.") ||
+    ep.includes("://10.") ||
+    Array.from({ length: 16 }, (_, i) => 16 + i).some((n) => ep.includes(`://172.${n}.`)) ||
+    ep.includes("://[::1]") ||
+    ep.includes("://[fc") ||
+    ep.includes("://[fd");
+}
+
+export function directTunnelFallbackReason(
+  endpoint: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  profile?: any,
+): string | null {
+  if (endpointIsLocalOrPrivate(endpoint)) return "local/private endpoint";
+  if (profile && (Number(profile.tier ?? 0) >= 3 || profile.transportMethod === "unreachable")) {
+    return "NAT traversal did not produce a direct public route";
+  }
+  if (endpoint.includes("://[")) {
+    const pinholeActive = Boolean(profile?.ipv6?.pinholeActive);
+    if (!pinholeActive) return "IPv6 direct endpoint has no verified inbound pinhole";
+  }
+  return null;
 }
 
 /** Query directory for relay-capable peers and elect one deterministically.
@@ -873,6 +902,43 @@ async function runServe(opts: ServeOpts): Promise<number> {
     if (tunnelHandle) publicEndpoint = tunnelHandle.url;
   }
 
+  // Maximum-adoption fallback: keep the direct listener, but if the advertised
+  // direct route is local/private or IPv6 without a verified inbound pinhole,
+  // publish a Quick Tunnel by default. Operators can opt out with --no-tunnel /
+  // IICP_TUNNEL=0.
+  if (
+    tunnelPref !== false &&
+    tunnelHandle === null &&
+    !opts.relayWorkerEndpoint &&
+    !opts.skipRegistration
+  ) {
+    const reason = directTunnelFallbackReason(publicEndpoint, natProfile);
+    if (reason) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[iicp-node] direct endpoint needs public fallback (${reason}) — opening Quick Tunnel automatically…`,
+      );
+      tunnelHandle = await openTunnelRung(opts.port, false);
+      if (tunnelHandle) {
+        publicEndpoint = tunnelHandle.url;
+      } else {
+        // eslint-disable-next-line no-console
+        console.log("[iicp-node] no tunnel available — auto-electing a relay from directory (last resort)…");
+        const elected = await _autoElectRelay(
+          opts.directoryUrl ?? "https://iicp.network/api",
+          opts.intent,
+          nodeId,
+        );
+        if (elected) {
+          const [relayHost, relayPort] = elected;
+          opts = { ...opts, relayWorkerEndpoint: `${relayHost}:${relayPort}` };
+          // eslint-disable-next-line no-console
+          console.log(`[iicp-node] auto-elected relay (last resort): ${relayHost}:${relayPort}`);
+        }
+      }
+    }
+  }
+
   const backendFlavor = await detectBackendFlavor(opts.backendUrl, opts.backendApiKey, opts.backendType);
   process.stderr.write(`backend detected: ${backendFlavor}\n`);
 
@@ -947,6 +1013,15 @@ async function runServe(opts: ServeOpts): Promise<number> {
       },
     });
   }
+  if (tunnelHandle) {
+    (node["_cfg"] as Record<string, unknown>).endpoint = publicEndpoint;
+    (node["_cfg"] as Record<string, unknown>).transportMethod = "external_tunnel";
+    (node["_cfg"] as Record<string, unknown>).exposureMode = "tunnel_required";
+    (node["_cfg"] as Record<string, unknown>).transportMetadata = {
+      tier: 3,
+      detection_log_tail: ["rung 5: quick tunnel"],
+    };
+  }
 
   // Normalize to the OpenAI-dialect root: the handler appends /chat/completions,
   // so baseUrl MUST end in /v1 (Ollama serves the OpenAI dialect at /v1). An
@@ -1010,12 +1085,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
 
   // NAT-4 guard: if endpoint is non-routable and no relay configured, skip
   // registration to avoid a confusing 422 from the directory's RoutableEndpoint check.
-  const epLocal =
-    publicEndpoint.startsWith("http://localhost") ||
-    publicEndpoint.startsWith("http://127.") ||
-    publicEndpoint.startsWith("http://0.0.0.0") ||
-    publicEndpoint.startsWith("http://192.168.") ||
-    publicEndpoint.startsWith("http://10.");
+  const epLocal = endpointIsLocalOrPrivate(publicEndpoint);
   if (epLocal && !opts.relayWorkerEndpoint && !opts.skipRegistration) {
     // eslint-disable-next-line no-console
     console.warn(

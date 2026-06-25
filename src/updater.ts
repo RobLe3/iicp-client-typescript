@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Self-updater P1 — read-only version check (#521 WQ-089).
- * TypeScript parity with iicp-client-python/updater.py.
+ * Self-updater for provider nodes (#521 WQ-089).
  *
- * Inert by design: reports whether a newer release exists and prints the
- * upgrade command. No download/install/restart (P2/P3). Zero risk surface.
+ * `iicp-node update` still supports the safe read-only version check, but
+ * normal long-running `iicp-node serve` processes now also run a default-on
+ * background loop: check npm hourly (first check within five minutes), install
+ * `@iicp/client@latest` when a newer stable release exists, and restart onto
+ * the upgraded package. The loop is failure-isolated and opt-out via
+ * `IICP_AUTO_UPDATE=0`.
  */
 
 const NPM_URL = "https://registry.npmjs.org/@iicp/client/latest";

@@ -23,10 +23,10 @@ npm install @iicp/client@latest
 # pnpm add @iicp/client@latest
 ```
 
-> **Upgrade note (0.7.68)** — upgrade provider nodes so unattended updater checks
-> run hourly by default in normal `iicp-node serve` processes and report updater
-> evidence to the directory. This helps the mesh route away from stuck downlevel
-> or non-key-ready nodes without weakening IICP-CX requirements.
+> **Upgrade note (0.7.69)** — upgrade provider nodes so unattended updater checks
+> stay visible, keyless plaintext remains refused by default, and Docker/home-network
+> nodes automatically try a Quick Tunnel before relay when direct reachability is
+> unavailable. This improves adoption without weakening IICP-CX.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
 > TCP transport on port 9484, upgrade to `^0.5.3`. Releases 0.5.0–0.5.2
@@ -282,13 +282,15 @@ The SDK tries each path in order and picks the best one for your network:
 | **1a** | Home router with UPnP, no CGNAT | Port-forward via UPnP → register WAN IP |
 | **1b** | CGNAT + IPv6 + AddPinhole works | Registers IPv6 with firewall rule |
 | **1c** | CGNAT + IPv6 + AddPinhole fails (e.g. FRITZ!Box error 606) | Registers IPv6 + logs guidance |
-| **3** | CGNAT + no usable IPv6 | Auto-elects relay from directory |
+| **3** | CGNAT + no usable IPv6 | Opens a Quick Tunnel if available → otherwise auto-elects relay |
 | **4** | Nothing worked | Serves locally with operator guidance |
 
 ### Environment-specific behaviour
 
 **Docker bridge (`-p 8020:8020`)** — UPnP is skipped (it would reach Docker NAT, not your
-home router). Set `IICP_PUBLIC_ENDPOINT` in `docker-compose.yml`:
+home router). The official image includes `cloudflared`, so without a public endpoint it
+tries a zero-account Quick Tunnel, then relay. For stable direct hosting, set
+`IICP_PUBLIC_ENDPOINT` in `docker-compose.yml`:
 
 ```yaml
 environment:
@@ -300,14 +302,17 @@ Or run with `--network host` to let UPnP work as on bare metal.
 
 **Kubernetes** — set `IICP_PUBLIC_ENDPOINT` to the LoadBalancer / NodePort IP.
 
-**CGNAT + no IPv6 → automatic relay:**
+**CGNAT + no IPv6 → Quick Tunnel, then relay:**
 
 ```
-[iicp-node] NAT tier=3: auto-electing relay from directory...
+[iicp-node] NAT tier=3: opening Quick Tunnel...
+[iicp-node] no tunnel available — auto-electing relay from directory...
 [iicp-node] auto-elected relay: relay.example.com:9485
 ```
 
-The node connects outbound to the elected relay and re-registers automatically.
+With `cloudflared` available, the node registers its own temporary HTTPS tunnel URL.
+If that is unavailable, the node connects outbound to the elected relay and re-registers
+automatically.
 To use a specific relay: `IICP_RELAY_WORKER_ENDPOINT=relay.example.com:9485`.
 
 ### Running a relay-capable node (relay operator)
@@ -329,6 +334,7 @@ const node = new IicpNode({
 ```bash
 IICP_AUTO_DETECT_NAT=false              # disable detection entirely
 IICP_PUBLIC_ENDPOINT=http://x.x.x.x:8020  # trust this endpoint
+IICP_TUNNEL=0                           # opt out of Quick Tunnel fallback
 IICP_RELAY_WORKER_ENDPOINT=host:9485    # specific relay instead of auto-elect
 ```
 

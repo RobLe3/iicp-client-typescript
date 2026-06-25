@@ -10,7 +10,11 @@
 # Required env vars:
 #   IICP_BACKEND_URL    — OpenAI-compatible backend (Ollama / vLLM / LM Studio)
 #   IICP_BACKEND_MODEL  — model name (e.g. qwen2.5:0.5b)
-#   IICP_PUBLIC_ENDPOINT — externally reachable URL of this node
+#
+# Optional:
+#   IICP_PUBLIC_ENDPOINT — externally reachable URL of this node. If omitted,
+#                          the node tries automatic reachability (Quick Tunnel
+#                          first, relay last-resort) before staying local.
 #
 # See https://iicp.network/docs/sdk-quickstart-docker for the full setup guide.
 
@@ -27,9 +31,23 @@ RUN npm run build
 
 FROM node:20-slim AS runtime
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+  && arch="$(dpkg --print-architecture)" \
+  && case "$arch" in \
+      amd64) cf_arch=amd64 ;; \
+      arm64) cf_arch=arm64 ;; \
+      *) echo "unsupported architecture for cloudflared: $arch" >&2; exit 1 ;; \
+    esac \
+  && curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" -o /usr/local/bin/cloudflared \
+  && chmod +x /usr/local/bin/cloudflared \
+  && cloudflared --version >/dev/null \
+  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY package.json ./
+RUN chmod +x /app/dist/cli.js && ln -sf /app/dist/cli.js /usr/local/bin/iicp-node
 EXPOSE 8020
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
   CMD node -e "require('http').get('http://localhost:8020/iicp/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
