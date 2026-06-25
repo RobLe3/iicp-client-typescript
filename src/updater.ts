@@ -8,6 +8,10 @@
  */
 
 const NPM_URL = "https://registry.npmjs.org/@iicp/client/latest";
+const DEFAULT_AUTO_UPDATE_INTERVAL_S = 3600;
+let sdkLatestSeen: string | null = null;
+let sdkUpdateLastCheckedAt: string | null = null;
+let sdkUpdateErrorClass: string | null = null;
 
 /** Parse a dotted version into a comparable tuple; truncate at the first
  * non-numeric segment ('1.2.3-rc1' → [1,2,3]). */
@@ -126,8 +130,8 @@ export function autoUpdateEnabled(): boolean {
   return !["0", "false", "no", "off"].includes(v);
 }
 
-/** Check cadence in ms (default 6h), floored at 5 min. */
-export function autoUpdateIntervalMs(defaultS = 21600): number {
+/** Check cadence in ms (default 1h), floored at 5 min. */
+export function autoUpdateIntervalMs(defaultS = DEFAULT_AUTO_UPDATE_INTERVAL_S): number {
   const n = parseInt(process.env.IICP_AUTO_UPDATE_INTERVAL_S ?? String(defaultS), 10);
   return (Number.isFinite(n) ? Math.max(300, n) : defaultS) * 1000;
 }
@@ -147,6 +151,9 @@ export async function autoUpdateTick(
   reexecFn: () => void,
   logFn: (m: string) => void,
 ): Promise<"disabled" | "unknown" | "current" | "upgraded" | "upgrade-failed"> {
+  sdkLatestSeen = latest;
+  sdkUpdateLastCheckedAt = new Date().toISOString();
+  sdkUpdateErrorClass = latest === null ? "latest_unknown" : null;
   if (!enabled) return "disabled";
   if (latest === null) return "unknown";
   if (!isOutdated(current, latest)) return "current";
@@ -158,4 +165,20 @@ export async function autoUpdateTick(
   }
   logFn("auto-update: upgrade failed; staying on current version, will retry next check");
   return "upgrade-failed";
+}
+
+export function recordUpdateCheck(latest: string | null, errorClass: string | null = null): void {
+  sdkLatestSeen = latest;
+  sdkUpdateLastCheckedAt = new Date().toISOString();
+  sdkUpdateErrorClass = errorClass;
+}
+
+export function autoUpdateStatusPayload(): Record<string, string | number | boolean | null> {
+  return {
+    auto_update_enabled: autoUpdateEnabled(),
+    auto_update_interval_s: Math.round(autoUpdateIntervalMs() / 1000),
+    sdk_latest_seen: sdkLatestSeen,
+    sdk_update_last_checked_at: sdkUpdateLastCheckedAt,
+    sdk_update_error_class: sdkUpdateErrorClass,
+  };
 }

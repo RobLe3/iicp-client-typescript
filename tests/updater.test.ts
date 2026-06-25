@@ -32,7 +32,7 @@ describe("checkUpdate", () => {
 });
 
 // ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
-import { autoUpdateEnabled, autoUpdateInitialDelayMs, autoUpdateIntervalMs, autoUpdateTick } from "../src/updater.js";
+import { autoUpdateEnabled, autoUpdateInitialDelayMs, autoUpdateIntervalMs, autoUpdateStatusPayload, autoUpdateTick, recordUpdateCheck } from "../src/updater.js";
 
 describe("autoUpdateTick (#521 P2)", () => {
   it("upgrades and re-execs when a newer release exists", async () => {
@@ -93,16 +93,37 @@ describe("autoUpdate env controls", () => {
     const oldValue = process.env.IICP_AUTO_UPDATE_INTERVAL_S;
     try {
       delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
-      assert.equal(autoUpdateIntervalMs(), 21_600_000);
+      assert.equal(autoUpdateIntervalMs(), 3_600_000);
       process.env.IICP_AUTO_UPDATE_INTERVAL_S = "42";
       assert.equal(autoUpdateIntervalMs(), 300_000);
       process.env.IICP_AUTO_UPDATE_INTERVAL_S = "900";
       assert.equal(autoUpdateIntervalMs(), 900_000);
       process.env.IICP_AUTO_UPDATE_INTERVAL_S = "not-a-number";
-      assert.equal(autoUpdateIntervalMs(), 21_600_000);
+      assert.equal(autoUpdateIntervalMs(), 3_600_000);
     } finally {
       if (oldValue === undefined) delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
       else process.env.IICP_AUTO_UPDATE_INTERVAL_S = oldValue;
+    }
+  });
+
+  it("exposes heartbeat-safe update status", () => {
+    const oldUpdate = process.env.IICP_AUTO_UPDATE;
+    const oldInterval = process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+    try {
+      delete process.env.IICP_AUTO_UPDATE;
+      delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+      recordUpdateCheck("0.7.67");
+      const payload = autoUpdateStatusPayload();
+      assert.equal(payload.auto_update_enabled, true);
+      assert.equal(payload.auto_update_interval_s, 3600);
+      assert.equal(payload.sdk_latest_seen, "0.7.67");
+      assert.ok(payload.sdk_update_last_checked_at);
+      assert.equal(payload.sdk_update_error_class, null);
+    } finally {
+      if (oldUpdate === undefined) delete process.env.IICP_AUTO_UPDATE;
+      else process.env.IICP_AUTO_UPDATE = oldUpdate;
+      if (oldInterval === undefined) delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+      else process.env.IICP_AUTO_UPDATE_INTERVAL_S = oldInterval;
     }
   });
 });

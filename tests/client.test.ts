@@ -116,7 +116,20 @@ describe("discover", () => {
       if (u.includes("/v1/discover")) {
         return jsonResponse({
           nodes: [
-            { node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu", health_label: "healthy", exposure_mode: "ipv4_public_direct", transport: ["https", "iicp-native"] },
+            {
+              node_id: "n1",
+              endpoint: "https://1.2.3.4:9484",
+              score: 0.95,
+              available: true,
+              region: "eu",
+              health_label: "healthy",
+              exposure_mode: "ipv4_public_direct",
+              transport: ["https", "iicp-native"],
+              directory_observed_reachable: true,
+              route_evidence: "directory_observed",
+              routing_hint: "https_direct",
+              browser_usable: true,
+            },
             { node_id: "n2", endpoint: "https://1.2.3.5:9484", score: 0.80, available: true, region: "us" },
           ],
         });
@@ -135,8 +148,49 @@ describe("discover", () => {
     assert.equal(nodes[0].exposure_mode, "ipv4_public_direct");
     // #397 — transport parsed from discover
     assert.deepEqual(nodes[0].transport, ["https", "iicp-native"]);
+    // Additive route-signal split parsed from discover
+    assert.equal(nodes[0].directory_observed_reachable, true);
+    assert.equal(nodes[0].route_evidence, "directory_observed");
+    assert.equal(nodes[0].routing_hint, "https_direct");
+    assert.equal(nodes[0].browser_usable, true);
     // absent against older directory → undefined, no break
     assert.equal(nodes[1].health_label, undefined);
+    restore();
+  });
+
+  it("browser_usable_only filters out HTTP IPv6 nodes", async () => {
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover")) {
+        return jsonResponse({
+          nodes: [
+            {
+              node_id: "n-ipv6",
+              endpoint: "http://[2a0a:a543:df54::8ae]:9484",
+              score: 0.9,
+              available: true,
+              region: "eu",
+              routing_hint: "http_ipv6",
+              browser_usable: false,
+            },
+            {
+              node_id: "n-https",
+              endpoint: "https://relay.example.com",
+              score: 0.8,
+              available: true,
+              region: "eu",
+              routing_hint: "relay_service",
+              browser_usable: true,
+            },
+          ],
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    const nodes = await client.discover("urn:iicp:intent:llm:chat:v1", { browser_usable_only: true });
+    assert.deepEqual(nodes.map((n) => n.node_id), ["n-https"]);
     restore();
   });
 
@@ -670,10 +724,10 @@ describe("ε-greedy provider selection (#486)", () => {
 
 // P0a (#360): mandatory encryption — no opt-out (parity with Python behaviour guards)
 describe("P0a mandatory encryption (#360)", () => {
-  function cxKey() {
+  function cxKey(keyId = "cx-1") {
     const { publicKey } = generateKeyPairSync("x25519");
     const x = (publicKey.export({ format: "jwk" }) as { x: string }).x;
-    return { algorithm: "X25519", key: x, key_id: "cx-1" };
+    return { algorithm: "X25519", key: x, key_id: keyId };
   }
   const OK_TASK = {
     task_id: "t", status: "success",
@@ -710,6 +764,32 @@ describe("P0a mandatory encryption (#360)", () => {
     await client.chat([{ role: "user", content: "secret" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
     restore();
     assert.ok(body && (body as Record<string, unknown>)["iicp_conf"], "must encrypt when directory exposes deprecated public_key alias");
+    assert.equal((body as Record<string, unknown>)["payload"], undefined, "plaintext payload must be absent");
+  });
+
+  it("prefers canonical cx_public_key when both key field names are present", async () => {
+    let body: Record<string, unknown> | null = null;
+    const restore = mockFetch((url, init) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover"))
+        return jsonResponse({ nodes: [{
+          node_id: "n1",
+          endpoint: "https://1.2.3.4:9484",
+          score: 0.95,
+          available: true,
+          region: "eu",
+          cx_public_key: cxKey("cx-canonical"),
+          public_key: cxKey("cx-alias"),
+        }] });
+      if (u.includes("/v1/task")) { body = JSON.parse(String(init?.body ?? "{}")); return jsonResponse(OK_TASK); }
+      return new Response("404", { status: 404 });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await client.chat([{ role: "user", content: "secret" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
+    restore();
+    const conf = (body as Record<string, unknown>)["iicp_conf"] as Record<string, unknown>;
+    assert.ok(conf, "must encrypt when both key names are present");
+    assert.equal(conf.recipient_key_id, "cx-canonical");
     assert.equal((body as Record<string, unknown>)["payload"], undefined, "plaintext payload must be absent");
   });
 

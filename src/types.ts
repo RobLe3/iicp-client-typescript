@@ -66,6 +66,8 @@ export interface DiscoverOptions {
   region?: string;
   qos?: string;
   min_reputation?: number;
+  /** Browser-like consumers: keep only HTTPS/loopback endpoints. Native default: false. */
+  browser_usable_only?: boolean;
 }
 
 export interface CxPublicKey {
@@ -91,6 +93,11 @@ export interface Node {
   cx_public_key?: CxPublicKey;
   // #397 — transport protocols the node speaks (e.g. ["https","iicp-native"]).
   transport?: string[];
+  // Additive routing-signal split from directory v1.10.50+.
+  directory_observed_reachable?: boolean | null;
+  route_evidence?: string;
+  routing_hint?: string;
+  browser_usable?: boolean;
 }
 
 export interface ChatMessage {

@@ -24,6 +24,7 @@ import type { CxPublicKey } from "./types.js";
 import { decryptPayload, loadOrCreateNodeCxKey } from "./confidentiality.js";
 import { verifyRelayBindTicket } from "./relay_ticket.js";
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
+import { autoUpdateStatusPayload } from "./updater.js";
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -598,6 +599,7 @@ export class IicpNode {
     // (Go / Java / C / WASM) can self-tag without a directory change.
     body.sdk_language = "typescript";
     body.sdk_version = SDK_VERSION;
+    Object.assign(body, autoUpdateStatusPayload());
     if (this._cxPublicKey) body.cx_public_key = this._cxPublicKey;
     if (this._cfg.backend) body.backend = this._cfg.backend;
     if (this._cfg.relayCapable) {
@@ -672,6 +674,7 @@ export class IicpNode {
       available: true,
       // Live capacity after availability shaping (ADR-006).
       max_concurrent: this._effectiveMaxConcurrent(),
+      ...autoUpdateStatusPayload(),
     };
     if (ok > 0 || fail > 0) {
       const metrics: Record<string, number> = { tasks_success: ok, tasks_failed: fail };

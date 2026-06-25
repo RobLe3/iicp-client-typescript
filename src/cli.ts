@@ -60,6 +60,71 @@ import {
 } from "./identity.js";
 import { issueDelegation, signRename } from "./delegation.js";
 
+type UpdaterModule = typeof import("./updater.js");
+
+export interface ProviderAutoUpdateOptions {
+  current?: string;
+  loadUpdater?: () => Promise<UpdaterModule>;
+  logFn?: (message: string) => void;
+}
+
+/**
+ * Start the default-on provider updater for long-running TS node processes.
+ *
+ * This is intentionally shared by normal `serve` and `mcp-gateway`: the updater
+ * must be a provider invariant, not a gateway-only feature. Timers are unref'd
+ * so they never keep a terminating process alive, and the returned stop handle
+ * lets tests/shutdown clear pending timers.
+ */
+export function startProviderAutoUpdate(options: ProviderAutoUpdateOptions = {}): () => void {
+  let stopped = false;
+  let firstTimer: ReturnType<typeof setTimeout> | null = null;
+  let intervalTimer: ReturnType<typeof setInterval> | null = null;
+  const current = options.current ?? SDK_VERSION;
+  const loadUpdater = options.loadUpdater ?? (() => import("./updater.js"));
+  const logFn = options.logFn ?? ((m: string) => console.log(`  [iicp-node] ${m}`));
+
+  void (async () => {
+    const u = await loadUpdater();
+    if (stopped || !u.autoUpdateEnabled()) return;
+    const tick = () => {
+      void (async () => {
+        try {
+          await u.autoUpdateTick(
+            current,
+            await u.latestNpmVersion(),
+            true,
+            () => u.performSelfUpdate(),
+            () => u.reexecCli(),
+            logFn,
+          );
+        } catch (err) {
+          u.recordUpdateCheck(null, err instanceof Error ? err.name : "Error");
+        }
+      })();
+    };
+    const intervalMs = u.autoUpdateIntervalMs();
+    const firstDelayMs = u.autoUpdateInitialDelayMs(intervalMs);
+    firstTimer = setTimeout(() => {
+      if (stopped) return;
+      tick();
+      intervalTimer = setInterval(tick, intervalMs);
+      intervalTimer.unref();
+    }, firstDelayMs);
+    firstTimer.unref();
+  })().catch((err) => {
+    if (!stopped) {
+      logFn(`auto-update: failed to start (${err instanceof Error ? err.name : "Error"})`);
+    }
+  });
+
+  return () => {
+    stopped = true;
+    if (firstTimer) clearTimeout(firstTimer);
+    if (intervalTimer) clearInterval(intervalTimer);
+  };
+}
+
 export interface ServeOpts {
   backendUrl: string;
   backendType: string;
@@ -1026,6 +1091,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
       `backend ${opts.backendUrl} (model=${opts.model}, max_concurrent=${opts.maxConcurrent})`,
   );
   writeNodeEvent(nodeId, "serve_start", `port=${opts.port} model=${opts.model} intent=${opts.intent}`, logDir);
+  const stopAutoUpdate = startProviderAutoUpdate();
   // serve() returns a stop() handle but never resolves on its own; we wait for
   // SIGINT/SIGTERM to terminate.
   if (tunnelHandle) {
@@ -1076,6 +1142,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
       }
       tunnelHandle?.close(); // #520 — tear the Quick Tunnel down with the node
       stop();
+      stopAutoUpdate();
       instanceLock.release(); // #405 — free the pidfile on shutdown
       resolve();
     };
@@ -2013,40 +2080,7 @@ async function runMcpGateway(argv: string[]): Promise<number> {
 
   const hbInterval = setInterval(() => { void doHeartbeat(); }, 30_000);
 
-  // #521 P2 — background self-updater. Default-on; IICP_AUTO_UPDATE=0 opts out. Once a
-  // node reaches the first release carrying this updater, every future release
-  // self-propagates (no manual upgrade by the operator). Loop-safe + failure-isolated.
-  void (async () => {
-    const u = await import("./updater.js");
-    if (!u.autoUpdateEnabled()) return;
-    const tick = () => {
-      void (async () => {
-        try {
-          await u.autoUpdateTick(
-            SDK_VERSION,
-            await u.latestNpmVersion(),
-            true,
-            () => u.performSelfUpdate(),
-            () => u.reexecCli(),
-            (m: string) => console.log(`  [iicp-node] ${m}`),
-          );
-        } catch { /* the updater must never take the node down */ }
-      })();
-    };
-    // First check soon after startup (≤5 min) so a freshly-published release propagates fast +
-    // observably, instead of waiting a full interval (default 6h); then the regular cadence.
-    const intervalMs = u.autoUpdateIntervalMs();
-    const firstDelayMs = u.autoUpdateInitialDelayMs(intervalMs);
-    const t0 = setTimeout(() => {
-      tick();
-      // Start the regular cadence only after the first check. Starting an
-      // interval at process launch makes the minimum 5-minute configuration
-      // fire both timeout and interval simultaneously.
-      const t = setInterval(tick, intervalMs);
-      t.unref();
-    }, firstDelayMs);
-    t0.unref(); // daemon timer — must not keep the process alive on its own
-  })();
+  const stopAutoUpdate = startProviderAutoUpdate();
 
   const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/iicp/health") {
@@ -2102,8 +2136,8 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   });
 
   await new Promise<void>((resolve) => {
-    process.on("SIGINT", () => { clearInterval(hbInterval); server.close(); resolve(); });
-    process.on("SIGTERM", () => { clearInterval(hbInterval); server.close(); resolve(); });
+    process.on("SIGINT", () => { clearInterval(hbInterval); stopAutoUpdate(); server.close(); resolve(); });
+    process.on("SIGTERM", () => { clearInterval(hbInterval); stopAutoUpdate(); server.close(); resolve(); });
   });
 
   return 0;

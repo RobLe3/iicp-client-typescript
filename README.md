@@ -23,10 +23,10 @@ npm install @iicp/client@latest
 # pnpm add @iicp/client@latest
 ```
 
-> **Upgrade note (0.7.65)** — upgrade clients and nodes so discovery prefers the canonical
-> IICP-CX `cx_public_key` field while still accepting the temporary `public_key` alias.
-> This prevents keyed live nodes from being treated as plaintext-only during the migration
-> and prepares your install for the later removal of the ambiguous alias.
+> **Upgrade note (0.7.67)** — upgrade provider nodes so unattended updater checks
+> run hourly by default in normal `iicp-node serve` processes and report updater
+> evidence to the directory. This helps the mesh route away from stuck downlevel
+> or non-key-ready nodes without weakening IICP-CX requirements.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
 > TCP transport on port 9484, upgrade to `^0.5.3`. Releases 0.5.0–0.5.2

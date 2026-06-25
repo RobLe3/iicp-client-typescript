@@ -66,6 +66,17 @@ function _isSsrfSafe(url: string): boolean {
   return true;
 }
 
+function _isBrowserUsableEndpoint(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:") return true;
+    if (parsed.protocol !== "http:") return false;
+    return ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 const DEFAULT_EPSILON = 0.05;
 const DEFAULT_ROUTING_TOP_K = 3;
 const DEFAULT_ROUTING_SOFTMAX_TAU = 0.04;
@@ -191,6 +202,12 @@ export class IicpClient {
         );
         continue;
       }
+      const browserUsable = typeof node.browser_usable === "boolean"
+        ? node.browser_usable
+        : undefined;
+      if (o.browser_usable_only && !(browserUsable ?? _isBrowserUsableEndpoint(endpoint))) {
+        continue;
+      }
       // Directory discover now treats `cx_public_key` as canonical;
       // `public_key` is accepted only as a deprecated compatibility alias.
       // Accept both so live keyed nodes do not get treated as plaintext-only.
@@ -213,6 +230,15 @@ export class IicpClient {
         transport: Array.isArray(node.transport)
           ? (node.transport as unknown[]).map(String)
           : undefined,
+        directory_observed_reachable:
+          typeof node.directory_observed_reachable === "boolean"
+            ? node.directory_observed_reachable
+            : node.directory_observed_reachable === null
+              ? null
+              : undefined,
+        route_evidence: typeof node.route_evidence === "string" ? node.route_evidence : undefined,
+        routing_hint: typeof node.routing_hint === "string" ? node.routing_hint : undefined,
+        browser_usable: browserUsable,
       });
     }
     return nodes;

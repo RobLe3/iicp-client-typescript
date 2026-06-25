@@ -9,7 +9,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applySavedNode, type ServeOpts } from "../src/cli.js";
+import { applySavedNode, startProviderAutoUpdate, type ServeOpts } from "../src/cli.js";
 import type { NodeIdentity } from "../src/identity.js";
 
 function baseOpts(overrides: Partial<ServeOpts> = {}): ServeOpts {
@@ -72,5 +72,60 @@ describe("#410 backend_url precedence (applySavedNode)", () => {
   it("localhost:11434 is the final fallback when neither flag nor saved set it", () => {
     const out = applySavedNode(baseOpts({ backendUrl: "" }), savedNode({ backend_url: "" }));
     assert.equal(out.backendUrl, "http://localhost:11434");
+  });
+});
+
+describe("provider auto-update loop", () => {
+  it("starts for long-running provider processes and runs the shared updater tick", async () => {
+    let stop: (() => void) | null = null;
+    const ticked = new Promise<void>((resolve) => {
+      stop = startProviderAutoUpdate({
+        current: "0.7.66",
+        logFn: () => undefined,
+        loadUpdater: async () => ({
+          autoUpdateEnabled: () => true,
+          autoUpdateIntervalMs: () => 300_000,
+          autoUpdateInitialDelayMs: () => 0,
+          latestNpmVersion: async () => "0.7.67",
+          performSelfUpdate: () => true,
+          reexecCli: () => undefined,
+          recordUpdateCheck: () => undefined,
+          autoUpdateTick: async (current: string, latest: string | null) => {
+            assert.equal(current, "0.7.66");
+            assert.equal(latest, "0.7.67");
+            resolve();
+            return "current";
+          },
+        } as never),
+      });
+    });
+
+    await ticked;
+    stop?.();
+  });
+
+  it("respects IICP_AUTO_UPDATE opt-out before scheduling ticks", async () => {
+    let ticked = false;
+    const stop = startProviderAutoUpdate({
+      current: "0.7.66",
+      logFn: () => undefined,
+      loadUpdater: async () => ({
+        autoUpdateEnabled: () => false,
+        autoUpdateIntervalMs: () => 300_000,
+        autoUpdateInitialDelayMs: () => 0,
+        latestNpmVersion: async () => "0.7.67",
+        performSelfUpdate: () => true,
+        reexecCli: () => undefined,
+        recordUpdateCheck: () => undefined,
+        autoUpdateTick: async () => {
+          ticked = true;
+          return "current";
+        },
+      } as never),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    stop();
+    assert.equal(ticked, false);
   });
 });
