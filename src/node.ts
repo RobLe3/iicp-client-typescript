@@ -331,6 +331,8 @@ export class IicpNode {
   private _livenessChallenge: string | null = null;
   /** BUG-5: token stashed by register() so deregister()/heartbeat don't need it re-passed. */
   private _runtimeToken: string = "";
+  /** Runtime public reachability gate. Quick Tunnel recovery sets this false while stale/rebuilding. */
+  private _runtimeAvailable = true;
   /** #343 — UPnP IPv6 pinhole UID captured by applyNatProfile, revoked on shutdown. */
   private _pinholeUid: number | null = null;
   private _pinholeLeaseSeconds = 3600;
@@ -547,6 +549,10 @@ export class IicpNode {
     if (token) this._runtimeToken = token;
   }
 
+  setRuntimeAvailable(available: boolean): void {
+    this._runtimeAvailable = available;
+  }
+
   async register(): Promise<string> {
     // spec/iicp-dir.md §3.1 REGISTER + v0.7.0 dual-endpoint extension.
     // Pre-iter-1412 sent a non-spec flat-`intent` shape that the production
@@ -662,16 +668,17 @@ export class IicpNode {
     this._tasksFailedPending = 0;
     this._tasksLatencyTotalMsPending = 0;
 
+    const publicAvailable = this._runtimeAvailable;
     const payload: Record<string, unknown> = {
       node_id: this._cfg.nodeId,
       node_token: nodeToken,
-      status: "available",
+      status: publicAvailable ? "available" : "recovering",
       // Explicit availability boolean. The directory keys discover eligibility off
       // `available` (not the `status` string); sending it lets a node that briefly
       // went dormant (host sleep) be restored on the very next beat — robust even
       // against directory builds older than v1.10.17 whose heartbeat handler
       // defaulted to the stored (possibly false) value.
-      available: true,
+      available: publicAvailable,
       // Live capacity after availability shaping (ADR-006).
       max_concurrent: this._effectiveMaxConcurrent(),
       ...autoUpdateStatusPayload(),

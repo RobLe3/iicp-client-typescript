@@ -365,6 +365,31 @@ describe("heartbeat self-heal (#404)", () => {
       await new Promise<void>((r) => dir.close(() => r()));
     }
   });
+
+  it("sends available:false while tunnel recovery is active", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const dir = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        captured = JSON.parse(Buffer.concat(chunks).toString() || "{}");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => dir.listen(port, "127.0.0.1", () => r()));
+    try {
+      const node = new IicpNode({ ...cfg(), directoryUrl: `http://127.0.0.1:${port}` } as NodeConfig);
+      node.setRuntimeAvailable(false);
+      await (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat("tok");
+      assert.ok(captured, "directory must have received a heartbeat");
+      assert.equal((captured as Record<string, unknown>).available, false);
+      assert.equal((captured as Record<string, unknown>).status, "recovering");
+    } finally {
+      await new Promise<void>((r) => dir.close(() => r()));
+    }
+  });
 });
 
 // ── #494 — health_models heartbeat reporting ─────────────────────────────────

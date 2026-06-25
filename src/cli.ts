@@ -1166,7 +1166,8 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // SIGINT/SIGTERM to terminate.
   if (tunnelHandle) {
     // The endpoint was already the tunnel URL at construction; mark the
-    // transport and arm the watchdog (URL rotates per process → re-register).
+    // transport and arm the elastic watchdog (URL rotates per process → verify
+    // public health, then re-register; twilight/recovery heartbeats are unavailable).
     (node["_cfg"] as Record<string, unknown>).transportMethod = "external_tunnel";
     tunnelHandle.watch(
       (url) => {
@@ -1184,6 +1185,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
           "[iicp-node] Quick Tunnel permanently down — this node is no longer " +
             "publicly reachable. Restart `iicp-node serve` to recover.",
         );
+      },
+      {
+        elastic: true,
+        onState: (state) => {
+          node.setRuntimeAvailable(state === "ready");
+          // eslint-disable-next-line no-console
+          console.log(`[iicp-node] Quick Tunnel state: ${state}`);
+        },
       },
     );
   }

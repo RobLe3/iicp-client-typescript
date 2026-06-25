@@ -37,7 +37,18 @@ export const MAX_RESPAWNS = 3;
  * force a tunnel restart (kill → exit hook respawns → new URL → re-register).
  */
 export const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
-export const TUNNEL_HEALTH_MAX_FAILS = 3;
+export const TUNNEL_HEALTH_MAX_FAILS = 2;
+export const TUNNEL_VERIFY_TIMEOUT_MS = 30_000;
+
+export type TunnelState = "ready" | "twilight" | "recovering" | "dead";
+
+export interface TunnelWatchOptions {
+  elastic?: boolean;
+  onState?: (state: TunnelState) => void;
+  probe?: (url: string) => Promise<boolean>;
+  healthIntervalMs?: number;
+  verifyTimeoutMs?: number;
+}
 
 /**
  * GET `<url>/iicp/health` through the Cloudflare edge back to the local node — the same
@@ -55,6 +66,19 @@ async function tunnelUrlReachable(url: string): Promise<boolean> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function waitUntilReachable(
+  url: string,
+  probe: (url: string) => Promise<boolean>,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (await probe(url)) return true;
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+  return false;
 }
 
 export const INSTALL_HINT =
@@ -110,26 +134,39 @@ export class QuickTunnel {
    * `onNewUrl(newUrl)` — Quick Tunnel URLs rotate per process, so the caller
    * MUST re-register. After MAX_RESPAWNS, `onDead()` fires once.
    */
-  watch(onNewUrl: (url: string) => void, onDead: () => void): void {
+  watch(onNewUrl: (url: string) => void, onDead: () => void, options: TunnelWatchOptions = {}): void {
     // #538 — edge-drop detection: cloudflared can stay alive while its tunnel becomes
     // unreachable. Probe the public URL; on sustained failure, kill the child so the
     // exit hook respawns it. A healthy probe resets the respawn count so a long-running
     // relay heals indefinitely.
     let healthFails = 0;
+    let state: TunnelState = "ready";
+    const probe = options.probe ?? tunnelUrlReachable;
+    const healthIntervalMs = options.healthIntervalMs ?? TUNNEL_HEALTH_INTERVAL_MS;
+    const verifyTimeoutMs = options.verifyTimeoutMs ?? TUNNEL_VERIFY_TIMEOUT_MS;
+    const setState = (next: TunnelState) => {
+      if (state === next) return;
+      state = next;
+      options.onState?.(next);
+    };
+    options.onState?.(state);
     const healthTimer = setInterval(() => {
       if (this._closed) return;
       if (this.process.exitCode !== null || this.process.killed) return; // exit hook owns this
       void (async () => {
-        if (await tunnelUrlReachable(this.url)) {
+        if (await probe(this.url)) {
           healthFails = 0;
           this._respawns = 0;
+          setState("ready");
         } else {
           healthFails += 1;
+          setState("twilight");
           if (healthFails >= TUNNEL_HEALTH_MAX_FAILS) {
             console.warn(
               `[quick-tunnel] ${this.url} unreachable ${healthFails}× while cloudflared is up ` +
-                "(edge dropped) — restarting tunnel.",
+                "(twilight) — rebuilding tunnel.",
             );
+            setState("recovering");
             healthFails = 0;
             if (this.process.exitCode === null && !this.process.killed) {
               this.process.kill("SIGTERM"); // → once("exit") → respawn below
@@ -137,7 +174,7 @@ export class QuickTunnel {
           }
         }
       })();
-    }, TUNNEL_HEALTH_INTERVAL_MS);
+    }, healthIntervalMs);
     // Don't let the watchdog timer keep a one-shot/test process alive.
     healthTimer.unref?.();
     this._healthTimer = healthTimer;
@@ -146,6 +183,7 @@ export class QuickTunnel {
       proc.once("exit", () => {
         if (this._closed) return;
         void (async () => {
+          setState("recovering");
           this._respawns += 1;
           if (this._respawns > MAX_RESPAWNS) {
             console.error(
@@ -153,6 +191,7 @@ export class QuickTunnel {
                 "a healthy tunnel — giving up. Node is no longer publicly reachable; restart " +
                 "`iicp-node serve` to recover.",
             );
+            setState("dead");
             onDead();
             return;
           }
@@ -166,6 +205,7 @@ export class QuickTunnel {
             console.error(
               `[quick-tunnel] respawn failed: ${exc instanceof Error ? exc.message : exc}`,
             );
+            setState("dead");
             onDead();
             return;
           }
@@ -173,9 +213,22 @@ export class QuickTunnel {
           process.removeListener("exit", fresh._exitHook);
           this.process = fresh.process;
           this.url = fresh.url;
-          console.log(`[quick-tunnel] back up at ${this.url} — re-registering.`);
           arm(this.process);
-          onNewUrl(this.url);
+          if (options.elastic) {
+            console.log(`[quick-tunnel] candidate tunnel up at ${this.url}; verifying public health…`);
+            if (await waitUntilReachable(this.url, probe, verifyTimeoutMs)) {
+              this._respawns = 0;
+              setState("ready");
+              console.log(`[quick-tunnel] verified at ${this.url} — re-registering.`);
+              onNewUrl(this.url);
+            } else {
+              console.warn(`[quick-tunnel] candidate ${this.url} stayed unreachable — rebuilding.`);
+              if (this.process.exitCode === null && !this.process.killed) this.process.kill("SIGTERM");
+            }
+          } else {
+            console.log(`[quick-tunnel] back up at ${this.url} — re-registering.`);
+            onNewUrl(this.url);
+          }
         })();
       });
     };

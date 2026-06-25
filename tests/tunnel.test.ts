@@ -12,6 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   INSTALL_HINT,
+  type TunnelState,
   cloudflaredPath,
   openQuickTunnel,
 } from "../src/tunnel.js";
@@ -113,5 +114,29 @@ describe("supervision", () => {
     t.close();
     await new Promise((r) => setTimeout(r, 500));
     assert.equal(fired, false);
+  });
+
+  it("elastic watchdog marks twilight then rebuilds after public health recovers", async () => {
+    const t = await openQuickTunnel(9484, 10_000, fakeBin({ name: "elastic", lifetimeMs: 60_000 }));
+    let calls = 0;
+    const states: TunnelState[] = [];
+    const newUrl = new Promise<string>((resolve) => {
+      t.watch(resolve, () => {}, {
+        elastic: true,
+        onState: (state) => states.push(state),
+        probe: async () => {
+          calls += 1;
+          return calls >= 3;
+        },
+        healthIntervalMs: 20,
+        verifyTimeoutMs: 2_000,
+      });
+    });
+    const url = await newUrl;
+    assert.equal(url, "https://elastic.trycloudflare.com");
+    assert.ok(states.includes("twilight"), states.join(","));
+    assert.ok(states.includes("recovering"), states.join(","));
+    assert.ok(states.includes("ready"), states.join(","));
+    t.close();
   });
 });
