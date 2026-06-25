@@ -10,18 +10,33 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { generateKeyPairSync } from "node:crypto";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+function mockCxKey() {
+  const { publicKey } = generateKeyPairSync("x25519");
+  const x = (publicKey.export({ format: "jwk" }) as { x: string }).x;
+  return { algorithm: "X25519", encoding: "base64url", key: x, key_id: "cx-proxy-e2e" };
+}
+
 function startMock(): Promise<{ server: Server; port: number }> {
   return new Promise((resolve) => {
+    const cxPublicKey = mockCxKey();
     const server = createServer((req, res) => {
       const path = (req.url ?? "/").split("?")[0];
       const port = (server.address() as AddressInfo).port;
       if (req.method === "GET" && path === "/api/v1/discover") {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({
-          nodes: [{ node_id: "mock-node-1", endpoint: `http://127.0.0.1:${port}`, region: "test", score: 1.0, available: true }],
+          nodes: [{
+            node_id: "mock-node-1",
+            endpoint: `http://127.0.0.1:${port}`,
+            region: "test",
+            score: 1.0,
+            available: true,
+            cx_public_key: cxPublicKey,
+          }],
           count: 1,
           query_ms: 1,
         }));

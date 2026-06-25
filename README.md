@@ -23,7 +23,7 @@ npm install @iicp/client@latest
 # pnpm add @iicp/client@latest
 ```
 
-> **Upgrade note (0.7.67)** — upgrade provider nodes so unattended updater checks
+> **Upgrade note (0.7.68)** — upgrade provider nodes so unattended updater checks
 > run hourly by default in normal `iicp-node serve` processes and report updater
 > evidence to the directory. This helps the mesh route away from stuck downlevel
 > or non-key-ready nodes without weakening IICP-CX requirements.

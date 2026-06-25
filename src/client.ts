@@ -66,6 +66,14 @@ function _isSsrfSafe(url: string): boolean {
   return true;
 }
 
+function _cxPlaintextFallbackAllowed(): boolean {
+  return ["1", "true", "yes", "on"].includes((process.env.IICP_CX_ALLOW_PLAINTEXT ?? "").trim().toLowerCase());
+}
+
+function _nodeShortId(nodeId: string): string {
+  return nodeId.slice(0, 8);
+}
+
 function _isBrowserUsableEndpoint(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -267,7 +275,25 @@ export class IicpClient {
     }
 
     const taskId = req.task_id ?? randomUUID();
-    const candidates = this._selectCandidates(nodes, MAX_RETRIES);
+    const allowPlaintext = _cxPlaintextFallbackAllowed();
+    let skippedKeyless = 0;
+    const confidentialityCapable = nodes.filter((node) => {
+      if (node.cx_public_key || allowPlaintext) return true;
+      skippedKeyless += 1;
+      console.warn(
+        `IICP-CX: skipping keyless node ${_nodeShortId(node.node_id)} — refusing plaintext by default ` +
+          "(set IICP_CX_ALLOW_PLAINTEXT=1 only for transitional debugging).",
+      );
+      return false;
+    });
+    if (confidentialityCapable.length === 0 && skippedKeyless > 0) {
+      throw new IicpError(
+        `IICP-CX confidentiality required: ${skippedKeyless} discovered node(s) advertised no encryption key; refusing plaintext fallback`,
+        "IICP-CX-REQUIRED",
+        { component: "sdk" },
+      );
+    }
+    const candidates = this._selectCandidates(confidentialityCapable, MAX_RETRIES);
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (req.auth?.token) {
@@ -285,10 +311,9 @@ export class IicpClient {
         nodeHeaders["X-IICP-Consumer-Token"] = ct;
       }
 
-      // IICP-CX S.16: encryption is MANDATORY (privacy-first #360) — no opt-out.
-      // Always encrypt when the node advertises a cx_public_key. During the migration
-      // window (#532) a node with no key yet gets a loud warning + plaintext; fail-closed
-      // at P0b once the mesh is key-ready. use_confidentiality no longer gates this.
+      // IICP-CX S.16: encryption is mandatory by default. Always encrypt when
+      // the node advertises a cx_public_key. Plaintext fallback is refused unless
+      // the caller explicitly sets IICP_CX_ALLOW_PLAINTEXT=1 for transitional debugging.
       const body: Record<string, unknown> = {
         task_id: taskId,
         intent: req.intent,
@@ -298,8 +323,8 @@ export class IicpClient {
         body["iicp_conf"] = encryptPayload(req.payload, node.cx_public_key, taskId, req.intent);
       } else {
         console.warn(
-          `IICP-CX: node ${node.node_id} advertises no encryption key — sending UNENCRYPTED. ` +
-            "This is transitional; it will be refused once the mesh is key-ready.",
+          `IICP-CX: node ${node.node_id} advertises no encryption key — sending UNENCRYPTED ` +
+            "only because IICP_CX_ALLOW_PLAINTEXT=1 is set.",
         );
         body["payload"] = req.payload;
       }

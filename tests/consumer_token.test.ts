@@ -28,6 +28,15 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+function cxKey(keyId = "cx-fixture") {
+  return {
+    algorithm: "X25519",
+    encoding: "base64url",
+    key: "-LKZgrZEnFMr9ctB3uQDKsME07ZzS4Ce-SapFAePul0",
+    key_id: keyId,
+  };
+}
+
 describe("consumer token acquisition (#496)", () => {
   it("sends X-IICP-Consumer-Token when node_token is configured", async () => {
     const capturedHeaders: Record<string, string>[] = [];
@@ -40,7 +49,7 @@ describe("consumer token acquisition (#496)", () => {
       }
       if (u.includes("/api/v1/discover")) {
         return json({
-          nodes: [{ node_id: "node-abc", endpoint: "https://node.example.com", score: 1 }],
+          nodes: [{ node_id: "node-abc", endpoint: "https://node.example.com", score: 1, available: true, region: "eu", cx_public_key: cxKey("cx-abc") }],
         });
       }
       // task call — capture headers
@@ -77,7 +86,7 @@ describe("consumer token acquisition (#496)", () => {
       const u = typeof url === "string" ? url : url.toString();
       if (u.includes("/api/v1/discover")) {
         return json({
-          nodes: [{ node_id: "node-xyz", endpoint: "https://node.example.com", score: 1 }],
+          nodes: [{ node_id: "node-xyz", endpoint: "https://node.example.com", score: 1, available: true, region: "eu", cx_public_key: cxKey("cx-xyz") }],
         });
       }
       capturedHeaders.push(Object.fromEntries(new Headers(init?.headers).entries()));
@@ -118,7 +127,7 @@ describe("consumer token acquisition (#496)", () => {
       }
       if (u.includes("/api/v1/discover")) {
         return json({
-          nodes: [{ node_id: "node-cache", endpoint: "https://node.example.com", score: 1 }],
+          nodes: [{ node_id: "node-cache", endpoint: "https://node.example.com", score: 1, available: true, region: "eu", cx_public_key: cxKey("cx-cache") }],
         });
       }
       return json({ status: "success", result: {} });

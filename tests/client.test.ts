@@ -31,6 +31,15 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function fixtureCxKey(keyId = "cx-fixture") {
+  return {
+    algorithm: "X25519",
+    encoding: "base64url",
+    key: "-LKZgrZEnFMr9ctB3uQDKsME07ZzS4Ce-SapFAePul0",
+    key_id: keyId,
+  };
+}
+
 // SDK-04: construction rejects timeout_ms > 120000
 describe("IicpClient construction", () => {
   it("accepts valid config", () => {
@@ -86,7 +95,7 @@ describe("intent validation", () => {
       const u = url.toString();
       if (u.includes("discover")) {
         return jsonResponse({
-          nodes: [{ node_id: "abc", endpoint: "http://1.2.3.4:8080", score: 0.9, available: true, region: "eu" }],
+          nodes: [{ node_id: "abc", endpoint: "http://1.2.3.4:8080", score: 0.9, available: true, region: "eu", cx_public_key: fixtureCxKey() }],
         });
       }
       // Chat node endpoint returns 503 — causes an error, but NOT SDK-02
@@ -268,7 +277,7 @@ describe("submit", () => {
     const restore = mockFetch((url, init) => {
       const u = url.toString();
       if (u.includes("discover")) {
-        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://1.2.3.4:8080", score: 1, available: true, region: "eu" }] });
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://1.2.3.4:8080", score: 1, available: true, region: "eu", cx_public_key: fixtureCxKey() }] });
       }
       capturedHeaders = Object.fromEntries(new Headers(init?.headers).entries());
       return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
@@ -577,7 +586,7 @@ describe("SDK-06 traceparent", () => {
       const headers = Object.fromEntries(new Headers(init?.headers).entries());
       captured.push(headers["traceparent"] ?? "");
       if (u.includes("discover")) {
-        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://1.2.3.4:8080", score: 1, available: true, region: "eu" }] });
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "http://1.2.3.4:8080", score: 1, available: true, region: "eu", cx_public_key: fixtureCxKey() }] });
       }
       return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
     });
@@ -654,6 +663,7 @@ const multiNodes = MULTI_NODE_IPS.map((ip, i) => ({
   score: parseFloat((1.0 - i * 0.1).toFixed(1)),
   available: true,
   region: "eu-west",
+  cx_public_key: fixtureCxKey(`cx-${i + 1}`),
 }));
 
 describe("ε-greedy provider selection (#486)", () => {
@@ -793,7 +803,55 @@ describe("P0a mandatory encryption (#360)", () => {
     assert.equal((body as Record<string, unknown>)["payload"], undefined, "plaintext payload must be absent");
   });
 
-  it("no key → transitional plaintext", async () => {
+  it("skips keyless node and uses keyed candidate", async () => {
+    let keylessCalls = 0;
+    let keyedBody: Record<string, unknown> | null = null;
+    const restore = mockFetch((url, init) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover")) {
+        return jsonResponse({ nodes: [
+          { node_id: "keyless", endpoint: "https://1.2.3.4:9484", score: 0.99, available: true, region: "eu" },
+          { node_id: "keyed", endpoint: "https://5.6.7.8:9484", score: 0.50, available: true, region: "eu", cx_public_key: cxKey("cx-keyed") },
+        ] });
+      }
+      if (u.includes("1.2.3.4")) { keylessCalls += 1; return jsonResponse({ message: "should not be called" }, 500); }
+      if (u.includes("5.6.7.8")) { keyedBody = JSON.parse(String(init?.body ?? "{}")); return jsonResponse(OK_TASK); }
+      return new Response("404", { status: 404 });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test", routing_epsilon: 0.0 });
+    await client.chat([{ role: "user", content: "secret" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
+    restore();
+    assert.equal(keylessCalls, 0, "keyless node must be skipped");
+    assert.ok(keyedBody && keyedBody["iicp_conf"], "keyed candidate must receive encrypted payload");
+    assert.equal(((keyedBody as Record<string, unknown>)["iicp_conf"] as Record<string, unknown>).recipient_key_id, "cx-keyed");
+    assert.equal((keyedBody as Record<string, unknown>)["payload"], undefined);
+  });
+
+  it("no key → refused by default", async () => {
+    let taskCalls = 0;
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("/v1/discover"))
+        return jsonResponse({ nodes: [{ node_id: "n1", endpoint: "https://1.2.3.4:9484", score: 0.95, available: true, region: "eu" }] });
+      if (u.includes("/v1/task")) { taskCalls += 1; return jsonResponse(OK_TASK); }
+      return new Response("404", { status: 404 });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await assert.rejects(
+      () => client.chat([{ role: "user", content: "hi" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" }),
+      (err: unknown) => {
+        assert.ok(err instanceof IicpError);
+        assert.equal(err.code, "IICP-CX-REQUIRED");
+        return true;
+      },
+    );
+    restore();
+    assert.equal(taskCalls, 0, "keyless node must not receive plaintext by default");
+  });
+
+  it("no key plaintext requires explicit env opt-in", async () => {
+    const orig = process.env.IICP_CX_ALLOW_PLAINTEXT;
+    process.env.IICP_CX_ALLOW_PLAINTEXT = "1";
     let body: Record<string, unknown> | null = null;
     const restore = mockFetch((url, init) => {
       const u = url.toString();
@@ -805,7 +863,9 @@ describe("P0a mandatory encryption (#360)", () => {
     const client = new IicpClient({ directory_url: "https://fake-dir.test" });
     await client.chat([{ role: "user", content: "hi" }], { intent: "urn:iicp:intent:llm:chat:v1", model: "m" });
     restore();
-    assert.ok(body && (body as Record<string, unknown>)["payload"], "plaintext payload present");
+    if (orig === undefined) delete process.env.IICP_CX_ALLOW_PLAINTEXT;
+    else process.env.IICP_CX_ALLOW_PLAINTEXT = orig;
+    assert.ok(body && (body as Record<string, unknown>)["payload"], "plaintext payload present only after opt-in");
     assert.equal((body as Record<string, unknown>)["iicp_conf"], undefined);
   });
 });

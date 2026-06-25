@@ -112,11 +112,11 @@ describe("autoUpdate env controls", () => {
     try {
       delete process.env.IICP_AUTO_UPDATE;
       delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
-      recordUpdateCheck("0.7.67");
+      recordUpdateCheck("0.7.68");
       const payload = autoUpdateStatusPayload();
       assert.equal(payload.auto_update_enabled, true);
       assert.equal(payload.auto_update_interval_s, 3600);
-      assert.equal(payload.sdk_latest_seen, "0.7.67");
+      assert.equal(payload.sdk_latest_seen, "0.7.68");
       assert.ok(payload.sdk_update_last_checked_at);
       assert.equal(payload.sdk_update_error_class, null);
     } finally {
