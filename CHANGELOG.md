@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
 in the main repo).
 
+## [0.7.72] — 2026-06-26
+
+### Fixed — Quick Tunnel DNS-lag stability
+- Quick Tunnel verification now avoids destructive tunnel rotation when local
+  DNS has not resolved a freshly-created `trycloudflare.com` hostname yet but
+  Cloudflare DoH already publishes the A/AAAA record.
+- Startup errors now include the last Cloudflare output line, making rate-limit
+  responses such as HTTP 429 visible in operator logs.
+
 ## [0.7.71] — 2026-06-26
 
 ### Fixed — supervised Quick Tunnel dead-state recovery

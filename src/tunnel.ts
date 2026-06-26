@@ -39,6 +39,7 @@ export const MAX_RESPAWNS = 3;
 export const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 export const TUNNEL_HEALTH_MAX_FAILS = 2;
 export const TUNNEL_VERIFY_TIMEOUT_MS = 30_000;
+export const TUNNEL_DOH_TIMEOUT_MS = 5_000;
 export const TUNNEL_DEAD_RETRY_INITIAL_MS = 30_000;
 export const TUNNEL_DEAD_RETRY_MAX_MS = 300_000;
 
@@ -55,10 +56,60 @@ export interface TunnelWatchOptions {
   deadRetryDelayMs?: (attempt: number) => number;
 }
 
+function trycloudflareHost(url: string): string | null {
+  if (!url.trim().startsWith("https://")) return null;
+  const host = url.trim().slice("https://".length).split("/")[0];
+  if (!host.endsWith(".trycloudflare.com")) return null;
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  return host;
+}
+
+function isLikelyDnsError(exc: unknown): boolean {
+  const anyExc = exc as { message?: string; cause?: { code?: string; message?: string } };
+  const code = anyExc?.cause?.code;
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return true;
+  const msg = `${anyExc?.message ?? String(exc)} ${anyExc?.cause?.message ?? ""}`.toLowerCase();
+  return (
+    msg.includes("dns") ||
+    msg.includes("failed to lookup address") ||
+    msg.includes("nodename nor servname") ||
+    msg.includes("name or service not known") ||
+    msg.includes("temporary failure in name resolution") ||
+    msg.includes("enotfound") ||
+    msg.includes("eai_again")
+  );
+}
+
+async function dohHasAnswer(host: string, recordType: "A" | "AAAA"): Promise<boolean> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TUNNEL_DOH_TIMEOUT_MS);
+  try {
+    const resp = await fetch(
+      `https://cloudflare-dns.com/dns-query?name=${host}&type=${recordType}`,
+      { headers: { accept: "application/dns-json" }, signal: ctrl.signal },
+    );
+    if (!resp.ok) return false;
+    const body = (await resp.json()) as { Status?: number; Answer?: unknown[] };
+    return body.Status === 0 && Array.isArray(body.Answer) && body.Answer.length > 0;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function trycloudflarePublishedViaDoh(url: string): Promise<boolean> {
+  const host = trycloudflareHost(url);
+  if (!host) return false;
+  return (await dohHasAnswer(host, "A")) || (await dohHasAnswer(host, "AAAA"));
+}
+
 /**
  * GET `<url>/iicp/health` through the Cloudflare edge back to the local node — the same
  * path a browser consumer takes — so it detects an edge-drop, not just a local-process
- * death. Any error / non-2xx → unreachable (a failed probe).
+ * death. Local resolvers can lag freshly-created accountless `trycloudflare.com`
+ * records; if local DNS fails but Cloudflare DoH already publishes the hostname, keep
+ * the tunnel alive so we do not create→verify→kill-loop fresh public URLs.
  */
 async function tunnelUrlReachable(url: string): Promise<boolean> {
   const ctrl = new AbortController();
@@ -66,7 +117,14 @@ async function tunnelUrlReachable(url: string): Promise<boolean> {
   try {
     const resp = await fetch(`${url.replace(/\/$/, "")}/iicp/health`, { signal: ctrl.signal });
     return resp.ok;
-  } catch {
+  } catch (exc) {
+    if (isLikelyDnsError(exc) && (await trycloudflarePublishedViaDoh(url))) {
+      console.warn(
+        `[quick-tunnel] local DNS has not resolved ${url} yet, but Cloudflare DoH ` +
+          "already publishes it — keeping tunnel alive.",
+      );
+      return true;
+    }
     return false;
   } finally {
     clearTimeout(timer);
@@ -299,16 +357,22 @@ export function openQuickTunnel(
       stdio: ["ignore", "pipe", "pipe"],
     });
     let settled = false;
+    const lastLines: string[] = [];
+    const errorWithOutput = (reason: string) =>
+      lastLines.length ? `${reason}; last cloudflared output: ${lastLines.join(" | ")}` : reason;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       proc.kill("SIGTERM");
-      reject(new Error(`cloudflared produced no tunnel URL within ${timeoutMs / 1000}s`));
+      reject(new Error(errorWithOutput(`cloudflared produced no tunnel URL within ${timeoutMs / 1000}s`)));
     }, timeoutMs);
 
     const onChunk = (chunk: Buffer) => {
       if (settled) return; // keep draining (streams stay flowing) but ignore
-      const m = URL_RE.exec(chunk.toString());
+      const text = chunk.toString();
+      lastLines.push(...text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+      while (lastLines.length > 6) lastLines.shift();
+      const m = URL_RE.exec(text);
       if (m) {
         settled = true;
         clearTimeout(timer);
@@ -324,7 +388,7 @@ export function openQuickTunnel(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      reject(new Error(`cloudflared exited (code=${code}) before printing a tunnel URL`));
+      reject(new Error(errorWithOutput(`cloudflared exited (code=${code}) before printing a tunnel URL`)));
     });
     proc.once("error", (err) => {
       if (settled) return;
