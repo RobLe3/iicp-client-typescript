@@ -9,7 +9,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applySavedNode, startProviderAutoUpdate, type ServeOpts } from "../src/cli.js";
+import {
+  applySavedNode,
+  startProviderAutoUpdate,
+  tunnelDeadBehavior,
+  type ServeOpts,
+} from "../src/cli.js";
 import type { NodeIdentity } from "../src/identity.js";
 
 function baseOpts(overrides: Partial<ServeOpts> = {}): ServeOpts {
@@ -127,5 +132,15 @@ describe("provider auto-update loop", () => {
     await new Promise((resolve) => setTimeout(resolve, 25));
     stop();
     assert.equal(ticked, false);
+  });
+});
+
+describe("Quick Tunnel dead policy", () => {
+  it("auto exits only under supervision", () => {
+    assert.equal(tunnelDeadBehavior("auto", true), "exit");
+    assert.equal(tunnelDeadBehavior("auto", false), "retry");
+    assert.equal(tunnelDeadBehavior("retry", true), "retry");
+    assert.equal(tunnelDeadBehavior("exit", false), "exit");
+    assert.equal(tunnelDeadBehavior("log-only", true), "log-only");
   });
 });

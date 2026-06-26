@@ -1,7 +1,7 @@
 # IICP TypeScript node — runs an @iicp/client provider node out of the box.
 #
 #   docker build -t iicp-node-ts .
-#   docker run -p 8020:8020 \
+#   docker run --restart on-failure -p 8020:8020 \
 #     -e IICP_BACKEND_URL=http://host.docker.internal:11434 \
 #     -e IICP_BACKEND_MODEL=qwen2.5:0.5b \
 #     -e IICP_PUBLIC_ENDPOINT=http://<your-public-ip>:8020 \
@@ -15,6 +15,9 @@
 #   IICP_PUBLIC_ENDPOINT — externally reachable URL of this node. If omitted,
 #                          the node tries automatic reachability (Quick Tunnel
 #                          first, relay last-resort) before staying local.
+#   IICP_TUNNEL_DEAD_POLICY — auto|retry|exit|log-only; default auto exits when
+#                          supervised so Docker can restart, manual runs retry.
+#   IICP_SUPERVISED   — default 1 in this image; keep with --restart on-failure.
 #
 # See https://iicp.network/docs/sdk-quickstart-docker for the full setup guide.
 
@@ -48,6 +51,8 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/node_modules ./node_modules
 COPY package.json ./
 RUN chmod +x /app/dist/cli.js && ln -sf /app/dist/cli.js /usr/local/bin/iicp-node
+ENV IICP_SUPERVISED=1 \
+    IICP_TUNNEL_DEAD_POLICY=auto
 EXPOSE 8020
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
   CMD node -e "require('http').get('http://localhost:8020/iicp/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"

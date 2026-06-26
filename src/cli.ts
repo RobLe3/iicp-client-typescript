@@ -170,7 +170,24 @@ function envInt(name: string, fallback: number): number {
 function envBool(name: string, fallback = false): boolean {
   const v = process.env[name];
   if (v === undefined) return fallback;
-  return v.toLowerCase() === "true" || v === "1";
+  return v.toLowerCase() === "true" || v === "1" || v.toLowerCase() === "yes";
+}
+
+export const TUNNEL_DEAD_EXIT_CODE = 75;
+export type TunnelDeadPolicy = "auto" | "retry" | "exit" | "log-only";
+export type TunnelDeadBehavior = "exit" | "retry" | "log-only";
+
+export function tunnelDeadPolicyFromEnv(): TunnelDeadPolicy {
+  const value = (process.env.IICP_TUNNEL_DEAD_POLICY ?? "auto").trim().toLowerCase();
+  if (value === "auto" || value === "retry" || value === "exit" || value === "log-only") return value;
+  if (value === "log_only" || value === "logonly") return "log-only";
+  console.warn(`[iicp-node] ignoring invalid IICP_TUNNEL_DEAD_POLICY=${JSON.stringify(value)}; using auto.`);
+  return "auto";
+}
+
+export function tunnelDeadBehavior(policy: TunnelDeadPolicy, supervised: boolean): TunnelDeadBehavior {
+  if (policy === "auto") return supervised ? "exit" : "retry";
+  return policy;
 }
 
 function printHelp(): void {
@@ -213,6 +230,8 @@ function printHelp(): void {
       `                             node's own public endpoint (needs cloudflared on PATH). Default auto: use\n` +
       `                             tunnel when direct IPv4/IPv6/pinhole reachability is unavailable or\n` +
       `                             unverified, then relay. --tunnel forces it; --no-tunnel disables fallback.\n` +
+      `                             Dead policy: IICP_TUNNEL_DEAD_POLICY=auto|retry|exit|log-only;\n` +
+      `                             generated services set IICP_SUPERVISED=1.\n` +
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
       `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
       `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485).\n` +
@@ -1188,6 +1207,17 @@ async function runServe(opts: ServeOpts): Promise<number> {
       },
       {
         elastic: true,
+        onDeadAction: () => {
+          const behavior = tunnelDeadBehavior(tunnelDeadPolicyFromEnv(), envBool("IICP_SUPERVISED"));
+          if (behavior === "exit") {
+            // eslint-disable-next-line no-console
+            console.error(
+              `[iicp-node] supervised tunnel failure policy is exit — terminating with code ${TUNNEL_DEAD_EXIT_CODE} so the supervisor can restart.`,
+            );
+            process.exit(TUNNEL_DEAD_EXIT_CODE);
+          }
+          return behavior === "retry" ? "retry" : "stop";
+        },
         onState: (state) => {
           node.setRuntimeAvailable(state === "ready");
           // eslint-disable-next-line no-console

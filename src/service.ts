@@ -59,6 +59,8 @@ export function renderLaunchd(node: string, name?: string, executable = "iicp-no
     IICP_NODE_NAME: node,
     IICP_AUTO_UPDATE: envValue("IICP_AUTO_UPDATE", "1"),
     IICP_AUTO_UPDATE_INTERVAL_S: envValue("IICP_AUTO_UPDATE_INTERVAL_S", "3600"),
+    IICP_SUPERVISED: envValue("IICP_SUPERVISED", "1"),
+    IICP_TUNNEL_DEAD_POLICY: envValue("IICP_TUNNEL_DEAD_POLICY", "auto"),
     IICP_LOG_DIR: logDir,
   };
   const envXml = Object.entries(env)
@@ -111,6 +113,8 @@ export function renderSystemd(node: string, name?: string, executable = "iicp-no
     IICP_NODE_NAME: node,
     IICP_AUTO_UPDATE: envValue("IICP_AUTO_UPDATE", "1"),
     IICP_AUTO_UPDATE_INTERVAL_S: envValue("IICP_AUTO_UPDATE_INTERVAL_S", "3600"),
+    IICP_SUPERVISED: envValue("IICP_SUPERVISED", "1"),
+    IICP_TUNNEL_DEAD_POLICY: envValue("IICP_TUNNEL_DEAD_POLICY", "auto"),
     IICP_LOG_DIR: logDir,
   };
   const envLines = Object.entries(env).map(([k, v]) => `Environment=${k}=${shellQuote(v)}`).join("\n");

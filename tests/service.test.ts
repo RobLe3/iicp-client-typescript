@@ -19,6 +19,8 @@ describe("service supervisor unit rendering", () => {
     assert.ok(unit.content.includes("<string>mynode</string>"));
     assert.ok(unit.content.includes("<key>IICP_AUTO_UPDATE</key><string>1</string>"));
     assert.ok(unit.content.includes("<key>IICP_AUTO_UPDATE_INTERVAL_S</key><string>3600</string>"));
+    assert.ok(unit.content.includes("<key>IICP_SUPERVISED</key><string>1</string>"));
+    assert.ok(unit.content.includes("<key>IICP_TUNNEL_DEAD_POLICY</key><string>auto</string>"));
     assert.ok(unit.content.includes("<key>KeepAlive</key><true/>"));
     assert.ok(!unit.content.includes("--daemon"));
   });
@@ -33,6 +35,8 @@ describe("service supervisor unit rendering", () => {
     assert.ok(unit.content.includes("ExecStart=iicp-node serve --node mynode"));
     assert.ok(unit.content.includes("Environment=IICP_AUTO_UPDATE=1"));
     assert.ok(unit.content.includes("Environment=IICP_AUTO_UPDATE_INTERVAL_S=3600"));
+    assert.ok(unit.content.includes("Environment=IICP_SUPERVISED=1"));
+    assert.ok(unit.content.includes("Environment=IICP_TUNNEL_DEAD_POLICY=auto"));
     assert.ok(unit.content.includes("Restart=on-failure"));
     assert.ok(!unit.content.includes("--daemon"));
   });

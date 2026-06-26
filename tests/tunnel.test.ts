@@ -139,4 +139,27 @@ describe("supervision", () => {
     assert.ok(states.includes("ready"), states.join(","));
     t.close();
   });
+
+  it("elastic watchdog can retry after dead policy", async () => {
+    const t = await openQuickTunnel(9484, 10_000, fakeBin({ name: "dead-retry", lifetimeMs: 10 }));
+    let deadCalls = 0;
+    let stopped!: () => void;
+    const stoppedPromise = new Promise<void>((resolve) => {
+      stopped = resolve;
+    });
+    t.watch(() => {}, () => {
+      deadCalls += 1;
+      if (deadCalls > 1) stopped();
+    }, {
+      elastic: true,
+      onDeadAction: () => deadCalls === 1 ? "retry" : "stop",
+      probe: async () => false,
+      healthIntervalMs: 20,
+      verifyTimeoutMs: 0,
+      deadRetryDelayMs: () => 0,
+    });
+    await stoppedPromise;
+    assert.ok(deadCalls >= 2);
+    t.close();
+  });
 });

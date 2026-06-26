@@ -6,8 +6,8 @@
  * normal long-running `iicp-node serve` processes now also run a default-on
  * background loop: check npm hourly (first check within five minutes), install
  * `@iicp/client@latest` when a newer stable release exists, and restart onto
- * the upgraded package. The loop is failure-isolated and opt-out via
- * `IICP_AUTO_UPDATE=0`.
+ * the upgraded package in covered service paths. The loop is
+ * failure-isolated and opt-out via `IICP_AUTO_UPDATE=0`.
  */
 
 const NPM_URL = "https://registry.npmjs.org/@iicp/client/latest";
@@ -75,10 +75,10 @@ export function checkUpdate(current: string, latest: string | null): UpdateVerdi
 
 // ── P2 — background self-updater (#521) ─────────────────────────────────────────
 // A node running `serve` periodically checks npm and, on a newer release, upgrades
-// (`npm install -g`) and re-execs onto it. Removes the manual-upgrade dependency on
-// downlevel hosters — once a node reaches the first release with this updater, every
-// future release self-propagates. Default-on; opt out with IICP_AUTO_UPDATE=0.
-// Loop-safe (post-upgrade the running version == latest) and failure-isolated.
+// (`npm install -g`) and re-execs onto it. This removes the manual-upgrade
+// dependency in covered service paths. Nodes older than the hardened 0.7.67 serve
+// wiring may need one manual upgrade/restart first. Default-on; opt out with
+// IICP_AUTO_UPDATE=0. Loop-safe (post-upgrade running version == latest) and failure-isolated.
 
 import { spawn } from "node:child_process";
 

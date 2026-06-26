@@ -39,15 +39,20 @@ export const MAX_RESPAWNS = 3;
 export const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 export const TUNNEL_HEALTH_MAX_FAILS = 2;
 export const TUNNEL_VERIFY_TIMEOUT_MS = 30_000;
+export const TUNNEL_DEAD_RETRY_INITIAL_MS = 30_000;
+export const TUNNEL_DEAD_RETRY_MAX_MS = 300_000;
 
 export type TunnelState = "ready" | "twilight" | "recovering" | "dead";
+export type TunnelDeadAction = "stop" | "retry";
 
 export interface TunnelWatchOptions {
   elastic?: boolean;
   onState?: (state: TunnelState) => void;
+  onDeadAction?: () => TunnelDeadAction | void;
   probe?: (url: string) => Promise<boolean>;
   healthIntervalMs?: number;
   verifyTimeoutMs?: number;
+  deadRetryDelayMs?: (attempt: number) => number;
 }
 
 /**
@@ -79,6 +84,11 @@ async function waitUntilReachable(
     await new Promise((r) => setTimeout(r, 1_000));
   }
   return false;
+}
+
+function deadRetryDelayMs(attempt: number): number {
+  const exponent = Math.max(0, Math.min(attempt - 1, 4));
+  return Math.min(TUNNEL_DEAD_RETRY_INITIAL_MS * 2 ** exponent, TUNNEL_DEAD_RETRY_MAX_MS);
 }
 
 export const INSTALL_HINT =
@@ -144,6 +154,7 @@ export class QuickTunnel {
     const probe = options.probe ?? tunnelUrlReachable;
     const healthIntervalMs = options.healthIntervalMs ?? TUNNEL_HEALTH_INTERVAL_MS;
     const verifyTimeoutMs = options.verifyTimeoutMs ?? TUNNEL_VERIFY_TIMEOUT_MS;
+    let deadRetries = 0;
     const setState = (next: TunnelState) => {
       if (state === next) return;
       state = next;
@@ -157,6 +168,7 @@ export class QuickTunnel {
         if (await probe(this.url)) {
           healthFails = 0;
           this._respawns = 0;
+          deadRetries = 0;
           setState("ready");
         } else {
           healthFails += 1;
@@ -179,57 +191,77 @@ export class QuickTunnel {
     healthTimer.unref?.();
     this._healthTimer = healthTimer;
 
+    const handleDead = async (): Promise<boolean> => {
+      setState("dead");
+      onDead();
+      if (options.onDeadAction?.() !== "retry") return false;
+      deadRetries += 1;
+      const delay = options.deadRetryDelayMs?.(deadRetries) ?? deadRetryDelayMs(deadRetries);
+      console.warn(`[quick-tunnel] dead-state retry policy active — retrying in ${Math.round(delay / 1000)}s.`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (this._closed) return false;
+      this._respawns = 0;
+      healthFails = 0;
+      setState("recovering");
+      return true;
+    };
+
     const arm = (proc: ChildProcess) => {
       proc.once("exit", () => {
         if (this._closed) return;
-        void (async () => {
+        const recover = async (): Promise<void> => {
           setState("recovering");
-          this._respawns += 1;
-          if (this._respawns > MAX_RESPAWNS) {
-            console.error(
-              `[quick-tunnel] ${this._respawns - 1} consecutive respawns failed to recover ` +
-                "a healthy tunnel — giving up. Node is no longer publicly reachable; restart " +
-                "`iicp-node serve` to recover.",
-            );
-            setState("dead");
-            onDead();
-            return;
-          }
-          console.warn(
-            `[quick-tunnel] tunnel down — respawning (${this._respawns}/${MAX_RESPAWNS})…`,
-          );
-          let fresh: QuickTunnel;
-          try {
-            fresh = await openQuickTunnel(this.localPort, TUNNEL_START_TIMEOUT_MS, this._binary);
-          } catch (exc) {
-            console.error(
-              `[quick-tunnel] respawn failed: ${exc instanceof Error ? exc.message : exc}`,
-            );
-            setState("dead");
-            onDead();
-            return;
-          }
-          // Adopt the fresh child; drop its own exit-hook (ours stays armed).
-          process.removeListener("exit", fresh._exitHook);
-          this.process = fresh.process;
-          this.url = fresh.url;
-          arm(this.process);
-          if (options.elastic) {
-            console.log(`[quick-tunnel] candidate tunnel up at ${this.url}; verifying public health…`);
-            if (await waitUntilReachable(this.url, probe, verifyTimeoutMs)) {
-              this._respawns = 0;
-              setState("ready");
-              console.log(`[quick-tunnel] verified at ${this.url} — re-registering.`);
-              onNewUrl(this.url);
-            } else {
-              console.warn(`[quick-tunnel] candidate ${this.url} stayed unreachable — rebuilding.`);
-              if (this.process.exitCode === null && !this.process.killed) this.process.kill("SIGTERM");
+          while (!this._closed) {
+            this._respawns += 1;
+            if (this._respawns > MAX_RESPAWNS) {
+              console.error(
+                `[quick-tunnel] ${this._respawns - 1} consecutive respawns failed to recover ` +
+                  "a healthy tunnel — giving up. Node is no longer publicly reachable; restart " +
+                  "`iicp-node serve` to recover.",
+              );
+              if (await handleDead()) continue;
+              return;
             }
-          } else {
-            console.log(`[quick-tunnel] back up at ${this.url} — re-registering.`);
-            onNewUrl(this.url);
+            console.warn(
+              `[quick-tunnel] tunnel down — respawning (${this._respawns}/${MAX_RESPAWNS})…`,
+            );
+            let fresh: QuickTunnel;
+            try {
+              fresh = await openQuickTunnel(this.localPort, TUNNEL_START_TIMEOUT_MS, this._binary);
+            } catch (exc) {
+              console.error(
+                `[quick-tunnel] respawn failed: ${exc instanceof Error ? exc.message : exc}`,
+              );
+              if (await handleDead()) continue;
+              return;
+            }
+            // Adopt the fresh child; drop its own exit-hook (ours stays armed).
+            process.removeListener("exit", fresh._exitHook);
+            this.process = fresh.process;
+            this.url = fresh.url;
+            arm(this.process);
+            if (options.elastic) {
+              console.log(`[quick-tunnel] candidate tunnel up at ${this.url}; verifying public health…`);
+              if (await waitUntilReachable(this.url, probe, verifyTimeoutMs)) {
+                this._respawns = 0;
+                deadRetries = 0;
+                setState("ready");
+                console.log(`[quick-tunnel] verified at ${this.url} — re-registering.`);
+                onNewUrl(this.url);
+              } else {
+                console.warn(`[quick-tunnel] candidate ${this.url} stayed unreachable — rebuilding.`);
+                if (this.process.exitCode === null && !this.process.killed) this.process.kill("SIGTERM");
+              }
+              return;
+            } else {
+              deadRetries = 0;
+              console.log(`[quick-tunnel] back up at ${this.url} — re-registering.`);
+              onNewUrl(this.url);
+              return;
+            }
           }
-        })();
+        };
+        void recover();
       });
     };
     arm(this.process);
