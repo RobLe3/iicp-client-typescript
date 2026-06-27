@@ -40,8 +40,11 @@ export const TUNNEL_HEALTH_INTERVAL_MS = 30_000;
 export const TUNNEL_HEALTH_MAX_FAILS = 2;
 export const TUNNEL_VERIFY_TIMEOUT_MS = 30_000;
 export const TUNNEL_DOH_TIMEOUT_MS = 5_000;
+export const TUNNEL_RATE_LIMIT_COOLDOWN_MS = 15 * 60_000;
 export const TUNNEL_DEAD_RETRY_INITIAL_MS = 30_000;
 export const TUNNEL_DEAD_RETRY_MAX_MS = 300_000;
+
+let quickTunnelRateLimitUntil = 0;
 
 export type TunnelState = "ready" | "twilight" | "recovering" | "dead";
 export type TunnelDeadAction = "stop" | "retry";
@@ -78,6 +81,36 @@ function isLikelyDnsError(exc: unknown): boolean {
     msg.includes("enotfound") ||
     msg.includes("eai_again")
   );
+}
+
+function rateLimitCooldownMs(): number {
+  const raw = process.env.IICP_TUNNEL_RATE_LIMIT_COOLDOWN_S;
+  const seconds = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : TUNNEL_RATE_LIMIT_COOLDOWN_MS;
+}
+
+function quickTunnelRateLimitRemainingMs(): number {
+  return Math.max(0, quickTunnelRateLimitUntil - Date.now());
+}
+
+function markQuickTunnelRateLimited(): number {
+  const cooldown = rateLimitCooldownMs();
+  quickTunnelRateLimitUntil = Date.now() + cooldown;
+  return cooldown;
+}
+
+function cloudflaredOutputIsRateLimited(lines: string[]): boolean {
+  const joined = lines.join(" ").toLowerCase();
+  return (
+    joined.includes("429") ||
+    joined.includes("too many requests") ||
+    joined.includes("error code: 1015") ||
+    joined.includes("rate limit")
+  );
+}
+
+export function __resetQuickTunnelRateLimitForTests(): void {
+  quickTunnelRateLimitUntil = 0;
 }
 
 async function dohHasAnswer(host: string, recordType: "A" | "AAAA"): Promise<boolean> {
@@ -348,6 +381,15 @@ export function openQuickTunnel(
   binary?: string,
 ): Promise<QuickTunnel> {
   return new Promise((resolve, reject) => {
+    const remainingMs = quickTunnelRateLimitRemainingMs();
+    if (remainingMs > 0) {
+      reject(new Error(
+        `accountless Quick Tunnel creation paused for ${Math.ceil(remainingMs / 1000)}s after Cloudflare rate limiting; ` +
+          "retry later or configure a named tunnel / IICP_PUBLIC_ENDPOINT",
+      ));
+      return;
+    }
+
     const resolved = binary ?? cloudflaredPath();
     if (!resolved) {
       reject(new Error(INSTALL_HINT));
@@ -358,8 +400,14 @@ export function openQuickTunnel(
     });
     let settled = false;
     const lastLines: string[] = [];
-    const errorWithOutput = (reason: string) =>
-      lastLines.length ? `${reason}; last cloudflared output: ${lastLines.join(" | ")}` : reason;
+    const errorWithOutput = (reason: string) => {
+      let out = lastLines.length ? `${reason}; last cloudflared output: ${lastLines.join(" | ")}` : reason;
+      if (cloudflaredOutputIsRateLimited(lastLines)) {
+        const cooldown = markQuickTunnelRateLimited();
+        out += `; accountless Quick Tunnel rate limit detected — pausing tunnel creation for ${Math.ceil(cooldown / 1000)}s`;
+      }
+      return out;
+    };
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;

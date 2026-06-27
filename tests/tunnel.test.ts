@@ -13,15 +13,18 @@ import * as path from "node:path";
 import {
   INSTALL_HINT,
   type TunnelState,
+  __resetQuickTunnelRateLimitForTests,
   cloudflaredPath,
   openQuickTunnel,
 } from "../src/tunnel.js";
 
-function fakeBin(opts: { name?: string; lifetimeMs?: number; silent?: boolean } = {}): string {
-  const { name = "fake-fox-1234", lifetimeMs = 60_000, silent = false } = opts;
+function fakeBin(opts: { name?: string; lifetimeMs?: number; silent?: boolean; rateLimited?: boolean } = {}): string {
+  const { name = "fake-fox-1234", lifetimeMs = 60_000, silent = false, rateLimited = false } = opts;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-tunnel-"));
   const file = path.join(dir, "cloudflared");
-  const body = silent
+  const body = rateLimited
+    ? `#!/usr/bin/env node\nconsole.error('ERR Error unmarshaling QuickTunnel response: error code: 1015');\nconsole.error('status_code="429 Too Many Requests"');\nprocess.exit(1);\n`
+    : silent
     ? `#!/usr/bin/env node\nsetTimeout(() => {}, 60000);\n`
     : `#!/usr/bin/env node\nconsole.error("INF | starting tunnel");\nconsole.error("INF | https://${name}.trycloudflare.com");\nsetTimeout(() => {}, ${lifetimeMs});\n`;
   fs.writeFileSync(file, body, { mode: 0o755 });
@@ -68,6 +71,22 @@ describe("initiation", () => {
       () => openQuickTunnel(9484, 500, fakeBin({ silent: true })),
       /no tunnel URL within/,
     );
+  });
+
+  it("detects Cloudflare Quick Tunnel rate limits and pauses follow-up creation", async () => {
+    __resetQuickTunnelRateLimitForTests();
+    try {
+      await assert.rejects(
+        () => openQuickTunnel(9484, 1_000, fakeBin({ rateLimited: true })),
+        /rate limit detected/,
+      );
+      await assert.rejects(
+        () => openQuickTunnel(9484, 1_000, fakeBin()),
+        /creation paused/,
+      );
+    } finally {
+      __resetQuickTunnelRateLimitForTests();
+    }
   });
 });
 
