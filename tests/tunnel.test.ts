@@ -6,7 +6,7 @@
 // supervision (watchdog respawn with NEW url; bounded → onDead).
 // A fake `cloudflared` script stands in — no network, no Cloudflare.
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -30,6 +30,50 @@ function fakeBin(opts: { name?: string; lifetimeMs?: number; silent?: boolean; r
   fs.writeFileSync(file, body, { mode: 0o755 });
   return file;
 }
+
+function useTempIicpHome(): () => void {
+  const oldHome = process.env.IICP_HOME;
+  const oldStateFile = process.env.IICP_TUNNEL_RATE_LIMIT_STATE_FILE;
+  const oldCreateStateFile = process.env.IICP_TUNNEL_CREATE_STATE_FILE;
+  const oldCreateLockFile = process.env.IICP_TUNNEL_CREATE_LOCK_FILE;
+  const oldCreateMinInterval = process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S;
+  const oldCreateLease = process.env.IICP_TUNNEL_CREATE_LEASE_S;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-home-"));
+  process.env.IICP_HOME = dir;
+  delete process.env.IICP_TUNNEL_RATE_LIMIT_STATE_FILE;
+  delete process.env.IICP_TUNNEL_CREATE_STATE_FILE;
+  delete process.env.IICP_TUNNEL_CREATE_LOCK_FILE;
+  process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = "0";
+  process.env.IICP_TUNNEL_CREATE_LEASE_S = "45";
+  __resetQuickTunnelRateLimitForTests({ clearPersistent: true });
+  return () => {
+    __resetQuickTunnelRateLimitForTests({ clearPersistent: true });
+    if (oldHome === undefined) delete process.env.IICP_HOME;
+    else process.env.IICP_HOME = oldHome;
+    if (oldStateFile === undefined) delete process.env.IICP_TUNNEL_RATE_LIMIT_STATE_FILE;
+    else process.env.IICP_TUNNEL_RATE_LIMIT_STATE_FILE = oldStateFile;
+    if (oldCreateStateFile === undefined) delete process.env.IICP_TUNNEL_CREATE_STATE_FILE;
+    else process.env.IICP_TUNNEL_CREATE_STATE_FILE = oldCreateStateFile;
+    if (oldCreateLockFile === undefined) delete process.env.IICP_TUNNEL_CREATE_LOCK_FILE;
+    else process.env.IICP_TUNNEL_CREATE_LOCK_FILE = oldCreateLockFile;
+    if (oldCreateMinInterval === undefined) delete process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S;
+    else process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = oldCreateMinInterval;
+    if (oldCreateLease === undefined) delete process.env.IICP_TUNNEL_CREATE_LEASE_S;
+    else process.env.IICP_TUNNEL_CREATE_LEASE_S = oldCreateLease;
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+}
+
+let restoreTempIicpHome: (() => void) | null = null;
+
+beforeEach(() => {
+  restoreTempIicpHome = useTempIicpHome();
+});
+
+afterEach(() => {
+  restoreTempIicpHome?.();
+  restoreTempIicpHome = null;
+});
 
 describe("setup", () => {
   it("cloudflaredPath returns null when absent", () => {
@@ -74,19 +118,60 @@ describe("initiation", () => {
   });
 
   it("detects Cloudflare Quick Tunnel rate limits and pauses follow-up creation", async () => {
+    await assert.rejects(
+      () => openQuickTunnel(9484, 1_000, fakeBin({ rateLimited: true })),
+      /rate limit detected/,
+    );
+    await assert.rejects(
+      () => openQuickTunnel(9484, 1_000, fakeBin()),
+      /creation paused/,
+    );
+  });
+
+  it("persists rate-limit cooldown across supervised restarts", async () => {
+    await assert.rejects(
+      () => openQuickTunnel(9484, 1_000, fakeBin({ rateLimited: true })),
+      /rate limit detected/,
+    );
+
+    // Simulate process restart: in-memory state is gone, but the node state
+    // directory still carries the cooldown marker.
     __resetQuickTunnelRateLimitForTests();
-    try {
-      await assert.rejects(
-        () => openQuickTunnel(9484, 1_000, fakeBin({ rateLimited: true })),
-        /rate limit detected/,
-      );
-      await assert.rejects(
-        () => openQuickTunnel(9484, 1_000, fakeBin()),
-        /creation paused/,
-      );
-    } finally {
-      __resetQuickTunnelRateLimitForTests();
-    }
+
+    await assert.rejects(
+      () => openQuickTunnel(9484, 1_000, fakeBin()),
+      /creation paused/,
+    );
+  });
+
+  it("spaces local services before creating another accountless Quick Tunnel", async () => {
+    process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = "60";
+    const t = await openQuickTunnel(9484, 10_000, fakeBin({ name: "paced-one" }));
+    t.close();
+
+    await assert.rejects(
+      () => openQuickTunnel(9485, 1_000, fakeBin({ name: "paced-two" })),
+      /creation paced/,
+    );
+  });
+
+  it("serializes parallel accountless Quick Tunnel creation with a host-wide lease", async () => {
+    const lockPath = path.join(process.env.IICP_HOME ?? "", "state", "quick_tunnel_create.lock");
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+    fs.writeFileSync(
+      lockPath,
+      `${JSON.stringify({
+        expires_at: (Date.now() + 60_000) / 1000,
+        pid: 12345,
+        reason: "test",
+      })}\n`,
+      "utf8",
+    );
+
+    await assert.rejects(
+      () => openQuickTunnel(9484, 1_000, fakeBin({ name: "lease-blocked" })),
+      /another local IICP node/,
+    );
   });
 });
 

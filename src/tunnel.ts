@@ -17,6 +17,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 const URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
@@ -41,6 +42,8 @@ export const TUNNEL_HEALTH_MAX_FAILS = 2;
 export const TUNNEL_VERIFY_TIMEOUT_MS = 30_000;
 export const TUNNEL_DOH_TIMEOUT_MS = 5_000;
 export const TUNNEL_RATE_LIMIT_COOLDOWN_MS = 15 * 60_000;
+export const TUNNEL_CREATE_MIN_INTERVAL_MS = 120_000;
+export const TUNNEL_CREATE_LEASE_MS = 45_000;
 export const TUNNEL_DEAD_RETRY_INITIAL_MS = 30_000;
 export const TUNNEL_DEAD_RETRY_MAX_MS = 300_000;
 
@@ -89,14 +92,213 @@ function rateLimitCooldownMs(): number {
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : TUNNEL_RATE_LIMIT_COOLDOWN_MS;
 }
 
+function expandHome(p: string): string {
+  return p === "~" || p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
+}
+
+function quickTunnelRateLimitStatePath(): string {
+  const override = process.env.IICP_TUNNEL_RATE_LIMIT_STATE_FILE;
+  if (override) return path.resolve(expandHome(override));
+  const home = process.env.IICP_HOME ? expandHome(process.env.IICP_HOME) : path.join(os.homedir(), ".iicp");
+  return path.join(home, "state", "quick_tunnel_rate_limit.json");
+}
+
+function quickTunnelCreateStatePath(): string {
+  const override = process.env.IICP_TUNNEL_CREATE_STATE_FILE;
+  if (override) return path.resolve(expandHome(override));
+  const home = process.env.IICP_HOME ? expandHome(process.env.IICP_HOME) : path.join(os.homedir(), ".iicp");
+  return path.join(home, "state", "quick_tunnel_create_gate.json");
+}
+
+function quickTunnelCreateLockPath(): string {
+  const override = process.env.IICP_TUNNEL_CREATE_LOCK_FILE;
+  if (override) return path.resolve(expandHome(override));
+  const home = process.env.IICP_HOME ? expandHome(process.env.IICP_HOME) : path.join(os.homedir(), ".iicp");
+  return path.join(home, "state", "quick_tunnel_create.lock");
+}
+
+function tunnelCreateMinIntervalMs(): number {
+  const raw = process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S;
+  const seconds = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : TUNNEL_CREATE_MIN_INTERVAL_MS;
+}
+
+function tunnelCreateLeaseMs(): number {
+  const raw = process.env.IICP_TUNNEL_CREATE_LEASE_S;
+  const seconds = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : TUNNEL_CREATE_LEASE_MS;
+}
+
+function readJsonFieldNumber(statePath: string, field: string): number {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8")) as Record<string, unknown>;
+    const value = Number(parsed[field] ?? 0);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  } catch (exc) {
+    if ((exc as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.debug(`[quick-tunnel] ignoring unreadable state ${statePath}: ${String(exc)}`);
+    }
+    return 0;
+  }
+}
+
+function readPersistentRateLimitUntilMs(): number {
+  return readJsonFieldNumber(quickTunnelRateLimitStatePath(), "quick_tunnel_rate_limited_until") * 1000;
+}
+
+function clearPersistentRateLimitIfSafe(): void {
+  try {
+    fs.unlinkSync(quickTunnelRateLimitStatePath());
+  } catch (exc) {
+    if ((exc as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.debug(`[quick-tunnel] could not clear expired cooldown state: ${String(exc)}`);
+    }
+  }
+}
+
+function clearCreateGateIfSafe(): void {
+  try {
+    fs.unlinkSync(quickTunnelCreateStatePath());
+  } catch (exc) {
+    if ((exc as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.debug(`[quick-tunnel] could not clear expired create-gate state: ${String(exc)}`);
+    }
+  }
+}
+
+function persistentRateLimitRemainingMs(): number {
+  const remaining = Math.max(0, readPersistentRateLimitUntilMs() - Date.now());
+  if (remaining <= 0) clearPersistentRateLimitIfSafe();
+  return remaining;
+}
+
+function persistRateLimitUntil(untilMs: number, cooldownMs: number): void {
+  const statePath = quickTunnelRateLimitStatePath();
+  const payload = {
+    quick_tunnel_rate_limited_until: untilMs / 1000,
+    cooldown_s: cooldownMs / 1000,
+    reason: "cloudflare_quick_tunnel_rate_limit",
+  };
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    const tmp = `${statePath}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(payload, Object.keys(payload).sort())}\n`, "utf8");
+    fs.renameSync(tmp, statePath);
+  } catch (exc) {
+    console.warn(`[quick-tunnel] could not persist cooldown state ${statePath}: ${String(exc)}`);
+  }
+}
+
 function quickTunnelRateLimitRemainingMs(): number {
-  return Math.max(0, quickTunnelRateLimitUntil - Date.now());
+  return Math.max(0, quickTunnelRateLimitUntil - Date.now(), persistentRateLimitRemainingMs());
 }
 
 function markQuickTunnelRateLimited(): number {
   const cooldown = rateLimitCooldownMs();
   quickTunnelRateLimitUntil = Date.now() + cooldown;
+  persistRateLimitUntil(quickTunnelRateLimitUntil, cooldown);
   return cooldown;
+}
+
+function quickTunnelCreateGateRemainingMs(): number {
+  const remaining = Math.max(
+    0,
+    readJsonFieldNumber(quickTunnelCreateStatePath(), "quick_tunnel_create_not_before") * 1000 - Date.now(),
+  );
+  if (remaining <= 0) clearCreateGateIfSafe();
+  return remaining;
+}
+
+function markQuickTunnelCreateAttempt(): void {
+  const interval = tunnelCreateMinIntervalMs();
+  if (interval <= 0) {
+    clearCreateGateIfSafe();
+    return;
+  }
+  const statePath = quickTunnelCreateStatePath();
+  const payload = {
+    quick_tunnel_create_not_before: (Date.now() + interval) / 1000,
+    interval_s: interval / 1000,
+    pid: process.pid,
+    reason: "host_wide_quick_tunnel_creation_pacing",
+  };
+  try {
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    const tmp = `${statePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, `${JSON.stringify(payload, Object.keys(payload).sort())}\n`, "utf8");
+    fs.renameSync(tmp, statePath);
+  } catch (exc) {
+    console.warn(`[quick-tunnel] could not persist create-gate state ${statePath}: ${String(exc)}`);
+  }
+}
+
+class QuickTunnelCreateLease {
+  constructor(private readonly lockPath: string | null) {}
+
+  close(): void {
+    if (!this.lockPath) return;
+    try {
+      fs.unlinkSync(this.lockPath);
+    } catch (exc) {
+      if ((exc as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.debug(`[quick-tunnel] could not release create lock ${this.lockPath}: ${String(exc)}`);
+      }
+    }
+  }
+}
+
+function acquireQuickTunnelCreateLease(): QuickTunnelCreateLease {
+  const lockPath = quickTunnelCreateLockPath();
+  const leaseMs = tunnelCreateLeaseMs();
+  try {
+    fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  } catch (exc) {
+    console.warn(`[quick-tunnel] could not create lock dir ${path.dirname(lockPath)}: ${String(exc)}`);
+    return new QuickTunnelCreateLease(null);
+  }
+  for (let i = 0; i < 2; i += 1) {
+    let fd: number | null = null;
+    try {
+      fd = fs.openSync(lockPath, "wx", 0o600);
+      try {
+        fs.writeFileSync(
+          fd,
+          `${JSON.stringify({
+            pid: process.pid,
+            expires_at: (Date.now() + leaseMs) / 1000,
+            lease_s: leaseMs / 1000,
+            reason: "host_wide_quick_tunnel_creation_lock",
+          })}\n`,
+          "utf8",
+        );
+      } finally {
+        fs.closeSync(fd);
+      }
+      return new QuickTunnelCreateLease(lockPath);
+    } catch (exc) {
+      if ((exc as NodeJS.ErrnoException)?.code === "EEXIST") {
+        const remaining = Math.max(0, readJsonFieldNumber(lockPath, "expires_at") * 1000 - Date.now());
+        if (remaining > 0) {
+          throw new Error(
+            `accountless Quick Tunnel creation held by another local IICP node for ${Math.ceil(remaining / 1000)}s; ` +
+              "falling back to the previous reachability method",
+          );
+        }
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {
+          // best effort; retry once
+        }
+        continue;
+      }
+      console.warn(`[quick-tunnel] could not acquire create lock ${lockPath}: ${String(exc)}`);
+      return new QuickTunnelCreateLease(null);
+    }
+  }
+  throw new Error(
+    `accountless Quick Tunnel creation held by another local IICP node for ${Math.ceil(leaseMs / 1000)}s; ` +
+      "falling back to the previous reachability method",
+  );
 }
 
 function cloudflaredOutputIsRateLimited(lines: string[]): boolean {
@@ -109,8 +311,17 @@ function cloudflaredOutputIsRateLimited(lines: string[]): boolean {
   );
 }
 
-export function __resetQuickTunnelRateLimitForTests(): void {
+export function __resetQuickTunnelRateLimitForTests(opts: { clearPersistent?: boolean } = {}): void {
   quickTunnelRateLimitUntil = 0;
+  if (opts.clearPersistent) {
+    clearPersistentRateLimitIfSafe();
+    clearCreateGateIfSafe();
+    try {
+      fs.unlinkSync(quickTunnelCreateLockPath());
+    } catch {
+      // ignore
+    }
+  }
 }
 
 async function dohHasAnswer(host: string, recordType: "A" | "AAAA"): Promise<boolean> {
@@ -389,10 +600,26 @@ export function openQuickTunnel(
       ));
       return;
     }
+    const createRemainingMs = quickTunnelCreateGateRemainingMs();
+    if (createRemainingMs > 0) {
+      reject(new Error(
+        `accountless Quick Tunnel creation paced for ${Math.ceil(createRemainingMs / 1000)}s to avoid Cloudflare rate limits; ` +
+          "falling back to the previous reachability method while the tunnel budget recovers",
+      ));
+      return;
+    }
 
     const resolved = binary ?? cloudflaredPath();
     if (!resolved) {
       reject(new Error(INSTALL_HINT));
+      return;
+    }
+    let createLease: QuickTunnelCreateLease;
+    try {
+      createLease = acquireQuickTunnelCreateLease();
+      markQuickTunnelCreateAttempt();
+    } catch (exc) {
+      reject(exc);
       return;
     }
     const proc = spawn(resolved, ["tunnel", "--url", `http://127.0.0.1:${localPort}`], {
@@ -411,6 +638,7 @@ export function openQuickTunnel(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      createLease.close();
       proc.kill("SIGTERM");
       reject(new Error(errorWithOutput(`cloudflared produced no tunnel URL within ${timeoutMs / 1000}s`)));
     }, timeoutMs);
@@ -423,6 +651,7 @@ export function openQuickTunnel(
       const m = URL_RE.exec(text);
       if (m) {
         settled = true;
+        createLease.close();
         clearTimeout(timer);
         console.log(`[quick-tunnel] up: ${m[0]} → http://127.0.0.1:${localPort}`);
         resolve(new QuickTunnel(proc, m[0], localPort, resolved));
@@ -435,12 +664,14 @@ export function openQuickTunnel(
     proc.once("exit", (code) => {
       if (settled) return;
       settled = true;
+      createLease.close();
       clearTimeout(timer);
       reject(new Error(errorWithOutput(`cloudflared exited (code=${code}) before printing a tunnel URL`)));
     });
     proc.once("error", (err) => {
       if (settled) return;
       settled = true;
+      createLease.close();
       clearTimeout(timer);
       reject(err);
     });

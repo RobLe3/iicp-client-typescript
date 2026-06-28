@@ -786,6 +786,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // #520 rung 5 — Quick Tunnel escalation state (see src/tunnel.ts).
   const tunnelPref: boolean | undefined = opts.tunnel;
   let tunnelHandle: import("./tunnel.js").QuickTunnel | null = null;
+  let quickTunnelAttempted = false;
   const openTunnelRung = async (
     localPort: number,
     forced: boolean,
@@ -876,6 +877,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
           console.log(
             `[iicp-node] NAT tier=${natProfile.tier}: opening Quick Tunnel (rung 5) for an autonomous public endpoint…`,
           );
+          quickTunnelAttempted = true;
           tunnelHandle = await openTunnelRung(opts.port, false);
           if (tunnelHandle) {
             publicEndpoint = tunnelHandle.url;
@@ -917,6 +919,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // who KNOWS they're unreachable, or wants an https endpoint for browser
   // consumers without touching the router).
   if (tunnelPref === true && tunnelHandle === null) {
+    quickTunnelAttempted = true;
     tunnelHandle = await openTunnelRung(opts.port, true);
     if (tunnelHandle) publicEndpoint = tunnelHandle.url;
   }
@@ -937,7 +940,16 @@ async function runServe(opts: ServeOpts): Promise<number> {
       console.log(
         `[iicp-node] direct endpoint needs public fallback (${reason}) — opening Quick Tunnel automatically…`,
       );
-      tunnelHandle = await openTunnelRung(opts.port, false);
+      if (quickTunnelAttempted) {
+        // eslint-disable-next-line no-console
+        console.log(
+          "[iicp-node] Quick Tunnel was already attempted for this startup; " +
+            "falling back to the previous reachability method.",
+        );
+      } else {
+        quickTunnelAttempted = true;
+        tunnelHandle = await openTunnelRung(opts.port, false);
+      }
       if (tunnelHandle) {
         publicEndpoint = tunnelHandle.url;
       } else {
