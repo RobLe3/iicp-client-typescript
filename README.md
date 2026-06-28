@@ -5,7 +5,11 @@
 [![Protocol](https://img.shields.io/badge/IICP-v1.7-indigo.svg)](https://iicp.network/spec)
 [![npm](https://img.shields.io/badge/npm-%40iicp%2Fclient-red?logo=npm)](https://www.npmjs.com/package/@iicp/client)
 
-Official TypeScript client library for the [IICP protocol](https://iicp.network) — route AI agent tasks by intent across a self-organising mesh of provider nodes. No central broker. No hardcoded endpoints.
+Use the open AI mesh from your TypeScript or JavaScript app. Install the
+client, send an intent, and get a routed response from an IICP node.
+
+You do **not** need to run a node to try the client path. Consume first,
+provide later.
 
 Works in **Node.js ≥ 18**, Deno, Bun, and modern browsers with the native Fetch API.
 
@@ -22,6 +26,67 @@ npm install @iicp/client@latest
 # yarn add @iicp/client@latest
 # pnpm add @iicp/client@latest
 ```
+
+## One-line test
+
+```bash
+npm install -g @iicp/client@latest
+iicp-node query "Hello, mesh."
+```
+
+What good looks like:
+
+```bash
+iicp-node --help       # shows query, serve, proxy, mcp-gateway, credits, ...
+which iicp-node        # points to your Node/npm environment
+iicp-node --version    # prints iicp-node 0.7.75 or newer
+```
+
+The query command contacts the public directory, discovers a matching live node,
+routes your prompt, and prints the response. No account, API key, or local node
+is required for this consumer path.
+
+## Use from TypeScript
+
+```typescript
+import { IicpClient } from "@iicp/client";
+
+const reply = await new IicpClient().chat([
+  { role: "user", content: "Hello, mesh." },
+]);
+
+console.log(reply.choices[0].message.content);
+```
+
+## Do I need to run a node?
+
+No. Running a node is only needed when you want to provide compute or tools to
+the mesh. Start as a client; run a node later when you want to contribute.
+
+## Migrate from existing AI tools
+
+Direct call:
+
+```typescript
+// Before: call one vendor endpoint directly.
+// After: ask IICP to discover and route by capability.
+const reply = await new IicpClient().chat([
+  { role: "user", content: "Summarize this document." },
+]);
+```
+
+Existing OpenAI-compatible tools:
+
+```bash
+npm install -g @iicp/client@latest
+iicp-node proxy
+export OPENAI_BASE_URL=http://127.0.0.1:9483/v1
+```
+
+Then point LangChain, Cursor, liteLLM or another OpenAI-compatible tool at that
+base URL. Full guide: <https://iicp.network/docs/proxy>
+
+## Provider upgrade note
 
 > **Upgrade note (0.7.75)** — upgrade provider nodes so Quick Tunnel endpoints
 > recover safely after sleep, idle, Cloudflare edge drops, and local DNS
@@ -71,7 +136,7 @@ Consumer and provider can run in the same process. For production provider nodes
 
 ---
 
-## Quickstart
+## Library quickstart
 
 ```typescript
 import { IicpClient } from "@iicp/client";

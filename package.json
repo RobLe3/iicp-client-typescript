@@ -1,7 +1,7 @@
 {
   "name": "@iicp/client",
   "version": "0.7.75",
-  "description": "Official TypeScript/JavaScript SDK for the IICP protocol (ADR-016)",
+  "description": "Use the open IICP AI mesh from TypeScript or JavaScript without running a node",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
