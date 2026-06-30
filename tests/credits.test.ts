@@ -50,6 +50,47 @@ describe("iicp-node credits", () => {
     assert.equal(rc, 0);
   });
 
+  it("human output shows the operator wallet before the node ledger", async () => {
+    const body = JSON.stringify({
+      node_id: "n1",
+      total_earned: 2.5,
+      total_spent: 1.0,
+      balance: 1.5,
+      tx_count: 3,
+      reconciles: true,
+      unit: "credit",
+      tokens_per_credit: 1000,
+      operator_wallet: {
+        total_balance: 8.5,
+        total_earned: 10.0,
+        total_spent: 1.5,
+        tx_count: 6,
+        node_count: 2,
+        reconciles: true,
+        operator_fingerprint: "abc123",
+      },
+    });
+    const port = await serveOnce(200, body);
+    let out = "";
+    const oldWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      out += chunk.toString();
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      const rc = await main([
+        "credits", "--node-id", "n1", "--token", "t",
+        "--directory-url", `http://127.0.0.1:${port}`,
+      ]);
+      assert.equal(rc, 0);
+    } finally {
+      process.stdout.write = oldWrite;
+    }
+    assert.match(out, /IICP operator wallet · operator abc123/);
+    assert.match(out, /Wallet balance/);
+    assert.match(out, /Node ledger — n1/);
+  });
+
   it("errors on a forged token (401) — local config cannot fabricate credits", async () => {
     const body = JSON.stringify({ error: { code: "unauthorized", message: "invalid node_token" } });
     const port = await serveOnce(401, body);
@@ -247,6 +288,25 @@ describe("iicp-node credits — retry + multi-node resilience", () => {
     node_id: "n1", total_earned: 5, total_spent: 0, balance: 5,
     tx_count: 1, reconciles: true, unit: "credit", tokens_per_credit: 1000,
   });
+  const WALLET_BODY = JSON.stringify({
+    node_id: "n1",
+    total_earned: 2.5,
+    total_spent: 1.0,
+    balance: 1.5,
+    tx_count: 3,
+    reconciles: true,
+    unit: "credit",
+    tokens_per_credit: 1000,
+    operator_wallet: {
+      total_balance: 8.5,
+      total_earned: 10.0,
+      total_spent: 1.5,
+      tx_count: 6,
+      node_count: 2,
+      reconciles: true,
+      operator_fingerprint: "abc123",
+    },
+  });
   const ERR_BODY = JSON.stringify({
     error: { code: "server_error", message: "An internal error occurred" },
   });
@@ -335,6 +395,46 @@ describe("iicp-node credits — retry + multi-node resilience", () => {
       process.stdout.write = origOut;
       bad.close();
       good.close();
+      if (savedHome === undefined) delete process.env.IICP_HOME;
+      else process.env.IICP_HOME = savedHome;
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it("all-nodes listing prints the operator wallet once, then every node ledger", async () => {
+    const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-test-"));
+    const savedHome = process.env.IICP_HOME;
+    process.env.IICP_HOME = tmpHome;
+    const a = await serveSequence([[200, WALLET_BODY]]);
+    const b = await serveSequence([[200, WALLET_BODY]]);
+    const outLines: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (s: string | Uint8Array, ...rest: unknown[]) => {
+      outLines.push(typeof s === "string" ? s : s.toString());
+      return (origOut as (...a: unknown[]) => boolean)(s, ...rest);
+    };
+    try {
+      const base = {
+        operator_id: "op-test", backend_url: "http://localhost:11434",
+        model: "test:1b", intent: "urn:iicp:intent:llm:chat:v1", region: "unknown",
+        max_concurrent: 4, port: 8020, host: "0.0.0.0", public_endpoint: "",
+        auto_detect_nat: false, external_ip_probe_url: "",
+        created_at: new Date().toISOString(),
+      };
+      saveNode({ ...base, node_id: "n-def", name: "default", directory_url: "https://iicp.network/api", node_token: undefined });
+      saveNode({ ...base, node_id: "n-a", name: "aaa", directory_url: `http://127.0.0.1:${a.port}`, node_token: "t1" });
+      saveNode({ ...base, node_id: "n-b", name: "bbb", directory_url: `http://127.0.0.1:${b.port}`, node_token: "t2" });
+
+      const rc = await main(["credits"]);
+      const out = outLines.join("");
+      assert.equal(rc, 0);
+      assert.equal((out.match(/IICP operator wallet/g) ?? []).length, 1, out);
+      assert.ok(out.includes("Node ledger — aaa"), out);
+      assert.ok(out.includes("Node ledger — bbb"), out);
+    } finally {
+      process.stdout.write = origOut;
+      a.close();
+      b.close();
       if (savedHome === undefined) delete process.env.IICP_HOME;
       else process.env.IICP_HOME = savedHome;
       fs.rmSync(tmpHome, { recursive: true, force: true });

@@ -198,7 +198,7 @@ function printHelp(): void {
       `  list                       List node configs saved under ~/.iicp/nodes/\n` +
       `  serve                      Register and serve a node\n` +
       `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
-      `  credits                    Show this node's earned / spent / balance credits\n` +
+      `  credits                    Show your operator wallet plus this node's credit ledger\n` +
       `  proxy                      Run the local OpenAI/Ollama/Anthropic-compat gateway (loopback; no registration)\n` +
       `  mcp-gateway                Bridge a local MCP server as an IICP provider node (registers + serves)\n` +
       `  service                    Generate/install OS supervisor units for unattended node serving\n` +
@@ -1579,7 +1579,7 @@ export async function verifyCreditAwards(
 }
 
 /**
- * `iicp-node credits` (#456) — earned / spent / balance from the directory's
+ * `iicp-node credits` (#456) — operator wallet + node ledger from the directory's
  * reconcile-checked GET /v1/credits/summary. Figures come authenticated from the
  * directory (not the local config), so editing the saved file cannot inflate them;
  * `reconciles` flags a ledger that does not add up.
@@ -1587,7 +1587,7 @@ export async function verifyCreditAwards(
 function printCreditsHelp(): void {
   process.stdout.write(
     `usage: iicp-node credits [options]\n\n` +
-      `Show this node's earned / spent / balance credits (authenticated from the directory).\n\n` +
+      `Show your operator wallet plus this node's credit ledger (authenticated from the directory).\n\n` +
       `options:\n` +
       `  --node NAME                Load token + node_id from ~/.iicp/nodes/<NAME>.json\n` +
       `  --node-id ID               Node id (if not using --node)\n` +
@@ -1660,12 +1660,13 @@ async function runCredits(argv: string[]): Promise<number> {
             // One node failing must not hide the others — show every node,
             // then exit non-zero if any failed (2026-06-11).
             let failed = 0;
+            const walletState = { shown: false };
             for (let i = 0; i < withToken.length; i++) {
               if (i > 0) process.stdout.write("\n");
               const n = withToken[i]!;
               const rc = await fetchAndDisplayCredits(
                 n.directory_url ?? dir, n.node_id, n.node_token!, n.name,
-                Boolean(values["json"]), Boolean(values["verify"]),
+                Boolean(values["json"]), Boolean(values["verify"]), walletState,
               );
               if (rc !== 0) {
                 process.stderr.write(
@@ -1728,6 +1729,7 @@ async function fetchAndDisplayCredits(
   label: string,
   asJson: boolean,
   verify: boolean,
+  walletState?: { shown: boolean },
 ): Promise<number> {
   const url = `${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary?node_id=${encodeURIComponent(nodeId)}`;
   // Transient failures (network error, 5xx, undecodable body) get ONE retry
@@ -1784,7 +1786,28 @@ async function fetchAndDisplayCredits(
   const tpc = Number(body["tokens_per_credit"] ?? 1000);
   const pad = (n: number): string => n.toFixed(3).padStart(12);
   const check = reconciles ? "✓ reconciles" : "✗ DOES NOT RECONCILE";
-  process.stdout.write(`IICP credits — ${label}\n`);
+  const wallet = body["operator_wallet"] as Record<string, unknown> | null | undefined;
+  if (wallet && typeof wallet === "object") {
+    const showWallet = !walletState?.shown;
+    const fingerprint = typeof wallet["operator_fingerprint"] === "string" ? ` · operator ${wallet["operator_fingerprint"]}` : "";
+    const walletBalance = Number(wallet["total_balance"] ?? balance);
+    const walletNodes = Number(wallet["node_count"] ?? 0);
+    if (showWallet) {
+      process.stdout.write(`IICP operator wallet${fingerprint}\n`);
+      if (wallet["total_earned"] !== undefined) process.stdout.write(`  Total earned     ${pad(Number(wallet["total_earned"] ?? 0))}\n`);
+      if (wallet["total_spent"] !== undefined) process.stdout.write(`  Total spent      ${pad(Number(wallet["total_spent"] ?? 0))}\n`);
+      process.stdout.write("  ─────────────────────────────\n");
+      const wr = wallet["reconciles"];
+      const walletCheck = wr === true ? "✓ reconciles" : wr === false ? "✗ DOES NOT RECONCILE" : "rollup";
+      process.stdout.write(`  Wallet balance   ${pad(walletBalance)}   ${walletCheck}   (≈ ${Math.trunc(walletBalance * tpc)} tokens)\n`);
+      process.stdout.write(`  ${walletNodes} linked node(s) · per-node audit below\n\n`);
+      if (walletState) walletState.shown = true;
+    }
+    process.stdout.write(`Node ledger — ${label}\n`);
+  } else {
+    process.stdout.write(`IICP credits — ${label}\n`);
+    process.stdout.write("  Node-local ledger  bind an operator identity to combine nodes\n");
+  }
   process.stdout.write(`  Earned (income) ${pad(earned)}\n`);
   process.stdout.write(`  Spent           ${pad(spent)}\n`);
   process.stdout.write("  ─────────────────────────────\n");
