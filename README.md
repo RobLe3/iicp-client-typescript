@@ -39,7 +39,7 @@ What good looks like:
 ```bash
 iicp-node --help       # shows query, serve, proxy, mcp-gateway, credits, ...
 which iicp-node        # points to your Node/npm environment
-iicp-node --version    # prints iicp-node 0.7.75 or newer
+iicp-node --version    # prints iicp-node 0.7.76 or newer
 ```
 
 The query command contacts the public directory, discovers a matching live node,
@@ -88,7 +88,7 @@ base URL. Full guide: <https://iicp.network/docs/proxy>
 
 ## Provider upgrade note
 
-> **Upgrade note (0.7.75)** — upgrade provider nodes so Quick Tunnel endpoints
+> **Upgrade note (0.7.76)** — upgrade provider nodes so Quick Tunnel endpoints
 > recover safely after sleep, idle, Cloudflare edge drops, and local DNS
 > propagation lag on freshly-created `trycloudflare.com` URLs. Tunnel
 > twilight/recovery still heartbeats as unavailable and only re-registers once
@@ -112,7 +112,7 @@ If a node is older than 0.7.67, perform one manual upgrade/restart first,
 especially for Dockerized Python or TypeScript providers: early updater wiring
 did not reliably cover every normal `serve` path. For Docker, use a Compose
 `restart: unless-stopped` policy (or `docker run --restart unless-stopped`) so
-0.7.75 can intentionally exit from a confirmed tunnel-dead state and let Docker
+0.7.76 can intentionally exit from a confirmed tunnel-dead state and let Docker
 bring it back cleanly.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
