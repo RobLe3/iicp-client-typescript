@@ -163,7 +163,17 @@ describe("0.7.40 CLI-UX: top-level help completeness", () => {
 });
 
 describe("0.7.40 CLI-UX: per-subcommand --help never crashes", () => {
-  for (const cmd of [["proxy"], ["credits"], ["query"], ["operator", "rename"]]) {
+  for (const cmd of [
+    ["proxy"],
+    ["credits"],
+    ["query"],
+    ["list"],
+    ["update"],
+    ["serve"],
+    ["operator", "rename"],
+    ["operator", "encrypt"],
+    ["operator", "decrypt"],
+  ]) {
     it(`\`${cmd.join(" ")} --help\` prints usage, exits 0, no parse-arg crash`, async () => {
       const r = await runCli([...cmd, "--help"]);
       assert.equal(r.code, 0, `expected exit 0, got ${r.code} (stderr: ${r.stderr})`);
@@ -172,6 +182,17 @@ describe("0.7.40 CLI-UX: per-subcommand --help never crashes", () => {
       assert.doesNotMatch(r.stderr, STACK_RE, `unexpected stack/parse error: ${r.stderr}`);
     });
   }
+
+  it("side-effectful help does not perform the command", async () => {
+    const list = await runCli(["list", "--help"]);
+    assert.doesNotMatch(list.stdout, /No saved node configs|Saved nodes/);
+
+    const update = await runCli(["update", "--help"]);
+    assert.doesNotMatch(update.stdout, /— up to date|— a newer release|— could not reach/i);
+
+    const encrypt = await runCli(["operator", "encrypt", "--help"]);
+    assert.doesNotMatch(encrypt.stdout + encrypt.stderr, /New operator passphrase:/);
+  });
 });
 
 describe("0.7.40 CLI-UX: friendly parse errors (no raw stack traces)", () => {

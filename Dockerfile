@@ -52,7 +52,8 @@ COPY --from=build /app/node_modules ./node_modules
 COPY package.json ./
 RUN chmod +x /app/dist/cli.js && ln -sf /app/dist/cli.js /usr/local/bin/iicp-node
 ENV IICP_SUPERVISED=1 \
-    IICP_TUNNEL_DEAD_POLICY=auto
+    IICP_TUNNEL_DEAD_POLICY=auto \
+    IICP_PORT=8020
 EXPOSE 8020
 HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
   CMD node -e "require('http').get('http://localhost:8020/iicp/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"

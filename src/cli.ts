@@ -42,6 +42,12 @@ import { runProxy, createProxyServer, type TaskClient } from "./proxy/index.js";
 import { InstanceLock, NodeAlreadyServingError } from "./instance_lock.js";
 import { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 import {
+  classifyRecovery,
+  envGraceChecks,
+  nodeRegistryPrefix,
+  registryNodePresence,
+} from "./recovery.js";
+import {
   configDir,
   generateNode,
   generateOperator,
@@ -197,11 +203,13 @@ function printHelp(): void {
       `  init                       Interactive wizard — set up operator + first node config\n` +
       `  list                       List node configs saved under ~/.iicp/nodes/\n` +
       `  serve                      Register and serve a node\n` +
+      `  doctor                     Check local health, directory presence, and recovery action\n` +
       `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
       `  credits                    Show your operator wallet plus this node's credit ledger\n` +
       `  proxy                      Run the local OpenAI/Ollama/Anthropic-compat gateway (loopback; no registration)\n` +
       `  mcp-gateway                Bridge a local MCP server as an IICP provider node (registers + serves)\n` +
       `  service                    Generate/install OS supervisor units for unattended node serving\n` +
+      `  update                     Check whether a newer @iicp/client release is available\n` +
       `  operator rename <name>     Change your public display_name (signed by your operator key)\n` +
       `  operator encrypt           Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  operator decrypt           Remove at-rest encryption of the operator secret\n\n` +
@@ -245,6 +253,68 @@ function printHelp(): void {
       `  --model NAME               Pin to a specific model on the remote node\n` +
       `  --max-tokens N             Limit response length\n` +
       `  --timeout-ms N             Request timeout (default 60000)\n`,
+  );
+}
+
+function argsHaveHelp(argv: string[]): boolean {
+  return argv.includes("--help") || argv.includes("-h");
+}
+
+function printListHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node list\n\n` +
+      `List saved node configs under ~/.iicp/nodes/ without contacting the directory.\n\n` +
+      `Options:\n` +
+      `  -h, --help                 Show this help and exit without listing nodes\n`,
+  );
+}
+
+function printUpdateHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node update\n\n` +
+      `Check whether a newer @iicp/client release is available. Read-only: this command never installs or restarts anything.\n\n` +
+      `Exit codes:\n` +
+      `  0   current, unreachable registry, or help\n` +
+      `  10  newer release available\n\n` +
+      `Options:\n` +
+      `  -h, --help                 Show this help and exit without contacting npm\n`,
+  );
+}
+
+function printServeHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node serve [options]\n\n` +
+      `Register and serve an IICP provider node backed by an OpenAI-compatible backend.\n` +
+      `Use \`iicp-node init\` first for the lowest-friction saved-node path, then run:\n` +
+      `  iicp-node serve --node <NAME>\n\n` +
+      `Required (flag/env/saved node):\n` +
+      `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
+      `  --node NAME                load ~/.iicp/nodes/<NAME>.json from \`iicp-node init\`\n\n` +
+      `Core options:\n` +
+      `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434; anthropic → https://api.anthropic.com)\n` +
+      `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | anthropic\n` +
+      `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for auth'd backends\n` +
+      `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
+      `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
+      `  --region REGION            IICP_REGION (e.g. eu-central)\n` +
+      `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
+      `  --max-concurrent N         IICP_MAX_CONCURRENT (default 4)\n` +
+      `  --node-id ID               IICP_NODE_ID (auto-generated if absent)\n` +
+      `  --port N                   IICP_PORT (default 9484)\n` +
+      `  --host HOST                IICP_HOST (default :: — dual-stack IPv4+IPv6)\n` +
+      `  --skip-registration        IICP_SKIP_REGISTRATION — register-free dev mode\n` +
+      `  --force                    IICP_FORCE — take over the single-instance lock for this node_id\n\n` +
+      `Reachability and resilience:\n` +
+      `  --auto-detect-nat          IICP_AUTO_DETECT_NAT — run NAT detection at startup (default on)\n` +
+      `  --no-auto-detect-nat       disable NAT detection at startup\n` +
+      `  --external-ip-probe-url U  IICP_EXTERNAL_IP_PROBE_URL — fallback IPv4 probe\n` +
+      `  --tunnel / --no-tunnel     IICP_TUNNEL — auto Cloudflare Quick Tunnel fallback when direct reachability fails\n` +
+      `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node\n` +
+      `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server\n` +
+      `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — relay accept TCP port (default 9485)\n` +
+      `  --log-dir DIR              IICP_LOG_DIR — directory for persistent log files\n` +
+      `  --with-proxy               IICP_WITH_PROXY — also run the loopback compat proxy (127.0.0.1:9483)\n` +
+      `  -h, --help                 Show this focused serve help\n`,
   );
 }
 
@@ -506,7 +576,18 @@ async function runInit(): Promise<number> {
   }
 }
 
-function runList(): number {
+function runList(argv: string[] = []): number {
+  const { values } = safeParseArgs({
+    args: argv,
+    options: {
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  });
+  if (values.help) {
+    printListHelp();
+    return 0;
+  }
   const nodes = listNodes();
   if (nodes.length === 0) {
     process.stdout.write(`No saved node configs. Run \`iicp-node init\` first.\n`);
@@ -1849,6 +1930,112 @@ async function fetchAndDisplayCredits(
   return 0;
 }
 
+function printDoctorHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node doctor [options]\n\n` +
+      `Check local health, directory presence, and deterministic recovery action.\n\n` +
+      `options:\n` +
+      `  --node NAME                Load saved node config (~/.iicp/nodes/<NAME>.json)\n` +
+      `  --directory-url URL        Override the saved IICP directory base URL\n` +
+      `  --json                     Print machine-readable recovery state\n` +
+      `  -h, --help                 Show this help and exit\n`,
+  );
+}
+
+function doctorLoopbackHost(host: string): string {
+  const h = (host || "").trim();
+  if (h === "" || h === "::" || h === "0.0.0.0") return "127.0.0.1";
+  return h;
+}
+
+function doctorUrl(host: string, port: number): string {
+  const h = doctorLoopbackHost(host);
+  return h.includes(":") && !h.startsWith("[")
+    ? `http://[${h}]:${port}/iicp/health`
+    : `http://${h}:${port}/iicp/health`;
+}
+
+async function runDoctor(argv: string[]): Promise<number> {
+  const { values } = safeParseArgs({
+    args: argv,
+    options: {
+      node: { type: "string" },
+      "directory-url": { type: "string" },
+      json: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  });
+  if (values.help) {
+    printDoctorHelp();
+    return 0;
+  }
+  const nodeName = (values.node as string | undefined) ?? process.env.IICP_NODE_NAME ?? "default";
+  const saved = loadNode(nodeName);
+  if (!saved) {
+    process.stderr.write(`ERROR: no saved config at ~/.iicp/nodes/${nodeName}.json — run \`iicp-node init\` first.\n`);
+    return 1;
+  }
+  const directoryUrl =
+    (values["directory-url"] as string | undefined) ?? saved.directory_url ?? process.env.IICP_DIRECTORY_URL ?? "https://iicp.network/api";
+  const localHealthUrl = doctorUrl(saved.host ?? "0.0.0.0", saved.port ?? 8020);
+  let localHealthOk = false;
+  let health: Record<string, unknown> | null = null;
+  let healthError: string | null = null;
+  try {
+    const resp = await fetch(localHealthUrl, { signal: AbortSignal.timeout(2_000) });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    health = (await resp.json()) as Record<string, unknown>;
+    localHealthOk = true;
+  } catch (err) {
+    healthError = err instanceof Error ? err.message : String(err);
+  }
+  const presence = await registryNodePresence(directoryUrl, saved.node_id, 5_000);
+  const stability = (health?.["backend_stability"] ?? {}) as Record<string, unknown>;
+  const backendAttention = stability["backend_state"] === "draining";
+  const failures = !localHealthOk || presence === "absent" ? 1 : 0;
+  const { state, action } = classifyRecovery({
+    localHealthOk,
+    publicAvailable: localHealthOk,
+    directoryPresence: presence,
+    consecutiveFailures: failures,
+    graceChecks: envGraceChecks(),
+    backendAttention,
+  });
+  const prefix = nodeRegistryPrefix(saved.node_id);
+  if (values.json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          node: saved.name,
+          node_id: saved.node_id,
+          prefix,
+          directory_url: directoryUrl,
+          local_health_url: localHealthUrl,
+          local_health_ok: localHealthOk,
+          local_health_error: healthError,
+          directory_presence: presence,
+          recovery_state: state,
+          recommended_action: action,
+          health,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+  process.stdout.write(`IICP node doctor — ${saved.name}\n`);
+  process.stdout.write(`  Local health            ${localHealthOk ? "ok" : "failed"} (${localHealthUrl})\n`);
+  if (healthError) process.stdout.write(`  Local health detail     ${healthError}\n`);
+  process.stdout.write(`  Directory prefix        ${prefix}\n`);
+  process.stdout.write(`  Directory presence      ${presence}\n`);
+  process.stdout.write(`  Recovery state          ${state}\n`);
+  process.stdout.write(`  Recommended action      ${action}\n`);
+  process.stdout.write("  Note                    restart is automatic only when supervised services set IICP_SUPERVISED=1\n");
+  return 0;
+}
+
 /**
  * Resolve a passphrase: $IICP_OPERATOR_PASSPHRASE if set (headless/CI), else an interactive
  * readline prompt (this command is operator-run, so a prompt is fine here — only `serve` must
@@ -1946,14 +2133,50 @@ function printOperatorHelp(): void {
   );
 }
 
+function printOperatorEncryptHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node operator encrypt\n\n` +
+      `Password-encrypt the operator secret at rest. The command prompts for a passphrase\n` +
+      `unless $IICP_OPERATOR_PASSPHRASE is set for headless use.\n\n` +
+      `Options:\n` +
+      `  -h, --help                 Show this help and exit without prompting\n`,
+  );
+}
+
+function printOperatorDecryptHelp(): void {
+  process.stdout.write(
+    `usage: iicp-node operator decrypt\n\n` +
+      `Remove at-rest encryption and store the operator secret in plaintext again. The\n` +
+      `command prompts for the passphrase unless $IICP_OPERATOR_PASSPHRASE is set.\n\n` +
+      `Options:\n` +
+      `  -h, --help                 Show this help and exit without prompting\n`,
+  );
+}
+
 async function runOperator(argv: string[]): Promise<number> {
   const sub = argv[0];
   if (sub === undefined || sub === "--help" || sub === "-h") {
     printOperatorHelp();
     return sub === undefined ? 2 : 0;
   }
-  if (sub === "encrypt") return runOperatorEncrypt();
-  if (sub === "decrypt") return runOperatorDecrypt();
+  if (sub === "encrypt") {
+    const rest = argv.slice(1);
+    if (argsHaveHelp(rest)) {
+      printOperatorEncryptHelp();
+      return 0;
+    }
+    if (rest.length > 0) throw new CliError(`unknown operator encrypt option '${rest[0]}'`);
+    return runOperatorEncrypt();
+  }
+  if (sub === "decrypt") {
+    const rest = argv.slice(1);
+    if (argsHaveHelp(rest)) {
+      printOperatorDecryptHelp();
+      return 0;
+    }
+    if (rest.length > 0) throw new CliError(`unknown operator decrypt option '${rest[0]}'`);
+    return runOperatorDecrypt();
+  }
   if (sub !== "rename") {
     process.stderr.write(`unknown operator subcommand: ${sub}\n`);
     printOperatorHelp();
@@ -2290,7 +2513,18 @@ async function runMcpGateway(argv: string[]): Promise<number> {
 /** Command dispatch — separated so main() can wrap parse failures as clean CliError output. */
 // #521 P1 — read-only version check. Exit 10 when a newer release exists
 // (so cron/scripts can act), 0 when current/unreachable. Never installs.
-async function runUpdate(): Promise<number> {
+async function runUpdate(argv: string[] = []): Promise<number> {
+  const { values } = safeParseArgs({
+    args: argv,
+    options: {
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: false,
+  });
+  if (values.help) {
+    printUpdateHelp();
+    return 0;
+  }
   const { checkUpdate, latestNpmVersion } = await import("./updater.js");
   const latest = await latestNpmVersion();
   const v = checkUpdate(SDK_VERSION, latest);
@@ -2366,13 +2600,14 @@ async function runService(argv: string[]): Promise<number> {
 async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
   if (cmd === "init") return runInit();
-  if (cmd === "list") return runList();
+  if (cmd === "list") return runList(argv.slice(1));
   if (cmd === "query") return runQuery(argv.slice(1));
   if (cmd === "credits") return runCredits(argv.slice(1));
+  if (cmd === "doctor") return runDoctor(argv.slice(1));
   if (cmd === "operator") return runOperator(argv.slice(1));
   if (cmd === "proxy") return runProxyCmd(argv.slice(1));
   if (cmd === "mcp-gateway") return runMcpGateway(argv.slice(1));
-  if (cmd === "update") return runUpdate();
+  if (cmd === "update") return runUpdate(argv.slice(1));
   if (cmd === "service") return runService(argv.slice(1));
   if (cmd !== "serve") {
     process.stderr.write(`unknown command: ${cmd}\n`);
@@ -2415,7 +2650,7 @@ async function dispatch(argv: string[]): Promise<number> {
     allowPositionals: false,
   });
   if (values.help) {
-    printHelp();
+    printServeHelp();
     return 0;
   }
   const opts: ServeOpts = {

@@ -80,6 +80,18 @@ export type { PricingConfig } from "./pricing.js";
 export { runConformanceChecks } from "./conformance.js";
 export type { ConformanceReport, ProbeResult } from "./conformance.js";
 export { CapacityExceededError, ConcurrencyGate } from "./concurrency.js";
+export {
+  RECOVERY_EXIT_CODE,
+  DEFAULT_RECOVERY_GRACE_CHECKS,
+  DEFAULT_RECOVERY_CHECK_EVERY_HEARTBEATS,
+  nodeRegistryPrefix,
+  envGraceChecks,
+  envCheckEveryHeartbeats,
+  supervisedRecoveryEnabled,
+  classifyRecovery,
+  registryNodePresence,
+} from "./recovery.js";
+export type { RecoveryState, RecoveryAction, DirectoryPresence } from "./recovery.js";
 export type {
   ChatMessage,
   ChatOptions,

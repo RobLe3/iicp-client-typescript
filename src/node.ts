@@ -25,6 +25,14 @@ import { decryptPayload, loadOrCreateNodeCxKey } from "./confidentiality.js";
 import { verifyRelayBindTicket } from "./relay_ticket.js";
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
 import { autoUpdateStatusPayload } from "./updater.js";
+import {
+  RECOVERY_EXIT_CODE,
+  classifyRecovery,
+  envCheckEveryHeartbeats,
+  envGraceChecks,
+  registryNodePresence,
+  supervisedRecoveryEnabled,
+} from "./recovery.js";
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -355,6 +363,8 @@ export class IicpNode {
   private _tasksLatencyTotalMsPending = 0;
   /** #494 — model set registered at last register(); compared each heartbeat for drift. */
   private _registeredModels = new Set<string>();
+  private _recoveryHeartbeatSeq = 0;
+  private _recoveryFailures = 0;
   private _prom: PromLib | null = null;
   private _tasksCounter: PromCounter | null = null;
   private _latencyHistogram: PromHistogram | null = null;
@@ -808,7 +818,48 @@ export class IicpNode {
     try {
       await this.heartbeat(token);
       // #494 — detect model list drift and re-register with the updated list.
-      return await this._maybeReregisterOnModelDrift(token);
+      let nextToken = await this._maybeReregisterOnModelDrift(token);
+      this._recoveryHeartbeatSeq += 1;
+      const checkEvery = envCheckEveryHeartbeats();
+      if (checkEvery > 0 && this._recoveryHeartbeatSeq % checkEvery === 0) {
+        const presence = await registryNodePresence(this._cfg.directoryUrl, this._cfg.nodeId, 5_000);
+        const publicAvailable = this._runtimeAvailable;
+        if (!publicAvailable || presence === "absent") {
+          this._recoveryFailures += 1;
+        } else if (presence === "present") {
+          this._recoveryFailures = 0;
+        }
+        const graceChecks = envGraceChecks();
+        const { state, action } = classifyRecovery({
+          localHealthOk: true,
+          publicAvailable,
+          directoryPresence: presence,
+          consecutiveFailures: this._recoveryFailures,
+          graceChecks,
+          backendAttention: this._backendStabilitySnapshot().isDraining(),
+        });
+        if (state !== "healthy" && state !== "unknown") {
+          console.warn(
+            `[iicp-node] recovery check state=${state} action=${action} failures=${this._recoveryFailures}/${graceChecks}`,
+          );
+        }
+        if (action === "reregister") {
+          try {
+            nextToken = await this.register();
+            this._recoveryFailures = 0;
+            console.warn(`[iicp-node] recovery check re-registered ${this._cfg.nodeId}`);
+          } catch (regErr) {
+            console.warn(`[iicp-node] recovery re-registration failed: ${regErr instanceof Error ? regErr.message : String(regErr)}`);
+          }
+        } else if (action === "restart_self" && supervisedRecoveryEnabled()) {
+          console.error(
+            `[iicp-node] recovery check recommends restart (state=${state}, failures=${this._recoveryFailures}/${graceChecks}); ` +
+              `exiting with code ${RECOVERY_EXIT_CODE} so the supervisor can rebuild route + registration.`,
+          );
+          process.exit(RECOVERY_EXIT_CODE);
+        }
+      }
+      return nextToken;
     } catch (err: unknown) {
       const status = (err as { status?: number } | undefined)?.status;
       if (status === 401 || status === 404 || status === 410) {
