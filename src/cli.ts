@@ -196,6 +196,24 @@ export function tunnelDeadBehavior(policy: TunnelDeadPolicy, supervised: boolean
   return policy;
 }
 
+export function relayWorkerFallbackAllowed(relayCapable: boolean | undefined): boolean {
+  // A relay-capable node is relay infrastructure. If its own public route is
+  // unavailable, supervised services should restart and retry the public route
+  // instead of turning into a relay worker and removing relay capacity.
+  return relayCapable !== true;
+}
+
+async function exitIfSupervisedPublicFallbackUnrecovered(): Promise<void> {
+  if (tunnelDeadBehavior(tunnelDeadPolicyFromEnv(), envBool("IICP_SUPERVISED")) !== "exit") return;
+  // eslint-disable-next-line no-console
+  console.error(
+    `[iicp-node] public fallback is still unavailable after tunnel/relay attempts. ` +
+      `Exiting with code ${TUNNEL_DEAD_EXIT_CODE} so the supervisor can retry instead of ` +
+      `advertising an unverified direct route.`,
+  );
+  process.exit(TUNNEL_DEAD_EXIT_CODE);
+}
+
 function printHelp(): void {
   process.stdout.write(
     `usage: iicp-node <command> [options]\n\n` +
@@ -663,7 +681,7 @@ async function _autoElectRelay(
     if (!resp.ok) return null;
     const data = await resp.json() as { nodes?: Array<Record<string, unknown>> };
     const candidates = (data.nodes ?? []).filter(
-      (n) => n.relay_capable && n.endpoint,
+      (n) => n.relay_capable && n.endpoint && n.node_id !== nodeId,
     );
     if (!candidates.length) return null;
 
@@ -965,6 +983,14 @@ async function runServe(opts: ServeOpts): Promise<number> {
             break;
           }
         } else if (step === "relay") {
+          if (!relayWorkerFallbackAllowed(opts.relayCapable)) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[iicp-node] NAT tier=${natProfile.tier}: no tunnel for relay-capable node — ` +
+                "not falling back through another relay; supervisor will retry the public route.",
+            );
+            break;
+          }
           // eslint-disable-next-line no-console
           console.log(
             `[iicp-node] NAT tier=${natProfile.tier}: no tunnel — auto-electing a relay from directory (last resort)…`,
@@ -1033,7 +1059,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
       }
       if (tunnelHandle) {
         publicEndpoint = tunnelHandle.url;
-      } else {
+      } else if (relayWorkerFallbackAllowed(opts.relayCapable)) {
         // eslint-disable-next-line no-console
         console.log("[iicp-node] no tunnel available — auto-electing a relay from directory (last resort)…");
         const elected = await _autoElectRelay(
@@ -1047,6 +1073,13 @@ async function runServe(opts: ServeOpts): Promise<number> {
           // eslint-disable-next-line no-console
           console.log(`[iicp-node] auto-elected relay (last resort): ${relayHost}:${relayPort}`);
         }
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[iicp-node] no tunnel available for relay-capable node — not falling back through " +
+            "another relay; supervisor will retry the public route.",
+        );
+        await exitIfSupervisedPublicFallbackUnrecovered();
       }
     }
   }

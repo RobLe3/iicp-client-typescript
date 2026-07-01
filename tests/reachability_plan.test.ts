@@ -2,7 +2,7 @@
 // Guards the reorder — the serve flow consumes planReachability so the tested order is the used order.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { directTunnelFallbackReason, planReachability } from "../src/cli.js";
+import { directTunnelFallbackReason, planReachability, relayWorkerFallbackAllowed } from "../src/cli.js";
 
 describe("planReachability", () => {
   it("tunnel-first for tier-≥3 when tunnel enabled", () => {
@@ -40,5 +40,13 @@ describe("directTunnelFallbackReason", () => {
       }),
       null,
     );
+  });
+});
+
+describe("relayWorkerFallbackAllowed", () => {
+  it("keeps relay-capable nodes from becoming relay workers when public fallback fails", () => {
+    assert.equal(relayWorkerFallbackAllowed(false), true);
+    assert.equal(relayWorkerFallbackAllowed(undefined), true);
+    assert.equal(relayWorkerFallbackAllowed(true), false);
   });
 });
