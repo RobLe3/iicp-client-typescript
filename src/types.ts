@@ -23,6 +23,8 @@ export interface ClientConfig {
   routing_softmax_tau?: number;
   /** Phase 2 (#496): caller's JWT from directory registration, used to acquire consumer tokens. */
   node_token?: string;
+  /** Phase 6 (#585): default client-side policy evaluated before remote prompt dispatch. */
+  routing_policy?: RoutingPolicy;
 }
 
 export interface TaskConstraints {
@@ -52,6 +54,8 @@ export interface TaskRequest {
   task_id?: string;
   /** #488 — querying node identity for self-query neutrality at the directory. */
   source_node_id?: string;
+  /** Phase 6 (#585): optional per-request remote-routing policy override. */
+  routing_policy?: RoutingPolicy;
 }
 
 export interface TaskResponse {
@@ -149,4 +153,22 @@ export interface ChatOptions {
   model?: string;
   max_tokens?: number;
   temperature?: number;
+  routing_policy?: RoutingPolicy;
+}
+
+export type RoutingProfile =
+  | "standard"
+  | "sensitive"
+  | "eu_restricted"
+  | "strict_policy"
+  | "debug_override";
+
+export interface RoutingPolicy {
+  profile?: RoutingProfile | string;
+  allowed_regions?: string[];
+  require_encryption?: boolean;
+  require_policy_manifest?: boolean;
+  require_no_payload_retention?: boolean;
+  allow_remote_executor?: boolean;
+  known_operator_only?: boolean;
 }

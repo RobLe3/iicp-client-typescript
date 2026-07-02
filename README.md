@@ -39,12 +39,17 @@ What good looks like:
 ```bash
 iicp-node --help       # shows query, serve, proxy, mcp-gateway, credits, ...
 which iicp-node        # points to your Node/npm environment
-iicp-node --version    # prints iicp-node 0.7.79 or newer
+iicp-node --version    # prints iicp-node 0.7.80 or newer
 ```
 
 The query command contacts the public directory, discovers a matching live node,
 routes your prompt, and prints the response. No account, API key, or local node
 is required for this consumer path.
+
+Privacy note: the selected remote node can read the prompt it executes. IICP-CX
+keeps key-ready transport/relay paths confidential, but it is not
+executor-blind inference. For sensitive data, use local/browser inference or a
+fail-closed routing profile.
 
 ## Use from TypeScript
 
@@ -62,6 +67,26 @@ console.log(reply.choices[0].message.content);
 
 No. Running a node is only needed when you want to provide compute or tools to
 the mesh. Start as a client; run a node later when you want to contribute.
+
+## Routing policy profiles
+
+The client applies routing policy **after prompt-free discovery and before the
+prompt is sent**. Defaults stay adoption-friendly but keyless plaintext is still
+refused.
+
+```bash
+iicp-node query "Hello" --routing-profile standard        # default encrypted mesh
+iicp-node query "Secret" --routing-profile sensitive      # fail closed: no remote executor
+iicp-node query "Hello" --routing-profile eu-restricted   # EU/EEA regions only
+iicp-node query "Hello" --routing-profile strict-policy   # requires no-retention manifest
+```
+
+```typescript
+const reply = await new IicpClient().chat(
+  [{ role: "user", content: "Hello" }],
+  { routing_policy: { profile: "eu_restricted" } },
+);
+```
 
 ## Migrate from existing AI tools
 
@@ -88,16 +113,13 @@ base URL. Full guide: <https://iicp.network/docs/proxy>
 
 ## Provider upgrade note
 
-> **Upgrade note (0.7.79)** — upgrade provider nodes so “Direct IPv6 —
-> unverified” becomes a temporary recovery state instead of a stable endpoint
-> mode. Heartbeat recovery now treats self-attested IPv6 routes as limited reach
-> and, under launchd/systemd/Docker supervision, restarts the node so startup can
-> retry Quick Tunnel or relay fallback after cooldown.
+> **Upgrade note (0.7.80)** — clients now support remote-routing policy profiles
+> that can refuse unsafe remote dispatch before any prompt leaves the caller.
+> Use `--routing-profile sensitive` for fail-closed no-remote behavior,
+> `eu-restricted` for EU/EEA node filtering, or `strict-policy` when a
+> no-retention node policy manifest is required.
 >
-> This keeps the 0.7.78 relay-capable guard intact: relays do not self-elect
-> through another relay, and ordinary provider nodes can still use relay fallback
-> as the last-resort path. Persistent relays should use a named tunnel or
-> `IICP_PUBLIC_ENDPOINT`.
+> Existing provider reachability fixes from 0.7.79 remain intact.
 
 ### Keeping provider nodes current
 
@@ -111,7 +133,7 @@ If a node is older than 0.7.67, perform one manual upgrade/restart first,
 especially for Dockerized Python or TypeScript providers: early updater wiring
 did not reliably cover every normal `serve` path. For Docker, use a Compose
 `restart: unless-stopped` policy (or `docker run --restart unless-stopped`) so
-0.7.79 can intentionally exit from a confirmed tunnel-dead state and let Docker
+0.7.80 can intentionally exit from a confirmed tunnel-dead state and let Docker
 bring it back cleanly.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
@@ -202,6 +224,7 @@ const client = new IicpClient({
 | `region` | `undefined` | Preferred node region |
 | `api_token` | `undefined` | Bearer token for authenticated nodes |
 | `routing_epsilon` | `0.05` | ε-greedy exploration probability — with this probability a random node is selected instead of the top-ranked one, promoting discovery of new providers; `0` disables; override with `IICP_ROUTING_EPSILON` |
+| `routing_policy` | `{ profile: "standard" }` | Pre-dispatch remote-routing gate; use `sensitive`, `eu_restricted`, `strict_policy`, or an explicit debug override for special cases |
 
 ---
 

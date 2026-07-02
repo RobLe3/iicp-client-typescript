@@ -12,6 +12,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { RoutingPolicy } from "../src/types.js";
 
 const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
@@ -316,6 +317,121 @@ describe("submit", () => {
     });
 
     assert.equal(capturedHeaders["authorization"], "Bearer secret-node-token");
+    restore();
+  });
+
+  it("#585 sensitive routing profile refuses remote dispatch before sending prompt", async () => {
+    let taskCalls = 0;
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) {
+        return jsonResponse({
+          nodes: [{
+            node_id: "n-sensitive",
+            endpoint: "https://1.2.3.4:8080",
+            score: 1,
+            available: true,
+            region: "eu",
+            cx_public_key: fixtureCxKey(),
+          }],
+        });
+      }
+      taskCalls += 1;
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await assert.rejects(
+      () => client.chat([{ role: "user", content: "GDPR_CANARY_PROMPT_DO_NOT_SEND" }], {
+        routing_policy: { profile: "sensitive" },
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof IicpError);
+        assert.equal(err.code, "IICP-POLICY-ROUTING");
+        assert.match(err.message, /no prompt was sent/);
+        return true;
+      },
+    );
+    assert.equal(taskCalls, 0);
+    restore();
+  });
+
+  it("#585 eu_restricted excludes non-EU nodes and routes to EU candidate", async () => {
+    let called = "";
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) {
+        return jsonResponse({
+          nodes: [
+            {
+              node_id: "us-node",
+              endpoint: "https://1.2.3.4:8080",
+              score: 0.99,
+              available: true,
+              region: "us-east",
+              cx_public_key: fixtureCxKey("cx-us"),
+            },
+            {
+              node_id: "eu-node",
+              endpoint: "https://5.6.7.8:8080",
+              score: 0.50,
+              available: true,
+              region: "eu-central",
+              cx_public_key: fixtureCxKey("cx-eu"),
+            },
+          ],
+        });
+      }
+      called = u;
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test", routing_epsilon: 0.0 });
+    await client.submit({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: {},
+      routing_policy: { profile: "eu_restricted" } satisfies RoutingPolicy,
+    });
+    assert.match(called, /5\.6\.7\.8/);
+    restore();
+  });
+
+  it("#585 strict_policy requires no payload retention manifest", async () => {
+    let taskCalls = 0;
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) {
+        return jsonResponse({
+          nodes: [{
+            node_id: "n-retained",
+            endpoint: "https://1.2.3.4:8080",
+            score: 1,
+            available: true,
+            region: "eu",
+            cx_public_key: fixtureCxKey(),
+            node_policy_manifest: {
+              jurisdiction: "DE",
+              retention: { task_payload: "provider_defined" },
+            },
+          }],
+        });
+      }
+      taskCalls += 1;
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await assert.rejects(
+      () => client.submit({
+        intent: "urn:iicp:intent:llm:chat:v1",
+        payload: {},
+        routing_policy: { profile: "strict_policy" },
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof IicpError);
+        assert.equal(err.code, "IICP-POLICY-ROUTING");
+        assert.match(err.message, /payload_retention_not_none/);
+        return true;
+      },
+    );
+    assert.equal(taskCalls, 0);
     restore();
   });
 });

@@ -8,6 +8,12 @@ import { randomUUID } from "node:crypto";
 import { encryptPayload } from "./confidentiality.js";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
+import {
+  ROUTING_POLICY_REFUSAL_CODE,
+  filterNodesForRoutingPolicy,
+  resolvedRoutingPolicy,
+  routingPolicyRefusalMessage,
+} from "./routing_policy.js";
 import type {
   ChatMessage,
   ChatOptions,
@@ -282,25 +288,32 @@ export class IicpClient {
     }
 
     const taskId = req.task_id ?? randomUUID();
-    const allowPlaintext = _cxPlaintextFallbackAllowed();
-    let skippedKeyless = 0;
-    const confidentialityCapable = nodes.filter((node) => {
-      if (node.cx_public_key || allowPlaintext) return true;
-      skippedKeyless += 1;
+    const routingPolicy = req.routing_policy ?? this.cfg.routing_policy;
+    const effectivePolicy = resolvedRoutingPolicy(routingPolicy);
+    const allowPlaintext = _cxPlaintextFallbackAllowed() || effectivePolicy.require_encryption === false;
+    const decision = filterNodesForRoutingPolicy(nodes, effectivePolicy, { allowPlaintextDebug: allowPlaintext });
+    for (const node of nodes) {
+      if (node.cx_public_key || allowPlaintext) continue;
       console.warn(
         `IICP-CX: skipping keyless node ${_nodeShortId(node.node_id)} — refusing plaintext by default ` +
-          "(set IICP_CX_ALLOW_PLAINTEXT=1 only for transitional debugging).",
+          "(set IICP_CX_ALLOW_PLAINTEXT=1 or routing_profile=debug_override only for transitional debugging).",
       );
-      return false;
-    });
-    if (confidentialityCapable.length === 0 && skippedKeyless > 0) {
+    }
+    if (decision.eligible.length === 0 && decision.skippedKeyless > 0 && decision.rejectedReasons.length === decision.skippedKeyless) {
       throw new IicpError(
-        `IICP-CX confidentiality required: ${skippedKeyless} discovered node(s) advertised no encryption key; refusing plaintext fallback`,
+        `IICP-CX confidentiality required: ${decision.skippedKeyless} discovered node(s) advertised no encryption key; refusing plaintext fallback`,
         "IICP-CX-REQUIRED",
         { component: "sdk" },
       );
     }
-    const candidates = this._selectCandidates(confidentialityCapable, MAX_RETRIES);
+    if (decision.eligible.length === 0) {
+      throw new IicpError(
+        routingPolicyRefusalMessage(req.intent, decision, effectivePolicy),
+        ROUTING_POLICY_REFUSAL_CODE,
+        { component: "sdk" },
+      );
+    }
+    const candidates = this._selectCandidates(decision.eligible, MAX_RETRIES);
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (req.auth?.token) {
@@ -395,6 +408,7 @@ export class IicpClient {
         ...(o.region ? { region: o.region } : {}),
         ...(o.min_reputation !== undefined ? { min_reputation: o.min_reputation } : {}),
       },
+      routing_policy: o.routing_policy,
     });
 
     const result = (resp.result ?? {}) as Record<string, unknown>;

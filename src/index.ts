@@ -72,6 +72,12 @@ export {
 } from "./policy.js";
 export type { ProhibitedIntentRule } from "./policy.js";
 export {
+  ROUTING_POLICY_REFUSAL_CODE,
+  filterNodesForRoutingPolicy,
+  resolvedRoutingPolicy,
+  routingPolicyRefusalMessage,
+} from "./routing_policy.js";
+export {
   CooperativeInferencePolicy,
   configureCipPolicy,
   getCipPolicy,
@@ -108,6 +114,8 @@ export type {
   ClientConfig,
   DiscoverOptions,
   Node,
+  RoutingPolicy,
+  RoutingProfile,
   TaskAuth,
   TaskConstraints,
   TaskMetrics,

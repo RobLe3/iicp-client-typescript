@@ -270,7 +270,10 @@ function printHelp(): void {
       `  --intent URN               IICP_INTENT (default urn:iicp:intent:llm:chat:v1)\n` +
       `  --model NAME               Pin to a specific model on the remote node\n` +
       `  --max-tokens N             Limit response length\n` +
-      `  --timeout-ms N             Request timeout (default 60000)\n`,
+      `  --timeout-ms N             Request timeout (default 60000)\n` +
+      `  --routing-profile NAME     standard | sensitive | eu-restricted | strict-policy | debug-override\n` +
+      `  --allow-remote-executor    Explicitly allow remote executor prompt visibility for restrictive profiles\n` +
+      `  --region-allowlist LIST    Comma-separated allowed regions before prompt dispatch\n`,
   );
 }
 
@@ -1399,6 +1402,9 @@ function printQueryHelp(): void {
       `  --model NAME               Pin to a specific model on the remote node\n` +
       `  --max-tokens N             Limit response length\n` +
       `  --timeout-ms N             Request timeout in milliseconds (default 60000)\n` +
+      `  --routing-profile NAME     standard | sensitive | eu-restricted | strict-policy | debug-override\n` +
+      `  --allow-remote-executor    Explicitly allow remote executor prompt visibility for restrictive profiles\n` +
+      `  --region-allowlist LIST    Comma-separated allowed regions before prompt dispatch\n` +
       `  -h, --help                 Show this help and exit\n`,
   );
 }
@@ -1412,6 +1418,9 @@ async function runQuery(argv: string[]): Promise<number> {
       model: { type: "string" },
       "max-tokens": { type: "string" },
       "timeout-ms": { type: "string" },
+      "routing-profile": { type: "string" },
+      "allow-remote-executor": { type: "boolean" },
+      "region-allowlist": { type: "string" },
       node: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
@@ -1444,6 +1453,16 @@ async function runQuery(argv: string[]): Promise<number> {
   };
   if (values["model"]) payload["model"] = values["model"];
   if (values["max-tokens"]) payload["max_tokens"] = parseInt(values["max-tokens"] as string, 10);
+  const routingProfile = String(
+    (values["routing-profile"] as string | undefined) ??
+    process.env["IICP_ROUTING_PROFILE"] ??
+    "standard",
+  ).replace(/-/g, "_");
+  const regionAllowlist = String(
+    (values["region-allowlist"] as string | undefined) ??
+    process.env["IICP_REGION_ALLOWLIST"] ??
+    "",
+  ).split(",").map((r) => r.trim()).filter(Boolean);
 
   // #488 — resolve querying node identity for self-query neutrality.
   const nodeCfg = (values["node"] as string | undefined) ?? process.env["IICP_NODE"];
@@ -1455,6 +1474,12 @@ async function runQuery(argv: string[]): Promise<number> {
 
   const client = new IicpClient({ directory_url: directoryUrl, timeout_ms: timeoutMs, tls_verify: true });
   process.stderr.write(`[iicp-node] Discovering nodes for ${intent}...\n`);
+  if (routingProfile !== "sensitive") {
+    process.stderr.write(
+      "[iicp-node] privacy: the selected remote executor can read prompts it executes; " +
+      "use --routing-profile sensitive for fail-closed no-remote dispatch.\n",
+    );
+  }
 
   try {
     const resp = await client.submit({
@@ -1462,6 +1487,11 @@ async function runQuery(argv: string[]): Promise<number> {
       intent,
       payload,
       source_node_id: sourceNodeId,
+      routing_policy: {
+        profile: routingProfile,
+        allowed_regions: regionAllowlist.length > 0 ? regionAllowlist : undefined,
+        allow_remote_executor: values["allow-remote-executor"] === true ? true : undefined,
+      },
     });
     // Spec terminal success status is "success" (was "completed"); accept both.
     if ((resp.status === "success" || resp.status === "completed") && resp.result) {
