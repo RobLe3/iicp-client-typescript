@@ -39,7 +39,7 @@ What good looks like:
 ```bash
 iicp-node --help       # shows query, serve, proxy, mcp-gateway, credits, ...
 which iicp-node        # points to your Node/npm environment
-iicp-node --version    # prints iicp-node 0.7.80 or newer
+iicp-node --version    # prints iicp-node 0.7.81 or newer
 ```
 
 The query command contacts the public directory, discovers a matching live node,
