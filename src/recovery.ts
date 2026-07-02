@@ -27,6 +27,11 @@ export type RecoveryAction =
 
 export type DirectoryPresence = "present" | "absent" | "unknown";
 
+export interface RegistryRouteStatus {
+  presence: DirectoryPresence;
+  routeNeedsPromotion: boolean;
+}
+
 export function nodeRegistryPrefix(nodeId: string): string {
   const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(nodeId);
   return isUuid ? nodeId.slice(0, 8) : nodeId;
@@ -89,4 +94,66 @@ export async function registryNodePresence(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export function routeNeedsPromotionFromRegistryJson(data: unknown): boolean {
+  const root = isRecord(data) && isRecord(data.node) ? data.node : data;
+  if (!isRecord(root)) return false;
+  const summary = isRecord(root.status_summary) ? root.status_summary : {};
+
+  if (summary.state === "direct_unverified") return true;
+
+  const routeEvidence =
+    typeof root.route_evidence === "string"
+      ? root.route_evidence
+      : typeof summary.evidence_source === "string"
+        ? summary.evidence_source
+        : undefined;
+  const routingHint =
+    typeof root.routing_hint === "string"
+      ? root.routing_hint
+      : typeof summary.routing_hint === "string"
+        ? summary.routing_hint
+        : undefined;
+  const browserUsable =
+    typeof root.browser_usable === "boolean"
+      ? root.browser_usable
+      : typeof summary.browser_usable === "boolean"
+        ? summary.browser_usable
+        : undefined;
+
+  return routingHint === "http_ipv6" && routeEvidence !== "directory_observed" && browserUsable !== true;
+}
+
+export async function registryRouteStatus(
+  directoryUrl: string,
+  nodeId: string,
+  timeoutMs = 5_000,
+): Promise<RegistryRouteStatus> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${directoryUrl.replace(/\/+$/, "")}/v1/registry/nodes/${nodeRegistryPrefix(nodeId)}`, {
+      signal: controller.signal,
+    });
+    if (resp.ok) {
+      let data: unknown = {};
+      try {
+        data = await resp.json();
+      } catch {
+        data = {};
+      }
+      return { presence: "present", routeNeedsPromotion: routeNeedsPromotionFromRegistryJson(data) };
+    }
+    if (resp.status === 404) return { presence: "absent", routeNeedsPromotion: false };
+    return { presence: "unknown", routeNeedsPromotion: false };
+  } catch {
+    return { presence: "unknown", routeNeedsPromotion: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -30,7 +30,7 @@ import {
   classifyRecovery,
   envCheckEveryHeartbeats,
   envGraceChecks,
-  registryNodePresence,
+  registryRouteStatus,
   supervisedRecoveryEnabled,
 } from "./recovery.js";
 
@@ -822,9 +822,11 @@ export class IicpNode {
       this._recoveryHeartbeatSeq += 1;
       const checkEvery = envCheckEveryHeartbeats();
       if (checkEvery > 0 && this._recoveryHeartbeatSeq % checkEvery === 0) {
-        const presence = await registryNodePresence(this._cfg.directoryUrl, this._cfg.nodeId, 5_000);
+        const routeStatus = await registryRouteStatus(this._cfg.directoryUrl, this._cfg.nodeId, 5_000);
+        const presence = routeStatus.presence;
         const publicAvailable = this._runtimeAvailable;
-        if (!publicAvailable || presence === "absent") {
+        const routeNeedsPromotion = routeStatus.routeNeedsPromotion;
+        if (!publicAvailable || routeNeedsPromotion || presence === "absent") {
           this._recoveryFailures += 1;
         } else if (presence === "present") {
           this._recoveryFailures = 0;
@@ -832,7 +834,7 @@ export class IicpNode {
         const graceChecks = envGraceChecks();
         const { state, action } = classifyRecovery({
           localHealthOk: true,
-          publicAvailable,
+          publicAvailable: publicAvailable && !routeNeedsPromotion,
           directoryPresence: presence,
           consecutiveFailures: this._recoveryFailures,
           graceChecks,
@@ -842,6 +844,12 @@ export class IicpNode {
           console.warn(
             `[iicp-node] recovery check state=${state} action=${action} failures=${this._recoveryFailures}/${graceChecks}`,
           );
+          if (routeNeedsPromotion) {
+            console.warn(
+              "[iicp-node] recovery check: direct IPv6 route is still self-attested; " +
+                "supervised restart will retry tunnel/relay promotion after grace.",
+            );
+          }
         }
         if (action === "reregister") {
           try {

@@ -39,7 +39,7 @@ What good looks like:
 ```bash
 iicp-node --help       # shows query, serve, proxy, mcp-gateway, credits, ...
 which iicp-node        # points to your Node/npm environment
-iicp-node --version    # prints iicp-node 0.7.78 or newer
+iicp-node --version    # prints iicp-node 0.7.79 or newer
 ```
 
 The query command contacts the public directory, discovers a matching live node,
@@ -88,18 +88,16 @@ base URL. Full guide: <https://iicp.network/docs/proxy>
 
 ## Provider upgrade note
 
-> **Upgrade note (0.7.78)** — upgrade relay-capable and provider nodes so relay
-> services do not disappear during temporary public-tunnel recovery. Relay-capable
-> nodes now keep their role as relay infrastructure: if their own Quick Tunnel is
-> cooling down or unavailable, they do **not** fall back through another relay or
-> accidentally self-elect as a relay worker. Supervised services fail visibly so
-> launchd/systemd/Docker can retry the public route, while ordinary provider nodes
-> can still use relay fallback as the last-resort path.
+> **Upgrade note (0.7.79)** — upgrade provider nodes so “Direct IPv6 —
+> unverified” becomes a temporary recovery state instead of a stable endpoint
+> mode. Heartbeat recovery now treats self-attested IPv6 routes as limited reach
+> and, under launchd/systemd/Docker supervision, restarts the node so startup can
+> retry Quick Tunnel or relay fallback after cooldown.
 >
-> This keeps the 0.7.77 tunnel hardening intact: Quick Tunnel endpoints still
-> recover safely after sleep, idle, Cloudflare edge drops, local DNS propagation
-> lag, and `429` / `1015` cooldowns. Persistent relays should use a named tunnel
-> or `IICP_PUBLIC_ENDPOINT`.
+> This keeps the 0.7.78 relay-capable guard intact: relays do not self-elect
+> through another relay, and ordinary provider nodes can still use relay fallback
+> as the last-resort path. Persistent relays should use a named tunnel or
+> `IICP_PUBLIC_ENDPOINT`.
 
 ### Keeping provider nodes current
 
@@ -113,7 +111,7 @@ If a node is older than 0.7.67, perform one manual upgrade/restart first,
 especially for Dockerized Python or TypeScript providers: early updater wiring
 did not reliably cover every normal `serve` path. For Docker, use a Compose
 `restart: unless-stopped` policy (or `docker run --restart unless-stopped`) so
-0.7.78 can intentionally exit from a confirmed tunnel-dead state and let Docker
+0.7.79 can intentionally exit from a confirmed tunnel-dead state and let Docker
 bring it back cleanly.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP

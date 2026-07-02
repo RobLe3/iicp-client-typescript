@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyRecovery, nodeRegistryPrefix } from "../src/recovery.js";
+import { classifyRecovery, nodeRegistryPrefix, routeNeedsPromotionFromRegistryJson } from "../src/recovery.js";
 
 describe("recovery helpers", () => {
   it("uses eight-character public prefixes for UUID nodes", () => {
@@ -47,6 +47,46 @@ describe("recovery helpers", () => {
         localHealthOk: true,
         publicAvailable: false,
         directoryPresence: "absent",
+        consecutiveFailures: 3,
+        graceChecks: 3,
+      }),
+      { state: "restart_recommended", action: "restart_self" },
+    );
+  });
+
+  it("flags direct IPv6 self-attested routes for promotion", () => {
+    assert.equal(routeNeedsPromotionFromRegistryJson({
+      routing_hint: "http_ipv6",
+      route_evidence: "self_attested",
+      browser_usable: false,
+      status_summary: { state: "direct_unverified" },
+    }), true);
+    assert.equal(routeNeedsPromotionFromRegistryJson({
+      node: {
+        routing_hint: "http_ipv6",
+        route_evidence: "directory_observed",
+        browser_usable: false,
+        status_summary: { state: "ready" },
+      },
+    }), false);
+  });
+
+  it("uses limited-reach restart path for route promotion", () => {
+    assert.deepEqual(
+      classifyRecovery({
+        localHealthOk: true,
+        publicAvailable: false,
+        directoryPresence: "present",
+        consecutiveFailures: 1,
+        graceChecks: 3,
+      }),
+      { state: "limited_reach", action: "wait_cooldown" },
+    );
+    assert.deepEqual(
+      classifyRecovery({
+        localHealthOk: true,
+        publicAvailable: false,
+        directoryPresence: "present",
         consecutiveFailures: 3,
         graceChecks: 3,
       }),
