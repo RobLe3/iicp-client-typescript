@@ -92,6 +92,16 @@ export interface NodePolicyManifest {
   subprocessors?: string[];
   unsupported_intents?: string[];
   signed_statement?: string | null;
+  verification?: {
+    status?: "self_attested" | "signed_valid" | "signed_invalid" | "signed_expired" | string;
+    algorithm?: string | null;
+    key_id?: string | null;
+    signed_at?: string | null;
+    expires_at?: string | null;
+    canonical_sha256?: string | null;
+    public_key_sha256?: string | null;
+    error?: string | null;
+  };
   evidence?: string;
   [key: string]: unknown;
 }

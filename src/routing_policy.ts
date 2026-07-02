@@ -119,11 +119,24 @@ function nodeRejectionReason(
     ? node.node_policy_manifest
     : undefined;
   if (policy.require_policy_manifest && !manifest) return "missing_policy_manifest";
+  if (policy.profile === "strict_policy" && !manifestSignedVerified(manifest)) {
+    return "policy_manifest_not_signed";
+  }
   if (policy.require_no_payload_retention && !declaresNoPayloadRetention(manifest)) {
     return "payload_retention_not_none";
   }
   if (policy.known_operator_only) return "known_operator_not_verified";
   return null;
+}
+
+function manifestSignedVerified(manifest?: Record<string, unknown> | null): boolean {
+  const verification = manifest?.verification;
+  return (
+    (typeof verification === "object" &&
+      verification !== null &&
+      (verification as Record<string, unknown>).status === "signed_valid") ||
+    manifest?.evidence === "signed_verified"
+  );
 }
 
 function regionAllowed(region: string, allowed: string[]): boolean {
