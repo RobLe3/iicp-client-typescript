@@ -5,7 +5,9 @@
 
 import { randomUUID } from "node:crypto";
 
+import { encryptPayload } from "./confidentiality.js";
 import { IicpError } from "./errors.js";
+import { ensureIntentAllowed } from "./policy.js";
 import type {
   ChatMessage,
   ChatOptions,
@@ -16,7 +18,6 @@ import type {
   TaskRequest,
   TaskResponse,
 } from "./types.js";
-import { encryptPayload } from "./confidentiality.js";
 
 const INTENT_RE = /^urn:iicp:intent:[a-z0-9_:/-]+$/;
 const MAX_TIMEOUT_MS = 120_000;
@@ -247,6 +248,12 @@ export class IicpClient {
         route_evidence: typeof node.route_evidence === "string" ? node.route_evidence : undefined,
         routing_hint: typeof node.routing_hint === "string" ? node.routing_hint : undefined,
         browser_usable: browserUsable,
+        node_policy_manifest:
+          node.node_policy_manifest && typeof node.node_policy_manifest === "object"
+            ? (node.node_policy_manifest as Record<string, unknown>)
+            : node.node_policy_manifest === null
+              ? null
+              : undefined,
       });
     }
     return nodes;
@@ -484,6 +491,7 @@ export class IicpClient {
         "SDK-02",
       );
     }
+    ensureIntentAllowed(intent);
   }
 
   private async _get(url: string, timeoutMs: number, traceparent?: string): Promise<unknown> {

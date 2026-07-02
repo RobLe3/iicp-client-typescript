@@ -77,6 +77,21 @@ export interface CxPublicKey {
   key_id: string;
 }
 
+export interface NodePolicyManifest {
+  version?: string | null;
+  jurisdiction?: string | null;
+  policy_url?: string | null;
+  contact_url?: string | null;
+  remote_executor_can_read_prompt?: boolean;
+  training_use?: "none" | "opt_in" | "provider_defined" | string;
+  retention?: Record<string, unknown>;
+  subprocessors?: string[];
+  unsupported_intents?: string[];
+  signed_statement?: string | null;
+  evidence?: string;
+  [key: string]: unknown;
+}
+
 export interface Node {
   node_id: string;
   endpoint: string;
@@ -98,6 +113,8 @@ export interface Node {
   route_evidence?: string;
   routing_hint?: string;
   browser_usable?: boolean;
+  /** Phase-1 compliance: public, self-attested node policy manifest. */
+  node_policy_manifest?: NodePolicyManifest | null;
 }
 
 export interface ChatMessage {

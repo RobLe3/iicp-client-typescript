@@ -65,6 +65,13 @@ export type { AuditReport, NodeAuditResult } from "./trust_auditor.js";
 export { PeerManager } from "./peer_manager.js";
 export type { PeerInfo } from "./peer_manager.js";
 export {
+  POLICY_REFUSAL_CODE,
+  PROHIBITED_INTENT_RULES,
+  ensureIntentAllowed,
+  prohibitedIntentReason,
+} from "./policy.js";
+export type { ProhibitedIntentRule } from "./policy.js";
+export {
   CooperativeInferencePolicy,
   configureCipPolicy,
   getCipPolicy,

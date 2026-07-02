@@ -90,6 +90,25 @@ describe("intent validation", () => {
     );
   });
 
+  it("policy: refuses prohibited intent before discovery", async () => {
+    let called = false;
+    const restore = mockFetch(() => {
+      called = true;
+      return jsonResponse({ nodes: [] });
+    });
+    const client = new IicpClient();
+    await assert.rejects(
+      () => client.submit({ intent: "urn:iicp:intent:social-scoring:score:v1", payload: {} }),
+      (err: unknown) => {
+        assert.ok(err instanceof IicpError);
+        assert.equal(err.code, "IICP-POLICY-001");
+        return true;
+      },
+    );
+    assert.equal(called, false);
+    restore();
+  });
+
   it("SDK-02: valid intent URN is not rejected by intent check", async () => {
     const restore = mockFetch((url) => {
       const u = url.toString();
@@ -138,6 +157,11 @@ describe("discover", () => {
               route_evidence: "directory_observed",
               routing_hint: "https_direct",
               browser_usable: true,
+              node_policy_manifest: {
+                jurisdiction: "DE",
+                training_use: "none",
+                evidence: "self_attested",
+              },
             },
             { node_id: "n2", endpoint: "https://1.2.3.5:9484", score: 0.80, available: true, region: "us" },
           ],
@@ -162,6 +186,7 @@ describe("discover", () => {
     assert.equal(nodes[0].route_evidence, "directory_observed");
     assert.equal(nodes[0].routing_hint, "https_direct");
     assert.equal(nodes[0].browser_usable, true);
+    assert.equal(nodes[0].node_policy_manifest?.jurisdiction, "DE");
     // absent against older directory → undefined, no break
     assert.equal(nodes[1].health_label, undefined);
     restore();
