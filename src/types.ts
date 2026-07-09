@@ -92,8 +92,9 @@ export interface NodePolicyManifest {
   subprocessors?: string[];
   unsupported_intents?: string[];
   signed_statement?: string | null;
+  manifest_identity_level?: "self_attested" | "signed_valid" | "operator_bound" | "known_operator" | "rotated" | "revoked" | string | null;
   verification?: {
-    status?: "self_attested" | "signed_valid" | "signed_invalid" | "signed_expired" | string;
+    status?: "self_attested" | "signed_valid" | "signed_invalid" | "signed_expired" | "signed_revoked" | string;
     algorithm?: string | null;
     key_id?: string | null;
     signed_at?: string | null;
@@ -173,6 +174,8 @@ export type RoutingProfile =
   | "strict_policy"
   | "debug_override";
 
+export type RequiredManifestIdentityLevel = "signed_valid" | "operator_bound" | "known_operator";
+
 export interface RoutingPolicy {
   profile?: RoutingProfile | string;
   allowed_regions?: string[];
@@ -181,4 +184,5 @@ export interface RoutingPolicy {
   require_no_payload_retention?: boolean;
   allow_remote_executor?: boolean;
   known_operator_only?: boolean;
+  required_manifest_identity_level?: RequiredManifestIdentityLevel | string;
 }

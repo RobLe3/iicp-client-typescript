@@ -479,6 +479,51 @@ describe("submit", () => {
     restore();
   });
 
+  it("#610 requires operator-bound manifest identity before dispatch", async () => {
+    let taskCalls = 0;
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) {
+        return jsonResponse({
+          nodes: [{
+            node_id: "n-signed-only",
+            endpoint: "https://1.2.3.4:8080",
+            score: 1,
+            available: true,
+            region: "eu",
+            cx_public_key: fixtureCxKey(),
+            node_policy_manifest: {
+              jurisdiction: "DE",
+              retention: { task_payload: "none" },
+              evidence: "signed_verified",
+              verification: { status: "signed_valid" },
+              manifest_identity_level: "signed_valid",
+            },
+          }],
+        });
+      }
+      taskCalls += 1;
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" });
+    await assert.rejects(
+      () => client.submit({
+        intent: "urn:iicp:intent:llm:chat:v1",
+        payload: {},
+        routing_policy: { required_manifest_identity_level: "operator_bound" },
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof IicpError);
+        assert.equal(err.code, "IICP-POLICY-ROUTING");
+        assert.match(err.message, /manifest_identity_level_too_low/);
+        return true;
+      },
+    );
+    assert.equal(taskCalls, 0);
+    restore();
+  });
+
+
 });
 
 // SDK-06: W3C traceparent propagation

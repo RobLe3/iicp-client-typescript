@@ -108,9 +108,12 @@ describe("_toolToIntent", () => {
 // ── test 4: dangerous tools filtered ─────────────────────────────────────────
 
 describe("dangerous tool filtering", () => {
-  it("filters bash/exec/shell from active tools", () => {
-    const dangerous = new Set(["bash", "shell", "exec", "run_command", "eval"]);
-    const tools = ["read_file", "bash", "list_dir", "exec"];
+  it("filters dangerous public-unknown tool-risk classes", () => {
+    const dangerous = new Set([
+      "bash", "shell", "exec", "run_command", "eval",
+      "write_file", "browser_control", "credential_access", "system_control",
+    ]);
+    const tools = ["read_file", "write_file", "browser_control", "list_dir", "exec"];
     const active = tools.filter((t) => !dangerous.has(t.toLowerCase()));
     assert.deepEqual(active, ["read_file", "list_dir"]);
   });

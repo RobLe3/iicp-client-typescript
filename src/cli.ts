@@ -2391,9 +2391,14 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 // by accident. The required --tools allowlist + allow_tool_execution opt-in are
 // the primary controls; this is a best-effort safety net.
 const _MCP_DANGEROUS = new Set([
+  // shells / interpreters / process execution
   "bash", "sh", "zsh", "fish", "shell", "powershell", "pwsh", "cmd",
   "exec", "execute", "run_command", "run", "system", "eval",
   "python", "python3", "node", "ruby", "perl", "subprocess", "popen", "spawn",
+  // #601 tool-risk classes that must not be public-unknown by default
+  "write_file", "file_write", "filesystem_write", "delete_file", "remove_file",
+  "browser_control", "computer_use", "credential_access", "read_secret", "secrets",
+  "system_control", "service_control", "physical_world", "regulated_decision",
 ]);
 
 function _toolToIntent(name: string): string {
@@ -2443,7 +2448,7 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   if (activeTools.length === 0) {
     process.stderr.write(
       `ERROR: --tools is required. Provide a comma-separated list of MCP tool names.\n` +
-        `  Example: iicp-node mcp-gateway --tools read_file,list_dir --mcp-url http://localhost:8001\n`,
+        `  Example: iicp-node mcp-gateway --tools summarize_text,lookup_status --mcp-url http://localhost:8001\n`,
     );
     return 2;
   }
@@ -2494,7 +2499,7 @@ async function runMcpGateway(argv: string[]): Promise<number> {
     });
     if (!resp.ok) throw new Error(`MCP server unreachable: ${resp.status}`);
     const data = await resp.json() as Record<string, unknown>;
-    if (data["error"]) throw new Error((data["error"] as Record<string, unknown>)["message"] as string ?? "MCP error");
+    if (data["error"]) throw new Error("MCP tool returned an error");
     return data["result"];
   }
 

@@ -7,6 +7,10 @@
 
 import type { Node, RoutingPolicy, RoutingProfile } from "./types.js";
 
+type EffectiveRoutingPolicy = Required<Omit<RoutingPolicy, "required_manifest_identity_level">> & {
+  required_manifest_identity_level?: RoutingPolicy["required_manifest_identity_level"];
+};
+
 export const ROUTING_POLICY_REFUSAL_CODE = "IICP-POLICY-ROUTING";
 
 export interface RoutingPolicyDecision {
@@ -17,7 +21,7 @@ export interface RoutingPolicyDecision {
 
 const EU_REGION_PREFIXES = ["eu", "eea"];
 
-export function resolvedRoutingPolicy(policy?: RoutingPolicy): Required<RoutingPolicy> {
+export function resolvedRoutingPolicy(policy?: RoutingPolicy): EffectiveRoutingPolicy {
   let profile = normalizeProfile(policy?.profile ?? "standard");
   const defaults = profileDefaults(profile);
   if (!defaults) profile = "standard";
@@ -30,6 +34,7 @@ export function resolvedRoutingPolicy(policy?: RoutingPolicy): Required<RoutingP
     require_no_payload_retention: policy?.require_no_payload_retention ?? d.require_no_payload_retention,
     allow_remote_executor: policy?.allow_remote_executor ?? d.allow_remote_executor,
     known_operator_only: policy?.known_operator_only ?? false,
+    required_manifest_identity_level: policy?.required_manifest_identity_level ?? d.required_manifest_identity_level,
   };
 }
 
@@ -73,7 +78,7 @@ function normalizeProfile(profile: string): RoutingProfile {
   return profile.replace(/-/g, "_").toLowerCase() as RoutingProfile;
 }
 
-function profileDefaults(profile: string): Required<RoutingPolicy> | null {
+function profileDefaults(profile: string): EffectiveRoutingPolicy | null {
   const base = {
     allowed_regions: [] as string[],
     require_encryption: true,
@@ -81,6 +86,7 @@ function profileDefaults(profile: string): Required<RoutingPolicy> | null {
     require_no_payload_retention: false,
     allow_remote_executor: true,
     known_operator_only: false,
+    required_manifest_identity_level: undefined as string | undefined,
   };
   switch (profile) {
     case "standard":
@@ -105,7 +111,7 @@ function profileDefaults(profile: string): Required<RoutingPolicy> | null {
 
 function nodeRejectionReason(
   node: Node,
-  policy: Required<RoutingPolicy>,
+  policy: EffectiveRoutingPolicy,
   allowPlaintextDebug: boolean,
 ): string | null {
   if (policy.allow_remote_executor === false) return "remote_executor_disabled";
@@ -125,7 +131,8 @@ function nodeRejectionReason(
   if (policy.require_no_payload_retention && !declaresNoPayloadRetention(manifest)) {
     return "payload_retention_not_none";
   }
-  if (policy.known_operator_only) return "known_operator_not_verified";
+  const requiredLevel = policy.required_manifest_identity_level ?? (policy.known_operator_only ? "known_operator" : undefined);
+  if (requiredLevel) return manifestIdentityRejectionReason(manifest, requiredLevel);
   return null;
 }
 
@@ -137,6 +144,28 @@ function manifestSignedVerified(manifest?: Record<string, unknown> | null): bool
       (verification as Record<string, unknown>).status === "signed_valid") ||
     manifest?.evidence === "signed_verified"
   );
+}
+
+const MANIFEST_IDENTITY_RANK: Record<string, number> = {
+  self_attested: 0,
+  signed_valid: 1,
+  operator_bound: 2,
+  known_operator: 3,
+  rotated: -1,
+  revoked: -1,
+};
+
+function manifestIdentityRejectionReason(manifest: Record<string, unknown> | undefined, requiredLevel: string): string | null {
+  const required = ["signed_valid", "operator_bound", "known_operator"].includes(requiredLevel)
+    ? requiredLevel
+    : "known_operator";
+  const level = typeof manifest?.manifest_identity_level === "string" ? manifest.manifest_identity_level : undefined;
+  if (!level) return "missing_manifest_identity";
+  if (level === "revoked" || level === "rotated") return "policy_manifest_revoked_or_rotated";
+  if ((MANIFEST_IDENTITY_RANK[level] ?? -1) < MANIFEST_IDENTITY_RANK[required]) {
+    return "manifest_identity_level_too_low";
+  }
+  return null;
 }
 
 function regionAllowed(region: string, allowed: string[]): boolean {

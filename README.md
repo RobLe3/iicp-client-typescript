@@ -88,6 +88,18 @@ const reply = await new IicpClient().chat(
 );
 ```
 
+For stricter deployments, require a minimum policy-manifest identity level
+before any prompt leaves the client. This keeps the default open mesh behavior
+unchanged, but lets controllers fail closed on self-attested or rotated/revoked
+providers.
+
+```typescript
+const reply = await new IicpClient().chat(
+  [{ role: "user", content: "Hello" }],
+  { routing_policy: { required_manifest_identity_level: "operator_bound" } },
+);
+```
+
 ## Migrate from existing AI tools
 
 Direct call:
