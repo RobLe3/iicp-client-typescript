@@ -25,6 +25,8 @@ export interface ClientConfig {
   node_token?: string;
   /** Phase 6 (#585): default client-side policy evaluated before remote prompt dispatch. */
   routing_policy?: RoutingPolicy;
+  /** Route endpoint migration mode. Default: auto. */
+  route_discovery_mode?: "auto" | "ticketed" | "legacy";
 }
 
 export interface TaskConstraints {
@@ -63,6 +65,8 @@ export interface TaskResponse {
   result: unknown;
   status: string;
   metrics?: TaskMetrics;
+  generated_by_ai?: boolean;
+  dispatch_ticket_id_prefix?: string;
 }
 
 export interface DiscoverOptions {
@@ -130,6 +134,7 @@ export interface Node {
   browser_usable?: boolean;
   /** Phase-1 compliance: public, self-attested node policy manifest. */
   node_policy_manifest?: NodePolicyManifest | null;
+  dispatch_ticket_id_prefix?: string;
 }
 
 export interface ChatMessage {
@@ -154,6 +159,7 @@ export interface ChatResponse {
   choices: ChatChoice[];
   usage?: ChatUsage;
   node_id?: string;
+  generated_by_ai?: boolean;
 }
 
 export interface ChatOptions {

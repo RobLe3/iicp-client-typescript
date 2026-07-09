@@ -16,6 +16,10 @@ import type { RoutingPolicy } from "../src/types.js";
 
 const PACKAGE_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
+beforeEach(() => {
+  process.env.IICP_ROUTE_DISCOVERY_MODE = "legacy";
+});
+
 // Helper: mock globalThis.fetch for a test
 function mockFetch(handler: (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>) {
   const original = globalThis.fetch;
@@ -105,6 +109,18 @@ describe("intent validation", () => {
         assert.equal(err.code, "IICP-POLICY-001");
         return true;
       },
+    );
+    assert.equal(called, false);
+    restore();
+  });
+
+  it("policy: refuses high-risk intent before discovery", async () => {
+    let called = false;
+    const restore = mockFetch(() => { called = true; return jsonResponse({ nodes: [] }); });
+    const client = new IicpClient();
+    await assert.rejects(
+      () => client.submit({ intent: "urn:iicp:intent:credit:decision:v1", payload: {} }),
+      (err: unknown) => err instanceof IicpError && err.code === "IICP-POLICY-001",
     );
     assert.equal(called, false);
     restore();
@@ -295,6 +311,52 @@ describe("submit", () => {
         return true;
       },
     );
+    restore();
+  });
+
+  it("prefers ticketed dispatch and exposes only the redacted ticket prefix", async () => {
+    const calls: string[] = [];
+    const restore = mockFetch((url) => {
+      const value = url.toString();
+      calls.push(value);
+      if (value.includes("/v1/dispatch/ticket")) {
+        return jsonResponse({
+          ticket: "secret-ticket-token",
+          ticket_id_prefix: "abc123def456",
+          node_id: "node-ticket",
+          route: {
+            node_id: "node-ticket",
+            endpoint: "https://1.2.3.4:9484",
+            score: 0.9,
+            available: true,
+            region: "eu",
+            cx_public_key: fixtureCxKey(),
+          },
+        }, 201);
+      }
+      return jsonResponse({ task_id: "task-ticket", status: "success", result: { answer: 42 } });
+    });
+    const client = new IicpClient({ directory_url: "https://directory.example", route_discovery_mode: "auto" });
+    const response = await client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } });
+    assert.equal(response.generated_by_ai, true);
+    assert.equal(response.dispatch_ticket_id_prefix, "abc123def456");
+    assert.equal(calls.some((url) => url.includes("/v1/discover")), false);
+    assert.equal(JSON.stringify(response).includes("secret-ticket-token"), false);
+    restore();
+  });
+
+  it("does not downgrade after a ticket policy refusal", async () => {
+    let legacyCalled = false;
+    const restore = mockFetch((url) => {
+      if (url.toString().includes("/v1/discover")) legacyCalled = true;
+      return jsonResponse({ error: { code: "validation_error" } }, 422);
+    });
+    const client = new IicpClient({ directory_url: "https://directory.example", route_discovery_mode: "auto" });
+    await assert.rejects(
+      () => client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: {} }),
+      (err: unknown) => err instanceof IicpError && err.code === "IICP-DISPATCH-TICKET-422",
+    );
+    assert.equal(legacyCalled, false);
     restore();
   });
 

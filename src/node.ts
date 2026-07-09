@@ -1213,7 +1213,7 @@ export class IicpNode {
           const result = await relaySession.forwardTask(task);
           const taskId = (task as Record<string, unknown>).task_id ?? "";
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ task_id: taskId, status: "completed", ...result }));
+          res.end(JSON.stringify({ task_id: taskId, status: "completed", ...result, generated_by_ai: true }));
         } catch (exc) {
           const msg = exc instanceof Error ? exc.message : String(exc);
           res.writeHead(502, { "Content-Type": "application/json" });
@@ -1419,7 +1419,7 @@ export class IicpNode {
       }
       try {
         const result = await session.forwardTask(task, 120_000);
-        this._relayJson(res, 200, { task_id: task.task_id ?? "", status: "completed", ...result });
+        this._relayJson(res, 200, { task_id: task.task_id ?? "", status: "completed", ...result, generated_by_ai: true });
       } catch (exc) {
         const msg = exc instanceof Error ? exc.message : String(exc);
         this._relayJson(res, 502, { error: { code: "IICP-E031", message: `relay session forward failed: ${msg}` } });
@@ -1707,7 +1707,7 @@ export class IicpNode {
           }
           this._tasksSuccessPending++;
           if (latencyMs > 0) this._tasksLatencyTotalMsPending += latencyMs;
-          const body = JSON.stringify({ task_id: taskId, status: "completed", ...result });
+          const body = JSON.stringify({ task_id: taskId, status: "completed", ...result, generated_by_ai: true });
           res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
           res.end(body);
           // TC-9c: fire best-effort CIPWorkerReceipt to the directory (server-side award path).

@@ -67,10 +67,12 @@ export type { PeerInfo } from "./peer_manager.js";
 export {
   POLICY_REFUSAL_CODE,
   PROHIBITED_INTENT_RULES,
+  HIGH_RISK_INTENT_RULES,
+  classifyIntent,
   ensureIntentAllowed,
   prohibitedIntentReason,
 } from "./policy.js";
-export type { ProhibitedIntentRule } from "./policy.js";
+export type { IntentRiskCategory, ProhibitedIntentRule } from "./policy.js";
 export {
   ROUTING_POLICY_REFUSAL_CODE,
   filterNodesForRoutingPolicy,

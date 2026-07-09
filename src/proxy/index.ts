@@ -181,9 +181,13 @@ async function readJson(req: http.IncomingMessage): Promise<Record<string, unkno
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
-function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+function sendJson(res: http.ServerResponse, status: number, body: unknown, generatedByAi = false): void {
   const data = JSON.stringify(body);
-  res.writeHead(status, { "Content-Type": "application/json", "Server": SERVER_ID });
+  res.writeHead(status, {
+    "Content-Type": "application/json",
+    "Server": SERVER_ID,
+    ...(generatedByAi ? { "X-IICP-Generated-By-AI": "true" } : {}),
+  });
   res.end(data);
 }
 
@@ -213,7 +217,7 @@ async function handleOpenAIChat(client: TaskClient, req: http.IncomingMessage, r
   const model = (body.model as string) ?? "iicp";
   const out = await runChatTask(client, messagesOf(body), model, extraOf(body), body);
   if (out.kind === "error") return sendJson(res, out.status, openaiErr(out.code, errMsg(out.status)));
-  return sendJson(res, 200, toOpenAI(out.resp, model));
+  return sendJson(res, 200, toOpenAI(out.resp, model), true);
 }
 
 async function handleOllamaChat(client: TaskClient, req: http.IncomingMessage, res: http.ServerResponse, generate: boolean) {
@@ -227,11 +231,11 @@ async function handleOllamaChat(client: TaskClient, req: http.IncomingMessage, r
   if (out.kind === "error") return sendJson(res, out.status, ollamaErr(out.code, errMsg(out.status)));
   const payload = generate ? toOllamaGenerate(out.resp, model) : toOllama(out.resp, model);
   if (stream) {
-    res.writeHead(200, { "Content-Type": "application/x-ndjson", "Server": SERVER_ID });
+    res.writeHead(200, { "Content-Type": "application/x-ndjson", "Server": SERVER_ID, "X-IICP-Generated-By-AI": "true" });
     res.end(JSON.stringify(payload) + "\n"); // one terminal NDJSON line (done=true)
     return;
   }
-  return sendJson(res, 200, payload);
+  return sendJson(res, 200, payload, true);
 }
 
 async function handleAnthropicMessages(client: TaskClient, req: http.IncomingMessage, res: http.ServerResponse) {
@@ -243,7 +247,7 @@ async function handleAnthropicMessages(client: TaskClient, req: http.IncomingMes
   const msg = toAnthropic(out.resp, model, "iicp");
   if (stream) {
     const text = firstMessage(out.resp).content;
-    res.writeHead(200, { "Content-Type": "text/event-stream", "Server": SERVER_ID });
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Server": SERVER_ID, "X-IICP-Generated-By-AI": "true" });
     const ev = (type: string, data: unknown) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...(data as object) })}\n\n`);
     ev("message_start", { message: msg });
     ev("content_block_start", { index: 0, content_block: { type: "text", text: "" } });
@@ -254,7 +258,7 @@ async function handleAnthropicMessages(client: TaskClient, req: http.IncomingMes
     res.end();
     return;
   }
-  return sendJson(res, 200, msg);
+  return sendJson(res, 200, msg, true);
 }
 
 // ── server ───────────────────────────────────────────────────────────────────

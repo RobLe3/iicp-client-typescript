@@ -9,6 +9,7 @@
 import { IicpError } from "./errors.js";
 
 export const POLICY_REFUSAL_CODE = "IICP-POLICY-001";
+export type IntentRiskCategory = "prohibited" | "high_risk" | "transparency_risk" | "minimal_or_general";
 
 export interface ProhibitedIntentRule {
   rule_id: string;
@@ -60,6 +61,25 @@ export const PROHIBITED_INTENT_RULES: readonly ProhibitedIntentRule[] = [
   },
 ];
 
+export const HIGH_RISK_INTENT_RULES: readonly ProhibitedIntentRule[] = [
+  { rule_id: "eu-ai-act-employment-workforce", label: "employment or workforce decision", fragments: ["employment:hiring", "employment:screen", "employment:rank", "recruitment:decision", "workforce:decision", "worker-management", "worker:performance", "worker:discipline"] },
+  { rule_id: "eu-ai-act-education-admission-grading", label: "education admission or grading decision", fragments: ["education:admission", "education:grading", "education:grade", "student:admission", "student:assess", "exam-grading"] },
+  { rule_id: "eu-ai-act-credit-essential-services", label: "credit or essential-services decision", fragments: ["credit-scoring", "credit:score", "credit:decision", "essential-services", "benefits:eligibility", "public-benefit:eligibility"] },
+  { rule_id: "eu-ai-act-law-enforcement-border-justice", label: "law enforcement, border, justice or democratic-process decision", fragments: ["law-enforcement", "law_enforcement", "migration:decision", "asylum:decision", "border-control", "justice:decision", "democratic-process", "election:decision"] },
+  { rule_id: "eu-ai-act-healthcare-critical-infrastructure", label: "healthcare or critical-infrastructure safety decision", fragments: ["healthcare:decision", "medical:diagnosis", "medical:triage", "clinical:decision", "critical-infrastructure", "grid:stabilize", "hospital:surge-capacity"] },
+  { rule_id: "eu-ai-act-physical-world-control", label: "physical-world control", fragments: ["robotics:control", "robotics:fleet", "drone:control", "drone:search", "iot:actuate", "physical-world", "system_control"] },
+];
+
+const TRANSPARENCY_FRAGMENTS = ["chatbot", "ai-assistant", "synthetic-media", "deepfake:labelled", "content:generate-public", "creative:generate"];
+
+export function classifyIntent(intent: string): IntentRiskCategory {
+  const normalized = intent.trim().toLowerCase();
+  if (PROHIBITED_INTENT_RULES.some((rule) => rule.fragments.some((fragment) => normalized.includes(fragment)))) return "prohibited";
+  if (HIGH_RISK_INTENT_RULES.some((rule) => rule.fragments.some((fragment) => normalized.includes(fragment)))) return "high_risk";
+  if (TRANSPARENCY_FRAGMENTS.some((fragment) => normalized.includes(fragment))) return "transparency_risk";
+  return "minimal_or_general";
+}
+
 export function prohibitedIntentReason(intent: string): string | undefined {
   const normalized = intent.trim().toLowerCase();
   for (const rule of PROHIBITED_INTENT_RULES) {
@@ -71,10 +91,14 @@ export function prohibitedIntentReason(intent: string): string | undefined {
 }
 
 export function ensureIntentAllowed(intent: string): void {
-  const reason = prohibitedIntentReason(intent);
-  if (!reason) return;
+  const category = classifyIntent(intent);
+  const normalized = intent.trim().toLowerCase();
+  const rule = [...PROHIBITED_INTENT_RULES, ...HIGH_RISK_INTENT_RULES]
+    .find((candidate) => candidate.fragments.some((fragment) => normalized.includes(fragment)));
+  if (!rule || (category !== "prohibited" && category !== "high_risk")) return;
+  const reason = `${rule.label} (${rule.rule_id})`;
   throw new IicpError(
-    `Intent refused by IICP client policy before discovery/routing: ${reason}. Use a lawful, documented, human-reviewed compliance path outside the public mesh for restricted/high-risk workflows.`,
+    `Intent refused by IICP client policy before discovery/routing: ${reason} [${category}]. Use an explicit private, documented, human-reviewed compliance path outside the public mesh for restricted/high-risk workflows.`,
     POLICY_REFUSAL_CODE,
     { component: "sdk" },
   );

@@ -11,6 +11,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { IicpClient } from "../src/client.js";
 
+process.env.IICP_ROUTE_DISCOVERY_MODE = "legacy";
+
 type FetchHandler = (url: string | URL | Request, init?: RequestInit) => Response | Promise<Response>;
 
 function mockFetch(handler: FetchHandler) {

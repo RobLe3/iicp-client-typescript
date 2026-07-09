@@ -31,6 +31,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 3;
 const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
+class LegacyDiscoveryRequired extends Error {}
+
 /** SSRF guard: return true only if url is safe to use as a node endpoint (#388). */
 function _isSsrfSafe(url: string): boolean {
   let parsed: URL;
@@ -104,6 +106,7 @@ const DEFAULT_CONFIG: ClientConfig = {
   routing_strategy: "epsilon",
   routing_top_k: DEFAULT_ROUTING_TOP_K,
   routing_softmax_tau: DEFAULT_ROUTING_SOFTMAX_TAU,
+  route_discovery_mode: "auto",
 };
 
 const CONSUMER_TOKEN_EXPIRY_BUFFER_S = 30;
@@ -155,6 +158,11 @@ export class IicpClient {
     if (merged.routing_strategy === undefined) merged.routing_strategy = "epsilon";
     if (merged.routing_top_k === undefined) merged.routing_top_k = DEFAULT_ROUTING_TOP_K;
     if (merged.routing_softmax_tau === undefined) merged.routing_softmax_tau = DEFAULT_ROUTING_SOFTMAX_TAU;
+    const envRouteMode = process.env["IICP_ROUTE_DISCOVERY_MODE"];
+    if (config?.route_discovery_mode === undefined && (envRouteMode === "auto" || envRouteMode === "ticketed" || envRouteMode === "legacy")) {
+      merged.route_discovery_mode = envRouteMode;
+    }
+    if (!merged.route_discovery_mode) merged.route_discovery_mode = "auto";
     this.cfg = merged;
   }
 
@@ -189,6 +197,88 @@ export class IicpClient {
   // Public async API
   // ------------------------------------------------------------------
 
+  private _nodeFromRoute(raw: Record<string, unknown>, ticketIdPrefix?: string): Node | undefined {
+    const endpoint = String(raw.endpoint ?? "");
+    const nodeId = String(raw.node_id ?? "");
+    if (!nodeId || !_isSsrfSafe(endpoint)) return undefined;
+    const rawCx = (raw.cx_public_key ?? raw.public_key) as Record<string, string> | undefined;
+    return {
+      node_id: nodeId,
+      endpoint,
+      score: Number(raw.score ?? 0),
+      available: Boolean(raw.available ?? true),
+      region: String(raw.region ?? ""),
+      latency_estimate_ms: raw.latency_estimate_ms as number | undefined,
+      reputation_score: raw.reputation_score as number | undefined,
+      health_label: raw.health_label as string | undefined,
+      exposure_mode: raw.exposure_mode as string | undefined,
+      cx_public_key: rawCx && rawCx.algorithm && rawCx.key && rawCx.key_id
+        ? { algorithm: rawCx.algorithm, encoding: rawCx.encoding, key: rawCx.key, key_id: rawCx.key_id }
+        : undefined,
+      transport: Array.isArray(raw.transport) ? raw.transport.map(String) : undefined,
+      directory_observed_reachable: typeof raw.directory_observed_reachable === "boolean"
+        ? raw.directory_observed_reachable
+        : raw.directory_observed_reachable === null ? null : undefined,
+      route_evidence: typeof raw.route_evidence === "string" ? raw.route_evidence : undefined,
+      routing_hint: typeof raw.routing_hint === "string" ? raw.routing_hint : undefined,
+      browser_usable: typeof raw.browser_usable === "boolean" ? raw.browser_usable : undefined,
+      node_policy_manifest: raw.node_policy_manifest && typeof raw.node_policy_manifest === "object"
+        ? raw.node_policy_manifest as Record<string, unknown>
+        : raw.node_policy_manifest === null ? null : undefined,
+      dispatch_ticket_id_prefix: ticketIdPrefix,
+    };
+  }
+
+  private async _ticketedCandidates(intent: string, opts: DiscoverOptions, traceparent: string): Promise<Node[]> {
+    const url = `${this.cfg.directory_url.replace(/\/$/, "")}/v1/dispatch/ticket`;
+    const base: Record<string, unknown> = { intent, limit: Math.min(opts.limit ?? 10, 50) };
+    const region = opts.region ?? this.cfg.region;
+    if (region) base.region = region;
+    if (opts.qos) base.qos = opts.qos;
+    if (opts.min_reputation !== undefined) base.min_reputation = opts.min_reputation;
+    const excluded: string[] = [];
+    const candidates: Node[] = [];
+
+    for (let i = 0; i < MAX_RETRIES; i++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5_000);
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json", traceparent },
+          body: JSON.stringify({ ...base, exclude_node_id_prefixes: excluded }),
+          signal: controller.signal,
+        });
+      } catch (cause) {
+        throw new IicpError("Ticketed dispatch network error", "IICP-DISPATCH-TICKET-NETWORK", { component: "directory", cause });
+      } finally {
+        clearTimeout(timer);
+      }
+      const data = await response.json().catch(() => ({})) as Record<string, unknown>;
+      const error = data.error as Record<string, unknown> | undefined;
+      const errorCode = typeof error?.code === "string" ? error.code : undefined;
+      if (response.status === 201) {
+        const route = data.route as Record<string, unknown> | undefined;
+        const node = route ? this._nodeFromRoute({ ...route, node_id: data.node_id ?? route.node_id }, String(data.ticket_id_prefix ?? "")) : undefined;
+        if (!node) throw new IicpError("Directory returned malformed ticketed route material", "IICP-DISPATCH-TICKET-MALFORMED", { component: "directory" });
+        candidates.push(node);
+        excluded.push(node.node_id.slice(0, 8));
+        continue;
+      }
+      if (response.status === 404 && errorCode === "no_route_available") break;
+      if ([404, 405, 501].includes(response.status) || (response.status === 503 && errorCode === "not_configured")) {
+        throw new LegacyDiscoveryRequired();
+      }
+      throw new IicpError(
+        `Ticketed dispatch refused (${errorCode ?? response.status})`,
+        `IICP-DISPATCH-TICKET-${response.status}`,
+        { status_code: response.status, component: "directory" },
+      );
+    }
+    return candidates;
+  }
+
   /** Discover nodes capable of handling the given intent. */
   async discover(intent: string, opts?: DiscoverOptions, traceparent?: string): Promise<Node[]> {
     const o = opts ?? {};
@@ -209,58 +299,18 @@ export class IicpClient {
     const raw: unknown[] = (data as { nodes?: unknown[] }).nodes ?? [];
     const nodes: Node[] = [];
     for (const n of raw) {
-      const node = n as Record<string, unknown>;
-      const endpoint = String(node.endpoint ?? "");
-      if (!_isSsrfSafe(endpoint)) {
+      const rawNode = n as Record<string, unknown>;
+      const node = this._nodeFromRoute(rawNode);
+      if (!node) {
         console.warn(
-          `[iicp-client] SSRF guard: skipping node ${String(node.node_id ?? "?").slice(0, 8)} — endpoint ${endpoint} is not publicly routable`,
+          `[iicp-client] SSRF guard: skipping node ${String(rawNode.node_id ?? "?").slice(0, 8)} — endpoint ${String(rawNode.endpoint ?? "")} is not publicly routable`,
         );
         continue;
       }
-      const browserUsable = typeof node.browser_usable === "boolean"
-        ? node.browser_usable
-        : undefined;
-      if (o.browser_usable_only && !(browserUsable ?? _isBrowserUsableEndpoint(endpoint))) {
+      if (o.browser_usable_only && !(node.browser_usable ?? _isBrowserUsableEndpoint(node.endpoint))) {
         continue;
       }
-      // Directory discover now treats `cx_public_key` as canonical;
-      // `public_key` is accepted only as a deprecated compatibility alias.
-      // Accept both so live keyed nodes do not get treated as plaintext-only.
-      const rawCx = (node.cx_public_key ?? node.public_key) as Record<string, string> | undefined;
-      nodes.push({
-        node_id: String(node.node_id),
-        endpoint,
-        score: Number(node.score ?? 0),
-        available: Boolean(node.available ?? true),
-        region: String(node.region ?? ""),
-        latency_estimate_ms: node.latency_estimate_ms as number | undefined,
-        reputation_score: node.reputation_score as number | undefined,
-        health_label: node.health_label as string | undefined,
-        exposure_mode: node.exposure_mode as string | undefined,
-        cx_public_key:
-          rawCx && typeof rawCx === "object" && rawCx.algorithm && rawCx.key && rawCx.key_id
-            ? { algorithm: rawCx.algorithm, key: rawCx.key, key_id: rawCx.key_id }
-            : undefined,
-        // #397 — transport protocols (http/https/iicp-native) when the directory emits them.
-        transport: Array.isArray(node.transport)
-          ? (node.transport as unknown[]).map(String)
-          : undefined,
-        directory_observed_reachable:
-          typeof node.directory_observed_reachable === "boolean"
-            ? node.directory_observed_reachable
-            : node.directory_observed_reachable === null
-              ? null
-              : undefined,
-        route_evidence: typeof node.route_evidence === "string" ? node.route_evidence : undefined,
-        routing_hint: typeof node.routing_hint === "string" ? node.routing_hint : undefined,
-        browser_usable: browserUsable,
-        node_policy_manifest:
-          node.node_policy_manifest && typeof node.node_policy_manifest === "object"
-            ? (node.node_policy_manifest as Record<string, unknown>)
-            : node.node_policy_manifest === null
-              ? null
-              : undefined,
-      });
+      nodes.push(node);
     }
     return nodes;
   }
@@ -272,12 +322,24 @@ export class IicpClient {
   async submit(req: TaskRequest): Promise<TaskResponse> {
     this._validateIntent(req.intent);
     const tp = _traceparent(); // SDK-06: shared trace across discover + submit
-    const nodes = await this.discover(req.intent, {
+    const discoverOpts: DiscoverOptions = {
       region: req.constraints?.region ?? this.cfg.region,
-      // Do not filter by qos — qos is a task execution hint, not a node capability
-      // filter. Most nodes don't declare qos support; directory returns 0 nodes.
       min_reputation: req.constraints?.min_reputation,
-    }, tp);
+    };
+    let nodes: Node[];
+    if (this.cfg.route_discovery_mode === "legacy") {
+      nodes = await this.discover(req.intent, discoverOpts, tp);
+    } else {
+      try {
+        nodes = await this._ticketedCandidates(req.intent, discoverOpts, tp);
+      } catch (err) {
+        if (!(err instanceof LegacyDiscoveryRequired)) throw err;
+        if (this.cfg.route_discovery_mode === "ticketed") {
+          throw new IicpError("Directory does not support ticketed dispatch", "IICP-DISPATCH-TICKET-UNAVAILABLE", { component: "directory" });
+        }
+        nodes = await this.discover(req.intent, discoverOpts, tp);
+      }
+    }
 
     if (nodes.length === 0) {
       throw new IicpError(
@@ -368,6 +430,8 @@ export class IicpClient {
             metrics: (data as Record<string, unknown>).metrics as
               | TaskResponse["metrics"]
               | undefined,
+            generated_by_ai: true,
+            dispatch_ticket_id_prefix: node.dispatch_ticket_id_prefix,
           };
         } catch (err) {
           if (err instanceof IicpError) {
@@ -439,6 +503,7 @@ export class IicpClient {
       choices,
       usage,
       node_id: String(result.node_id ?? ""),
+      generated_by_ai: true,
     };
   }
 

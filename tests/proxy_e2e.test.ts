@@ -106,6 +106,7 @@ describe("proxy E2E (real iicp-node proxy process)", () => {
       });
       assert.equal(oai.status, 200);
       assert.equal(oai.headers.get("server"), "iicp-proxy");
+      assert.equal(oai.headers.get("x-iicp-generated-by-ai"), "true");
       assert.equal((await oai.json()).choices[0].message.content, "E2E reply");
 
       const oll = await fetch(base + "/api/chat", {
@@ -114,6 +115,7 @@ describe("proxy E2E (real iicp-node proxy process)", () => {
       });
       assert.equal(oll.status, 200);
       assert.equal(oll.headers.get("server"), "iicp-proxy");
+      assert.equal(oll.headers.get("x-iicp-generated-by-ai"), "true");
       assert.equal((await oll.json()).message.content, "E2E reply");
 
       const ant = await fetch(base + "/v1/messages", {
@@ -122,6 +124,7 @@ describe("proxy E2E (real iicp-node proxy process)", () => {
       });
       assert.equal(ant.status, 200);
       assert.equal(ant.headers.get("server"), "iicp-proxy");
+      assert.equal(ant.headers.get("x-iicp-generated-by-ai"), "true");
       assert.equal((await ant.json()).content[0].text, "E2E reply");
     } finally {
       child.kill("SIGTERM");
