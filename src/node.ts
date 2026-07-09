@@ -25,6 +25,7 @@ import { decryptPayload, loadOrCreateNodeCxKey } from "./confidentiality.js";
 import { verifyRelayBindTicket } from "./relay_ticket.js";
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
 import { autoUpdateStatusPayload } from "./updater.js";
+import { loadNode, saveNode } from "./identity.js";
 import {
   RECOVERY_EXIT_CODE,
   classifyRecovery,
@@ -370,6 +371,7 @@ export class IicpNode {
   private _latencyHistogram: PromHistogram | null = null;
   private _tokensCounter: PromCounter | null = null;
   private _backendStability = new BackendStabilityObservation();
+  private _savedNodeName: string | undefined;
   private _promLoaded = false;
   private readonly _cxPublicKey: CxPublicKey | undefined;
   private readonly _cxPrivateKeyBytes: Buffer | undefined;
@@ -427,6 +429,30 @@ export class IicpNode {
       relayCapable: config.relayCapable ?? false,
       relayAcceptPort: config.relayAcceptPort ?? 9485,
     });
+  }
+
+
+  /** Persist refreshed directory credentials into this saved node identity.
+   * This is opt-in for `iicp-node serve --node NAME`; library users stay file-free. */
+  setSavedNodeName(name: string | undefined): void {
+    const trimmed = (name ?? "").trim();
+    this._savedNodeName = trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  private _persistSavedCredentials(token: string): void {
+    if (!this._savedNodeName || !token) return;
+    try {
+      const saved = loadNode(this._savedNodeName);
+      if (!saved) {
+        console.warn(`[iicp-node] saved node config ${this._savedNodeName} not found; cannot persist refreshed node credentials`);
+        return;
+      }
+      saved.node_token = token;
+      if (this._runtimeHmacKey) saved.node_hmac_key = this._runtimeHmacKey;
+      saveNode(saved);
+    } catch (exc) {
+      console.warn(`[iicp-node] could not persist refreshed node credentials for saved node ${this._savedNodeName}: ${exc instanceof Error ? exc.message : String(exc)}`);
+    }
   }
 
   /** Effective concurrency cap after applying availability windows (ADR-006). */
@@ -664,6 +690,7 @@ export class IicpNode {
         this._runtimeHmacKey = dirKey;
       }
     }
+    this._persistSavedCredentials(token);
     // #494 — track registered model set for drift detection.
     this._registeredModels = new Set(models);
     return token;

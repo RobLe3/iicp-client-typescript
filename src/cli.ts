@@ -1133,6 +1133,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     backendApiKey: opts.backendApiKey || undefined,
   });
 
+  if (opts.node) node.setSavedNodeName(opts.node);
   // Phase 2 (#529/#55) — seed the cached node_token so a re-registration (e.g.
   // after a tunnel-URL rotation) proves ownership via current_node_token.
   if (savedNodeToken) node.seedToken(savedNodeToken);
@@ -2054,8 +2055,22 @@ async function runDoctor(argv: string[]): Promise<number> {
     healthError = err instanceof Error ? err.message : String(err);
   }
   const presence = await registryNodePresence(directoryUrl, saved.node_id, 5_000);
+  let savedCredentialStatus: "ok" | "stale_or_invalid" | "missing_token" | "error" = saved.node_token ? "error" : "missing_token";
+  if (saved.node_token) {
+    try {
+      const resp = await fetch(`${directoryUrl.replace(/\/+$/, "")}/v1/credits/summary?node_id=${encodeURIComponent(saved.node_id)}`, {
+        headers: { Authorization: `Bearer ${saved.node_token}` },
+        signal: AbortSignal.timeout(5_000),
+      });
+      savedCredentialStatus = resp.status === 401 ? "stale_or_invalid" : resp.ok ? "ok" : "error";
+    } catch {
+      savedCredentialStatus = "error";
+    }
+  }
   const stability = (health?.["backend_stability"] ?? {}) as Record<string, unknown>;
-  const backendAttention = stability["backend_state"] === "draining";
+  const backendState = String(stability["backend_state"] ?? "unknown");
+  const backendReason = String(stability["reason_class"] ?? "unknown");
+  const backendAttention = backendState === "draining";
   const failures = !localHealthOk || presence === "absent" ? 1 : 0;
   const { state, action } = classifyRecovery({
     localHealthOk,
@@ -2078,6 +2093,7 @@ async function runDoctor(argv: string[]): Promise<number> {
           local_health_ok: localHealthOk,
           local_health_error: healthError,
           directory_presence: presence,
+          saved_credential_status: savedCredentialStatus,
           recovery_state: state,
           recommended_action: action,
           health,
@@ -2093,6 +2109,14 @@ async function runDoctor(argv: string[]): Promise<number> {
   if (healthError) process.stdout.write(`  Local health detail     ${healthError}\n`);
   process.stdout.write(`  Directory prefix        ${prefix}\n`);
   process.stdout.write(`  Directory presence      ${presence}\n`);
+  process.stdout.write(`  Saved credential        ${savedCredentialStatus}\n`);
+  if (savedCredentialStatus === "stale_or_invalid") {
+    process.stdout.write("  Credential detail       saved node token is stale; serving may be healthy while credits fail\n");
+  }
+  process.stdout.write(`  Backend stability       ${backendState} / ${backendReason}\n`);
+  if (backendReason === "backend_cold") {
+    process.stdout.write("  Backend detail          idle/cold backend; normally warms on first request, not restart-worthy by itself\n");
+  }
   process.stdout.write(`  Recovery state          ${state}\n`);
   process.stdout.write(`  Recommended action      ${action}\n`);
   process.stdout.write("  Note                    restart is automatic only when supervised services set IICP_SUPERVISED=1\n");
