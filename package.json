@@ -1,6 +1,6 @@
 {
   "name": "@iicp/client",
-  "version": "0.7.83",
+  "version": "0.7.84",
   "description": "Use the open IICP AI mesh from TypeScript or JavaScript without running a node",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -64,7 +64,8 @@
   "files": [
     "dist",
     "README.md",
-    "intent-risk-taxonomy.json"
+    "intent-risk-taxonomy.json",
+    "mcp-tool-risk-taxonomy.json"
   ],
   "publishConfig": {
     "access": "public",

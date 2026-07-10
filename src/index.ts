@@ -1,6 +1,8 @@
 export { IicpClient } from "./client.js";
 export { IicpError } from "./errors.js";
 export { IicpNode } from "./node.js";
+export { McpToolPolicy, toolRiskLabel, TOOL_RISK_KEYWORDS } from "./mcp_policy.js";
+export type { McpToolPolicyConfig } from "./mcp_policy.js";
 export type { NodeConfig, ServeOptions, TaskHandler } from "./node.js";
 export {
   IicpTcpServer,

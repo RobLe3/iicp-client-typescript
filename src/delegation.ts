@@ -67,6 +67,28 @@ export function signRename(
   );
 }
 
+/** Canonical #599/#609 operator acceptance/DSR challenge bytes. */
+export function canonicalOperatorSelfServiceBytes(
+  action: string,
+  fields: Record<string, unknown>,
+): Buffer {
+  const payload: Record<string, unknown> = { action };
+  for (const key of Object.keys(fields).filter((key) => key !== "sig").sort()) {
+    payload[key] = fields[key];
+  }
+  const sorted = Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b)));
+  return Buffer.from(`iicp:operator:self-service:v1\n${JSON.stringify(sorted)}`, "utf8");
+}
+
+/** Sign an operator acceptance or DSR request without exposing the private key. */
+export function signOperatorSelfService(
+  privateKey: KeyObject,
+  action: string,
+  fields: Record<string, unknown>,
+): string {
+  return sign(null, canonicalOperatorSelfServiceBytes(action, fields), privateKey).toString("base64");
+}
+
 /** Base64 of the operator's raw 32-byte ed25519 public key (as the directory stores). */
 export function operatorPubB64(privateKey: KeyObject): string {
   const der = createPublicKey(privateKey).export({ type: "spki", format: "der" });

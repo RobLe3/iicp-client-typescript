@@ -65,6 +65,7 @@ import {
   type NodeIdentity,
 } from "./identity.js";
 import { issueDelegation, signRename } from "./delegation.js";
+import { McpToolPolicy, toolRiskLabel } from "./mcp_policy.js";
 
 type UpdaterModule = typeof import("./updater.js");
 
@@ -2410,21 +2411,6 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
 
 // ── mcp-gateway (#512) ───────────────────────────────────────────────────────
 
-// Backstop denylist on top of the operator's explicit --tools allowlist
-// (red-team pass 3): shells/interpreters/exec primitives never to expose, even
-// by accident. The required --tools allowlist + allow_tool_execution opt-in are
-// the primary controls; this is a best-effort safety net.
-const _MCP_DANGEROUS = new Set([
-  // shells / interpreters / process execution
-  "bash", "sh", "zsh", "fish", "shell", "powershell", "pwsh", "cmd",
-  "exec", "execute", "run_command", "run", "system", "eval",
-  "python", "python3", "node", "ruby", "perl", "subprocess", "popen", "spawn",
-  // #601 tool-risk classes that must not be public-unknown by default
-  "write_file", "file_write", "filesystem_write", "delete_file", "remove_file",
-  "browser_control", "computer_use", "credential_access", "read_secret", "secrets",
-  "system_control", "service_control", "physical_world", "regulated_decision",
-]);
-
 function _toolToIntent(name: string): string {
   const safe = name.toLowerCase().replace(/[^a-z0-9_]/g, "_");
   return `urn:iicp:intent:mcp:${safe}:v1`;
@@ -2444,7 +2430,11 @@ async function runMcpGateway(argv: string[]): Promise<number> {
         `  --directory-url URL  IICP_DIRECTORY_URL (default https://iicp.network/api/v1)\n` +
         `  --region REGION      IICP_REGION (default local)\n` +
         `  --port N             IICP_PORT (default 9484)\n` +
-        `  --host HOST          IICP_HOST (default ::)\n`,
+        `  --host HOST          IICP_HOST (default ::)\n` +
+        `  --allow-dangerous-tools  IICP_MCP_ALLOW_DANGEROUS_TOOLS (requires all controls below)\n` +
+        `  --authz-policy ID    IICP_MCP_AUTHZ_POLICY\n` +
+        `  --sandbox PROFILE    IICP_MCP_SANDBOX (strict/container/sandbox)\n` +
+        `  --audit-redaction    IICP_MCP_AUDIT_REDACTION\n`,
     );
     return 0;
   }
@@ -2460,6 +2450,10 @@ async function runMcpGateway(argv: string[]): Promise<number> {
       region: { type: "string" },
       port: { type: "string" },
       host: { type: "string" },
+      "allow-dangerous-tools": { type: "boolean" },
+      "authz-policy": { type: "string" },
+      sandbox: { type: "string" },
+      "audit-redaction": { type: "boolean" },
     },
     allowPositionals: false,
   });
@@ -2467,11 +2461,24 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   const mcpUrl = ((values["mcp-url"] as string | undefined) ?? envOr("IICP_MCP_URL") ?? "http://localhost:8001").replace(/\/$/, "");
   const rawTools = ((values["tools"] as string | undefined) ?? envOr("IICP_MCP_TOOLS") ?? "")
     .split(",").map((t) => t.trim()).filter(Boolean);
-  const activeTools = rawTools.filter((t) => !_MCP_DANGEROUS.has(t.toLowerCase()));
+  const toolPolicy = new McpToolPolicy({
+    allowDangerousTools: Boolean(values["allow-dangerous-tools"]) || envBool("IICP_MCP_ALLOW_DANGEROUS_TOOLS"),
+    authzPolicy: (values["authz-policy"] as string | undefined) ?? envOr("IICP_MCP_AUTHZ_POLICY") ?? "",
+    sandboxProfile: (values["sandbox"] as string | undefined) ?? envOr("IICP_MCP_SANDBOX") ?? "",
+    auditRedaction: Boolean(values["audit-redaction"]) || envBool("IICP_MCP_AUDIT_REDACTION"),
+  });
+  const activeTools = rawTools.filter((t) => toolPolicy.allows(t));
+  const deniedTools = rawTools.filter((t) => !toolPolicy.allows(t));
+  if (deniedTools.length) {
+    process.stderr.write(`WARNING: denied high-risk MCP tools until all authz, sandbox and redacted-audit controls are configured: ${deniedTools.join(", ")}\n`);
+  }
 
   if (activeTools.length === 0) {
+    const reason = rawTools.length > 0
+      ? "all requested tools were denied by the MCP safety policy"
+      : "--tools is required";
     process.stderr.write(
-      `ERROR: --tools is required. Provide a comma-separated list of MCP tool names.\n` +
+      `ERROR: ${reason}. Provide safe tool names, or configure every dangerous-tool control.\n` +
         `  Example: iicp-node mcp-gateway --tools summarize_text,lookup_status --mcp-url http://localhost:8001\n`,
     );
     return 2;
@@ -2484,11 +2491,28 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   const host = (values["host"] as string | undefined) ?? envOr("IICP_HOST") ?? "::";
   const publicEndpoint = (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? `http://localhost:${port}`;
   const intents = activeTools.map(_toolToIntent);
+  const capabilities = activeTools.map((tool, index) => ({
+    intent: intents[index],
+    models: [`mcp:${tool}`],
+    max_tokens: 65536,
+  }));
 
   let nodeToken = envOr("IICP_NODE_TOKEN") ?? "";
 
   async function doRegister(): Promise<string> {
-    const payload = { node_id: nodeId, region, endpoint: publicEndpoint, intents, mcp_tools: activeTools, protocol_version: "1.0" };
+    const payload = {
+      node_id: nodeId,
+      region,
+      endpoint: publicEndpoint,
+      capabilities,
+      limits: { max_concurrent: 1, tokens_per_min: 65536 },
+      backend: "custom",
+      policy: {
+        allow_remote_inference: false,
+        allow_tool_execution: true,
+        allow_file_access: activeTools.some((tool) => ["file_read", "file_write"].includes(toolRiskLabel(tool))),
+      },
+    };
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (nodeToken) headers["Authorization"] = `Bearer ${nodeToken}`;
     const resp = await fetch(`${directoryUrl}/register`, { method: "POST", headers, body: JSON.stringify(payload), signal: AbortSignal.timeout(10_000) });
@@ -2543,7 +2567,16 @@ async function runMcpGateway(argv: string[]): Promise<number> {
 
   const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && req.url === "/iicp/health") {
-      const body = JSON.stringify({ status: "ok", node_id: nodeId, active_tools: activeTools, mcp_server: mcpUrl, timestamp: Math.floor(Date.now() / 1000) });
+      const body = JSON.stringify({
+        status: "ok", node_id: nodeId, active_tools: activeTools, mcp_server: mcpUrl,
+        mcp_policy: {
+          dangerous_tools_enabled: toolPolicy.dangerousReady,
+          authz_policy: toolPolicy.authzPolicy || null,
+          sandbox_profile: toolPolicy.sandboxProfile || null,
+          audit_redacted: toolPolicy.auditRedaction,
+        },
+        timestamp: Math.floor(Date.now() / 1000),
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(body);
       return;
@@ -2568,13 +2601,19 @@ async function runMcpGateway(argv: string[]): Promise<number> {
         if (m) toolName = m[1];
       }
       if (!toolName) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Cannot determine tool name" })); return; }
-      if (_MCP_DANGEROUS.has(toolName.toLowerCase())) { res.writeHead(403, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Tool not permitted" })); return; }
+      const args = (payload["arguments"] ?? {}) as Record<string, unknown>;
+      const argumentCount = args && typeof args === "object" ? Object.keys(args).length : 0;
+      if (!toolPolicy.allows(toolName)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Tool not permitted by MCP risk policy", policy_receipt: toolPolicy.receipt(toolName, "denied", argumentCount) }));
+        return;
+      }
       if (activeTools.length && !activeTools.includes(toolName)) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Tool not available" })); return; }
       const taskId = (body["task_id"] as string | undefined) ?? randomUUID();
       try {
-        const result = await callMcp(toolName, (payload["arguments"] ?? {}) as Record<string, unknown>);
+        const result = await callMcp(toolName, args);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ task_id: taskId, status: "completed", result }));
+        res.end(JSON.stringify({ task_id: taskId, status: "completed", result, policy_receipt: toolPolicy.receipt(toolName, "allowed", argumentCount) }));
       } catch (err) {
         const msg = (err as Error).message ?? "error";
         const code = msg.includes("unreachable") ? 502 : 422;

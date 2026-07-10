@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import * as http from "node:http";
 import * as net from "node:net";
+import { McpToolPolicy, toolRiskLabel } from "../src/mcp_policy.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -109,13 +110,22 @@ describe("_toolToIntent", () => {
 
 describe("dangerous tool filtering", () => {
   it("filters dangerous public-unknown tool-risk classes", () => {
-    const dangerous = new Set([
-      "bash", "shell", "exec", "run_command", "eval",
-      "write_file", "browser_control", "credential_access", "system_control",
-    ]);
-    const tools = ["read_file", "write_file", "browser_control", "list_dir", "exec"];
-    const active = tools.filter((t) => !dangerous.has(t.toLowerCase()));
-    assert.deepEqual(active, ["read_file", "list_dir"]);
+    const policy = new McpToolPolicy();
+    const tools = ["format_json", "read_file", "write_file", "browser_control", "exec", "drone_control"];
+    assert.deepEqual(tools.filter((t) => policy.allows(t)), ["format_json"]);
+  });
+
+  it("requires all controls and emits a redacted receipt", () => {
+    assert.equal(new McpToolPolicy({ allowDangerousTools: true, authzPolicy: "operator-key", sandboxProfile: "container" }).allows("write_file"), false);
+    const policy = new McpToolPolicy({ allowDangerousTools: true, authzPolicy: "operator-key", sandboxProfile: "container", auditRedaction: true });
+    assert.equal(policy.allows("write_file"), true);
+    const receipt = policy.receipt("write_file", "allowed", 2);
+    assert.equal(receipt["tool_risk"], "file_write");
+    assert.equal(receipt["argument_content"], "excluded");
+    assert.equal("arguments" in receipt, false);
+    assert.equal(JSON.stringify(receipt).includes("GDPR_CANARY_TOOL_INPUT"), false);
+    assert.equal(toolRiskLabel("read_secret"), "credential_access");
+    assert.equal(toolRiskLabel("drone_control"), "physical_world");
   });
 });
 
@@ -167,7 +177,7 @@ describe("mcp-gateway round-trip", () => {
     const { main } = await import("../src/cli.js");
     const gwPromise = main([
       "mcp-gateway",
-      "--tools", "read_file,list_dir",
+      "--tools", "format_json,summarize_text",
       "--node-id", "gw-ts-test-001",
       "--mcp-url", `http://127.0.0.1:${mcpPort}`,
       "--directory-url", `http://127.0.0.1:${dirPort}`,
@@ -182,7 +192,7 @@ describe("mcp-gateway round-trip", () => {
     const health = await fetchJson(`http://127.0.0.1:${gwPort}/iicp/health`);
     assert.equal(health["status"], "ok");
     assert.equal(health["node_id"], "gw-ts-test-001");
-    assert.deepEqual(health["active_tools"], ["read_file", "list_dir"]);
+    assert.deepEqual(health["active_tools"], ["format_json", "summarize_text"]);
 
     // Test /v1/task dispatch
     const taskResp = await fetchJson(`http://127.0.0.1:${gwPort}/v1/task`, {
@@ -193,19 +203,23 @@ describe("mcp-gateway round-trip", () => {
       },
       body: JSON.stringify({
         task_id: "ts-task-001",
-        intent: "urn:iicp:intent:mcp:read_file:v1",
-        payload: { tool_name: "read_file", arguments: { path: "/tmp/test.txt" } },
+        intent: "urn:iicp:intent:mcp:format_json:v1",
+        payload: { tool_name: "format_json", arguments: { value: { ok: true } } },
       }),
     });
     assert.equal(taskResp["status"], "completed");
     assert.equal(taskResp["task_id"], "ts-task-001");
+    assert.equal((taskResp["policy_receipt"] as Record<string, unknown>)["argument_content"], "excluded");
 
     // Verify registration
     assert.equal(registerCalls.length, 1);
     const reg = registerCalls[0] as Record<string, unknown>;
-    const regIntents = reg["intents"] as string[];
-    assert.ok(regIntents.includes("urn:iicp:intent:mcp:read_file:v1"));
-    assert.ok(regIntents.includes("urn:iicp:intent:mcp:list_dir:v1"));
+    const regIntents = (reg["capabilities"] as Array<Record<string, unknown>>).map((cap) => cap["intent"] as string);
+    assert.ok(regIntents.includes("urn:iicp:intent:mcp:format_json:v1"));
+    assert.ok(regIntents.includes("urn:iicp:intent:mcp:summarize_text:v1"));
+    assert.deepEqual(reg["limits"], { max_concurrent: 1, tokens_per_min: 65536 });
+    assert.equal((reg["policy"] as Record<string, unknown>)["allow_tool_execution"], true);
+    assert.equal("mcp_tools" in reg, false);
 
     // Teardown — send SIGINT to stop the gateway
     dirServer.close();

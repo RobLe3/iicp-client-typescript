@@ -7,6 +7,7 @@ import { createPublicKey, verify } from "node:crypto";
 import {
   canonicalBytes,
   canonicalRenameBytes,
+  canonicalOperatorSelfServiceBytes,
   generateOperatorKey,
   issueDelegation,
   operatorPubB64,
@@ -71,6 +72,22 @@ describe("#460 operator rename signing (TS)", () => {
     });
     assert.ok(
       verify(null, canonicalRenameBytes("Rebel Two", pub, 1893456000), pk, Buffer.from(sig, "base64")),
+    );
+  });
+});
+
+describe("#599/#609 operator self-service signing (TS)", () => {
+  it("canonical bytes match the cross-language KAT", () => {
+    const fields = {
+      operator_pub: "T3BQdWI=",
+      nonce: "nonce-1234567890",
+      ts: 1893456000,
+      terms_version: "2026-07",
+      dpa_version: "2026-07",
+    };
+    assert.equal(
+      canonicalOperatorSelfServiceBytes("accept", fields).toString("utf8"),
+      'iicp:operator:self-service:v1\n{"action":"accept","dpa_version":"2026-07","nonce":"nonce-1234567890","operator_pub":"T3BQdWI=","terms_version":"2026-07","ts":1893456000}',
     );
   });
 });
