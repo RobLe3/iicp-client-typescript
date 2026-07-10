@@ -10,7 +10,7 @@
 
 import * as net from "node:net";
 import { randomUUID } from "node:crypto";
-import { verifyRelayBindTicket } from "./relay_ticket.js";
+import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTicket } from "./relay_ticket.js";
 
 const IICP_MAGIC = Buffer.from("IICP");
 const FRAMING_VERSION = 0x01;
@@ -383,8 +383,9 @@ export class RelayAcceptServer {
     // directory-signed bind ticket in RELAY_BIND field 4. Soft mode accepts
     // legacy unsigned binds with a warning; strict mode is opt-in until adoption
     // is measured.
+    let claims: RelayBindTicketClaims | null = null;
     if (bindTicket && this._bindTicketPublicKeyHex) {
-      const claims = verifyRelayBindTicket(bindTicket, this._bindTicketPublicKeyHex, workerId, this._relayNodeId);
+      claims = verifyRelayBindTicket(bindTicket, this._bindTicketPublicKeyHex, workerId, this._relayNodeId);
       if (!claims) {
         socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
           [1, "error"], [2, workerId], [3, "relay bind ticket invalid"],
@@ -426,6 +427,13 @@ export class RelayAcceptServer {
       console.warn(`[relay-accept] at session capacity — rejecting bind for ${workerId}`);
       socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
         [1, "error"], [2, workerId], [3, "relay at session capacity"],
+      ])) as Buffer));
+      socket.destroy();
+      return;
+    }
+    if (claims && !consumeRelayBindTicket(claims)) {
+      socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
+        [1, "error"], [2, workerId], [3, "relay bind ticket replayed"],
       ])) as Buffer));
       socket.destroy();
       return;

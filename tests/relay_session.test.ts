@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import * as net from "node:net";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { RelayAcceptServer, RelaySessionRegistry, RelayWorkerSession } from "../src/relay_session.js";
 
 // ── frame type constants ─────────────────────────────────────────────────────
@@ -193,7 +193,8 @@ function _signedTicket(workerId: string, relayId: string) {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const pubHex = (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-32).toString("hex");
   const payload = Buffer.from(JSON.stringify({
-    v: 1, typ: "relay-bind-ticket", iss: "test", sub: workerId, aud: relayId, iat: 1, exp: 9_999_999_999,
+    v: 1, typ: "relay-bind-ticket", jti: randomBytes(16).toString("hex"),
+    iss: "test", sub: workerId, aud: relayId, iat: 1, exp: 9_999_999_999,
   })).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const sig = sign(null, Buffer.from("iicp:relay-bind-ticket:v1\n" + payload), privateKey).toString("hex");
   return { token: `${payload}.${sig}`, publicKeyHex: pubHex };

@@ -22,7 +22,7 @@ import { getCipPolicy } from "./cip_policy.js"; // #403 — per-task admission g
 import type { Delegation } from "./delegation.js"; // #407 — ADR-045 operator delegation
 import type { CxPublicKey } from "./types.js";
 import { decryptPayload, loadOrCreateNodeCxKey } from "./confidentiality.js";
-import { verifyRelayBindTicket } from "./relay_ticket.js";
+import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTicket } from "./relay_ticket.js";
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
 import { autoUpdateStatusPayload } from "./updater.js";
 import { loadNode, saveNode } from "./identity.js";
@@ -1289,8 +1289,9 @@ export class IicpNode {
       const bindTicket = typeof payload.bind_ticket === "string" ? payload.bind_ticket : "";
       const ticketPublicKey = process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"] ?? "";
       const requireBindTicket = process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] === "1";
+      let claims: RelayBindTicketClaims | null = null;
       if (bindTicket && ticketPublicKey) {
-        const claims = verifyRelayBindTicket(bindTicket, ticketPublicKey, workerId, this._cfg.nodeId);
+        claims = verifyRelayBindTicket(bindTicket, ticketPublicKey, workerId, this._cfg.nodeId);
         if (!claims) {
           this._relayJson(res, 401, { error: { code: "IICP-E040", message: "relay bind ticket invalid" } });
           return;
@@ -1314,6 +1315,12 @@ export class IicpNode {
       if (this._relaySessions.atCapacity(workerId)) {
         this._relayJson(res, 503, {
           error: { code: "IICP-E039", message: "relay at session capacity — try another relay" },
+        });
+        return;
+      }
+      if (claims && !consumeRelayBindTicket(claims)) {
+        this._relayJson(res, 409, {
+          error: { code: "IICP-E040", message: "relay bind ticket replayed" },
         });
         return;
       }

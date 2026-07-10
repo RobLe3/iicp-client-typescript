@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import * as net from "node:net";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { IicpNode } from "../src/node.js";
 import {
   HttpPollWorkerSession,
@@ -28,7 +28,8 @@ function signedTicket(workerId: string, relayId: string): { token: string; publi
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const publicKeyHex = (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-32).toString("hex");
   const payload = b64url(JSON.stringify({
-    v: 1, typ: "relay-bind-ticket", iss: "test", sub: workerId, aud: relayId, iat: 1, exp: 9_999_999_999,
+    v: 1, typ: "relay-bind-ticket", jti: randomBytes(16).toString("hex"),
+    iss: "test", sub: workerId, aud: relayId, iat: 1, exp: 9_999_999_999,
   }));
   const sigHex = sign(null, Buffer.from("iicp:relay-bind-ticket:v1\n" + payload), privateKey).toString("hex");
   return { token: `${payload}.${sigHex}`, publicKeyHex };
@@ -172,6 +173,15 @@ describe("relay HTTP-poll endpoints", () => {
     try {
       const ok = await bind("w-http-ticket", [], { bind_ticket: good.token });
       assert.equal(ok.status, 200);
+      const okBody = await ok.json();
+      const unbind = await fetch(`${base}/v1/relay/unbind`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${okBody.session_token}` },
+      });
+      assert.equal(unbind.status, 204);
+      const replay = await bind("w-http-ticket", [], { bind_ticket: good.token });
+      assert.equal(replay.status, 409);
+      assert.match((await replay.json()).error.message, /replayed/);
       const wrong = await bind("w-http-ticket-2", [], { bind_ticket: bad.token });
       assert.equal(wrong.status, 401);
       const body = await wrong.json();

@@ -8,11 +8,31 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 export interface RelayBindTicketClaims {
   v: number;
   typ: "relay-bind-ticket";
+  jti: string;
   iss: string;
   sub: string;
   aud: string;
   iat: number;
   exp: number;
+}
+
+export class RelayBindTicketReplayCache {
+  private readonly seen = new Map<string, number>();
+
+  consume(claims: RelayBindTicketClaims, nowSec = Math.floor(Date.now() / 1000)): boolean {
+    for (const [jti, exp] of this.seen) {
+      if (exp <= nowSec) this.seen.delete(jti);
+    }
+    if (this.seen.has(claims.jti)) return false;
+    this.seen.set(claims.jti, claims.exp);
+    return true;
+  }
+}
+
+const relayBindReplayCache = new RelayBindTicketReplayCache();
+
+export function consumeRelayBindTicket(claims: RelayBindTicketClaims, nowSec?: number): boolean {
+  return relayBindReplayCache.consume(claims, nowSec);
 }
 
 function b64pad(s: string): string {
@@ -46,6 +66,7 @@ export function verifyRelayBindTicket(
     return null;
   }
   if (payload.typ !== "relay-bind-ticket") return null;
+  if (!/^[0-9a-f]{32}$/.test(payload.jti)) return null;
   if (payload.sub !== workerId) return null;
   if (payload.exp <= nowSec) return null;
   if (payload.aud !== "*" && payload.aud !== relayAudience) return null;
