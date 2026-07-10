@@ -279,6 +279,7 @@ export interface NodeConfig {
   operatorDisplayName?: string;
   operatorCreatedAt?: string;
   operatorIntegrityHash?: string;
+  policyManifest?: Record<string, unknown>;
   /** #494 — backend base URL for live model health probing during heartbeat.
    * When set, the heartbeat includes health_models=[current runtime list] so
    * the directory can filter stale-model nodes from discover. Omit for no probing. */
@@ -301,7 +302,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "backend" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint" | "operatorDelegation" | "operatorDisplayName" | "operatorCreatedAt" | "operatorIntegrityHash" | "backendUrl" | "backendApiKey"
+      "model" | "backend" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint" | "operatorDelegation" | "operatorDisplayName" | "operatorCreatedAt" | "operatorIntegrityHash" | "policyManifest" | "backendUrl" | "backendApiKey"
     >
   > & {
     model: string | undefined;
@@ -328,6 +329,7 @@ export class IicpNode {
     operatorDisplayName: string | undefined;
     operatorCreatedAt: string | undefined;
     operatorIntegrityHash: string | undefined;
+    policyManifest: Record<string, unknown> | undefined;
     backendUrl: string | undefined;
     backendApiKey: string | undefined;
   };
@@ -409,6 +411,7 @@ export class IicpNode {
       operatorDisplayName: config.operatorDisplayName,
       operatorCreatedAt: config.operatorCreatedAt,
       operatorIntegrityHash: config.operatorIntegrityHash,
+      policyManifest: config.policyManifest,
       backendUrl: config.backendUrl,
       backendApiKey: config.backendApiKey,
     };
@@ -635,6 +638,7 @@ export class IicpNode {
       if (this._cfg.operatorCreatedAt) body.operator_created_at = this._cfg.operatorCreatedAt;
       if (this._cfg.operatorIntegrityHash) body.operator_integrity_hash = this._cfg.operatorIntegrityHash;
     }
+    if (this._cfg.policyManifest) body.policy_manifest = this._cfg.policyManifest;
 
     // SDK self-identification — directory surfaces these on /v1/discover
     // so dashboards can render a language badge. Free-form so future SDKs

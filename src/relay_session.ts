@@ -400,11 +400,11 @@ export class RelayAcceptServer {
       socket.destroy();
       return;
     } else if (!bindTicket) {
-      console.warn(`[relay-accept] unsigned RELAY_BIND for worker=${workerId}; #510 ticket auth not yet enforced`);
+      console.warn(`[relay-accept] unsigned RELAY_BIND for worker=${workerId} accepted in compatibility mode; enable IICP_RELAY_REQUIRE_BIND_TICKET=1 for public relays`);
     }
 
-    // #510 interim hardening: RELAY_BIND is unauthenticated, so refuse to
-    // displace an existing session whose socket is still alive (mid-session
+    // Compatibility hardening: an unsigned bind must never displace an
+    // existing session whose socket is still alive (mid-session
     // hijack). Rebind after socket death (legitimate reconnect) still works.
     const existing = this._registry.get(workerId);
     if (existing && existing.isAlive()) {

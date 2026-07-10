@@ -134,6 +134,7 @@ export function startProviderAutoUpdate(options: ProviderAutoUpdateOptions = {})
 
 export interface ServeOpts {
   backendUrl: string;
+  policyManifest?: string;
   backendType: string;
   /** #5 — Bearer key for an auth-requiring OpenAI-compat backend (LM Studio, hosted). Empty = none. */
   backendApiKey: string;
@@ -240,6 +241,7 @@ function printHelp(): void {
       `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434; anthropic → https://api.anthropic.com)\n` +
       `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | anthropic (default openai_compat)\n` +
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for an auth'd backend (LM Studio, hosted); anthropic uses it as x-api-key\n` +
+      `  --policy-manifest FILE     IICP_POLICY_MANIFEST_FILE — sign and advertise a public node-policy JSON document\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --region REGION            IICP_REGION (e.g. us-east; unknown if unset)\n` +
@@ -262,8 +264,8 @@ function printHelp(): void {
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
       `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
       `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485).\n` +
-      `                             Note: relay bind authentication is pending (#510) — only run a relay\n` +
-      `                             accept port on networks you trust until the signed-bind mechanism ships.\n` +
+      `                             Public relays should set IICP_RELAY_REQUIRE_BIND_TICKET=1 and\n` +
+      `                             IICP_RELAY_BIND_TICKET_PUBLIC_KEY for directory-signed one-use binds.\n` +
       `  --log-dir DIR              IICP_LOG_DIR — directory for persistent log files (<node_id>.log + events.jsonl)\n` +
       `  --with-proxy               IICP_WITH_PROXY — also run the loopback compat proxy (127.0.0.1:9483) in-process\n\n` +
       `query optional:\n` +
@@ -316,6 +318,7 @@ function printServeHelp(): void {
       `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434; anthropic → https://api.anthropic.com)\n` +
       `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | anthropic\n` +
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for auth'd backends\n` +
+      `  --policy-manifest FILE     IICP_POLICY_MANIFEST_FILE — sign and advertise a public node-policy JSON document\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --region REGION            IICP_REGION (e.g. eu-central)\n` +
@@ -1099,6 +1102,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
   let _opDisplayName: string | undefined;
   let _opCreatedAt: string | undefined;
   let _opIntegrityHash: string | undefined;
+  let policyManifest: Record<string, unknown> | undefined;
   const _identityNotice = noIdentityNotice(_op);
   if (_identityNotice !== null) {
     // #503 — anonymous registration accrues no founder/recognition standing;
@@ -1110,7 +1114,12 @@ async function runServe(opts: ServeOpts): Promise<number> {
     _opDisplayName = _op.display_name || undefined;
     _opCreatedAt = _op.created_at;
     _opIntegrityHash = _op.operator_integrity_hash || undefined;
+    if (opts.policyManifest) {
+      const { loadAndSignPolicyManifest } = await import("./policy_manifest.js");
+      policyManifest = loadAndSignPolicyManifest(opts.policyManifest, _op);
+    }
   }
+  if (opts.policyManifest && !policyManifest) throw new Error("--policy-manifest requires a key-backed operator identity");
 
   const node = new IicpNode({
     nodeId,
@@ -1129,6 +1138,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     operatorDisplayName: _opDisplayName,
     operatorCreatedAt: _opCreatedAt,
     operatorIntegrityHash: _opIntegrityHash,
+    policyManifest,
     // #494 — wire backend URL for live health_models probing in heartbeats.
     backendUrl: opts.backendUrl || undefined,
     backendApiKey: opts.backendApiKey || undefined,
@@ -2751,6 +2761,7 @@ async function dispatch(argv: string[]): Promise<number> {
     options: {
       node: { type: "string" },
       "backend-url": { type: "string" },
+      "policy-manifest": { type: "string" },
       "backend-type": { type: "string" },
       "backend-api-key": { type: "string" },
       model: { type: "string" },
@@ -2787,6 +2798,7 @@ async function dispatch(argv: string[]): Promise<number> {
   const opts: ServeOpts = {
     node: (values.node as string | undefined) ?? envOr("IICP_NODE_NAME") ?? "",
     backendUrl: (values["backend-url"] as string | undefined) ?? envOr("IICP_BACKEND_URL") ?? "",
+    policyManifest: (values["policy-manifest"] as string | undefined) ?? envOr("IICP_POLICY_MANIFEST_FILE") ?? "",
     backendType:
       (values["backend-type"] as string | undefined) ??
       envOr("IICP_BACKEND_TYPE", "openai_compat")!,
