@@ -90,4 +90,12 @@ describe("#599/#609 operator self-service signing (TS)", () => {
       'iicp:operator:self-service:v1\n{"action":"accept","dpa_version":"2026-07","nonce":"nonce-1234567890","operator_pub":"T3BQdWI=","terms_version":"2026-07","ts":1893456000}',
     );
   });
+
+  it("excludes successor proof from the old-key rotation signature", () => {
+    const bytes = canonicalOperatorSelfServiceBytes("key_rotate", {
+      operator_pub: "old", new_operator_pub: "new", nonce: "nonce-1234567890", ts: 1893456000,
+      new_key_sig: "must-not-be-signed-by-old-key",
+    });
+    assert.equal(bytes.includes(Buffer.from("new_key_sig")), false);
+  });
 });

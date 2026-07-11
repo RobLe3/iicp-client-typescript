@@ -2224,6 +2224,7 @@ function printOperatorHelp(): void {
       `Manage your operator identity.\n\n` +
       `subcommands:\n` +
       `  rename <name>              Change your public display_name (signed by your operator key)\n` +
+      `  key <rotate|revoke>         Safely migrate or revoke your cryptographic operator key\n` +
       `  dsr <action>               Export, restrict, or anonymize your directory records\n` +
       `  encrypt                    Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  decrypt                    Remove at-rest encryption of the operator secret\n\n` +
@@ -2350,6 +2351,87 @@ async function runOperatorDsr(argv: string[]): Promise<number> {
   return 0;
 }
 
+function operatorArtifactPath(kind: string): string {
+  return path.join(configDir(), `operator-${kind}-${new Date().toISOString().replace(/[-:.]/g, "").replace("Z", "Z")}.json`);
+}
+
+function writePrivateJsonNew(file: string, value: unknown): void {
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
+
+async function runOperatorKey(argv: string[]): Promise<number> {
+  const { values, positionals } = safeParseArgs({
+    args: argv,
+    options: { "directory-url": { type: "string" }, yes: { type: "boolean" }, help: { type: "boolean", short: "h" } },
+    allowPositionals: true,
+  });
+  if (values.help) {
+    process.stdout.write("usage: iicp-node operator key <rotate|revoke> --yes [--directory-url URL]\n");
+    return 0;
+  }
+  const action = positionals[0];
+  if (action !== "rotate" && action !== "revoke") return 2;
+  if (!values.yes) {
+    process.stderr.write("This changes the cryptographic operator identity used by saved nodes. Re-run with --yes.\n");
+    return 2;
+  }
+  const stored = loadOperator();
+  if (!stored || !operatorIsKeyBacked(stored)) {
+    process.stderr.write("ERROR: a key-backed local operator identity is required.\n");
+    return 1;
+  }
+  const unlock = operatorIsEncrypted(stored) ? await operatorPassphrase("Operator passphrase: ", false) : undefined;
+  let old;
+  try { old = operatorIsEncrypted(stored) ? operatorDecryptAtRest(stored, unlock ?? "") : stored; }
+  catch (e) { process.stderr.write(`ERROR: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
+  let successor: typeof old | undefined;
+  let backupPath: string | undefined;
+  try {
+    if (action === "rotate") {
+      const backupPw = unlock ?? process.env["IICP_OPERATOR_BACKUP_PASSPHRASE"] ?? await operatorPassphrase("New backup passphrase: ", true);
+      if (!backupPw) return 1;
+      backupPath = operatorArtifactPath("before-rotation");
+      writePrivateJsonNew(backupPath, operatorEncryptAtRest(old, backupPw));
+      successor = generateOperator({ display_name: old.display_name, contact: old.contact });
+    }
+    const directoryUrl = (values["directory-url"] as string | undefined) ?? process.env["IICP_DIRECTORY_URL"] ?? "https://iicp.network/api";
+    const base = `${directoryUrl.replace(/\/+$/, "")}/v1/operator`;
+    const challenge = await fetch(`${base}/challenge`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ operator_pub: old.operator_id }), signal: AbortSignal.timeout(15000) });
+    const challengeBody = await challenge.json() as { nonce?: unknown; error?: { message?: string } };
+    if (!challenge.ok || typeof challengeBody.nonce !== "string") throw new Error(challengeBody.error?.message ?? "directory challenge was incomplete");
+    const ts = Math.floor(Date.now() / 1000);
+    let payload: Record<string, unknown>;
+    let response: Response;
+    if (action === "rotate") {
+      if (!successor) throw new Error("successor identity missing");
+      payload = { operator_pub: old.operator_id, new_operator_pub: successor.operator_id, nonce: challengeBody.nonce, ts, reason_class: "operator_rotation" };
+      payload.sig = signOperatorSelfService(operatorSigningKey(old), "key_rotate", payload);
+      payload.new_key_sig = signOperatorSelfService(operatorSigningKey(successor), "key_rotate_successor", { operator_pub: old.operator_id, new_operator_pub: successor.operator_id, nonce: challengeBody.nonce, ts, rotation_epoch: null });
+      response = await fetch(`${base}/key/rotate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000) });
+    } else {
+      payload = { operator_pub: old.operator_id, nonce: challengeBody.nonce, ts, confirm: true, reason_class: "operator_request" };
+      payload.sig = signOperatorSelfService(operatorSigningKey(old), "key_revoke", payload);
+      response = await fetch(`${base}/key/revoke`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: AbortSignal.timeout(15000) });
+    }
+    const body = await response.json() as Record<string, unknown>;
+    if (!response.ok) throw new Error((body.error as { message?: string } | undefined)?.message ?? `HTTP ${response.status}`);
+    const receiptPath = operatorArtifactPath(`${action}-receipt`);
+    writePrivateJsonNew(receiptPath, { schema: "iicp.operator-key-receipt.v1", action, status: body.status, operator_fingerprint: body.operator_fingerprint, linked_nodes: body.linked_nodes, receipt_id_prefix: body.receipt_id_prefix });
+    if (action === "rotate" && successor) {
+      saveOperator(successor);
+      let migrated = 0;
+      for (const node of listNodes()) if (node.operator_id === old.operator_id) { node.operator_id = successor.operator_id; saveNode(node); migrated += 1; }
+      process.stdout.write(`Operator identity migrated; ${migrated} saved node(s) will re-register with the new key.\nEncrypted old-key backup: ${backupPath}\nRedacted receipt: ${receiptPath}\n`);
+    } else process.stdout.write(`Operator identity revoked; redacted receipt: ${receiptPath}\n`);
+    return 0;
+  } catch (e) {
+    if (backupPath) { try { fs.unlinkSync(backupPath); } catch {} }
+    process.stderr.write(`ERROR: operator key ${action} failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 1;
+  }
+}
+
 function printOperatorEncryptHelp(): void {
   process.stdout.write(
     `usage: iicp-node operator encrypt\n\n` +
@@ -2395,6 +2477,7 @@ async function runOperator(argv: string[]): Promise<number> {
     return runOperatorDecrypt();
   }
   if (sub === "dsr") return runOperatorDsr(argv.slice(1));
+  if (sub === "key") return runOperatorKey(argv.slice(1));
   if (sub !== "rename") {
     process.stderr.write(`unknown operator subcommand: ${sub}\n`);
     printOperatorHelp();

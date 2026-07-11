@@ -73,7 +73,7 @@ export function canonicalOperatorSelfServiceBytes(
   fields: Record<string, unknown>,
 ): Buffer {
   const payload: Record<string, unknown> = { action };
-  for (const key of Object.keys(fields).filter((key) => key !== "sig").sort()) {
+  for (const key of Object.keys(fields).filter((key) => key !== "sig" && key !== "new_key_sig").sort()) {
     payload[key] = fields[key];
   }
   const sorted = Object.fromEntries(Object.entries(payload).sort(([a], [b]) => a.localeCompare(b)));
