@@ -1298,6 +1298,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
             }
           }
         }
+        if (opts.node) completeHandoffForNode(opts.node);
         break;
       } catch (exc) {
         const msg = exc instanceof Error ? exc.message : String(exc);
@@ -1369,6 +1370,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     );
   }
 
+  const handoffTimer = scheduleSupervisedHandoffRestart(opts.node);
   const stop = node.serve(handler, { host: opts.host, port: opts.port, nodeToken: token });
   await new Promise<void>((resolve) => {
     const shutdown = async (sig: string) => {
@@ -1393,6 +1395,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
       }
       tunnelHandle?.close(); // #520 — tear the Quick Tunnel down with the node
       stop();
+      if (handoffTimer) clearTimeout(handoffTimer);
       stopAutoUpdate();
       instanceLock.release(); // #405 — free the pidfile on shutdown
       resolve();
@@ -2369,9 +2372,82 @@ function writeOperatorHandoffMarker(nodeNames: string[]): string {
     created_at_unix: stamp,
     grace_seconds: 300,
     affected_node_names: nodeNames,
-    restart_attempted: false,
+    restart_requested_node_names: [],
+    completed_node_names: [],
   });
   return marker;
+}
+
+type HandoffMarker = {
+  affected_node_names?: unknown;
+  restart_requested_node_names?: unknown;
+  completed_node_names?: unknown;
+  created_at_unix?: unknown;
+  grace_seconds?: unknown;
+};
+
+function handoffMarkerPaths(): string[] {
+  try {
+    return fs.readdirSync(configDir())
+      .filter((name) => /^operator-handoff-pending-.*\.json$/.test(name))
+      .map((name) => path.join(configDir(), name));
+  } catch { return []; }
+}
+
+function readHandoffMarker(file: string): HandoffMarker | null {
+  try {
+    const body: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    return body && typeof body === "object" ? body as HandoffMarker : null;
+  } catch { return null; }
+}
+
+/** Return remaining grace seconds; completed/restarted services never restart twice. */
+export function handoffRestartDelay(marker: HandoffMarker, nodeName: string, now: number): number | null {
+  const names = (field: keyof HandoffMarker): Set<string> =>
+    new Set(Array.isArray(marker[field]) ? marker[field].filter((value): value is string => typeof value === "string") : []);
+  const affected = names("affected_node_names");
+  const requested = names("restart_requested_node_names");
+  const completed = names("completed_node_names");
+  if (!affected.has(nodeName) || requested.has(nodeName) || completed.has(nodeName)) return null;
+  const created = marker.created_at_unix;
+  const grace = marker.grace_seconds;
+  if (typeof created !== "number") return null;
+  return Math.max(0, created + (typeof grace === "number" && grace >= 0 ? grace : 300) - now);
+}
+
+function completeHandoffForNode(nodeName: string): void {
+  for (const file of handoffMarkerPaths()) {
+    const marker = readHandoffMarker(file);
+    if (!marker || !Array.isArray(marker.affected_node_names) || !marker.affected_node_names.includes(nodeName)) continue;
+    const affected = new Set((marker.affected_node_names as string[] | undefined) ?? []);
+    const completed = new Set((marker.completed_node_names as string[] | undefined) ?? []);
+    completed.add(nodeName);
+    try {
+      if ([...affected].every((name) => completed.has(name))) fs.unlinkSync(file);
+      else fs.writeFileSync(file, `${JSON.stringify({ ...marker, completed_node_names: [...completed] }, null, 2)}\n`, { mode: 0o600 });
+    } catch { /* best effort only */ }
+  }
+}
+
+function scheduleSupervisedHandoffRestart(nodeName: string | undefined): NodeJS.Timeout | null {
+  if (!nodeName || !envBool("IICP_SUPERVISED")) return null;
+  for (const file of handoffMarkerPaths()) {
+    const marker = readHandoffMarker(file);
+    const delay = marker ? handoffRestartDelay(marker, nodeName, Math.floor(Date.now() / 1000)) : null;
+    if (delay === null) continue;
+    return setTimeout(() => {
+      const current = readHandoffMarker(file);
+      if (!current || handoffRestartDelay(current, nodeName, Math.floor(Date.now() / 1000)) !== 0) return;
+      const requested = new Set((current.restart_requested_node_names as string[] | undefined) ?? []);
+      requested.add(nodeName);
+      try {
+        fs.writeFileSync(file, `${JSON.stringify({ ...current, restart_requested_node_names: [...requested] }, null, 2)}\n`, { mode: 0o600 });
+        console.error(`[iicp-node] operator handoff grace period complete — exiting with code ${TUNNEL_DEAD_EXIT_CODE} so the supervisor reloads the successor identity.`);
+        process.exit(TUNNEL_DEAD_EXIT_CODE);
+      } catch { /* retry on next supervised start */ }
+    }, delay * 1000);
+  }
+  return null;
 }
 
 async function runOperatorKey(argv: string[]): Promise<number> {
