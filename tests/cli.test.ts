@@ -9,8 +9,12 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   applySavedNode,
+  completeHandoffForNode,
   startProviderAutoUpdate,
   tunnelDeadBehavior,
   type ServeOpts,
@@ -152,5 +156,25 @@ describe("Quick Tunnel dead policy", () => {
     assert.equal(tunnelDeadBehavior("retry", true), "retry");
     assert.equal(tunnelDeadBehavior("exit", false), "exit");
     assert.equal(tunnelDeadBehavior("log-only", true), "log-only");
+  });
+});
+
+describe("operator handoff completion", () => {
+  it("does not clear an unclaimed marker during initial registration", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-handoff-"));
+    const oldHome = process.env.IICP_HOME;
+    try {
+      process.env.IICP_HOME = home;
+      const marker = path.join(home, "operator-handoff-pending-test.json");
+      fs.writeFileSync(marker, JSON.stringify({ affected_node_names: ["gate"], restart_requested_node_names: [], completed_node_names: [] }));
+      completeHandoffForNode("gate");
+      assert.equal(fs.existsSync(marker), true);
+      fs.writeFileSync(marker, JSON.stringify({ affected_node_names: ["gate"], restart_requested_node_names: ["gate"], completed_node_names: [] }));
+      completeHandoffForNode("gate");
+      assert.equal(fs.existsSync(marker), false);
+    } finally {
+      if (oldHome === undefined) delete process.env.IICP_HOME; else process.env.IICP_HOME = oldHome;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -2418,10 +2418,15 @@ export function handoffRestartDelay(marker: HandoffMarker, nodeName: string, now
   return Math.max(0, created + (typeof grace === "number" && grace >= 0 ? grace : 300) - now);
 }
 
-function completeHandoffForNode(nodeName: string): void {
+export function completeHandoffForNode(nodeName: string): void {
   for (const file of handoffMarkerPaths()) {
     const marker = readHandoffMarker(file);
     if (!marker || !Array.isArray(marker.affected_node_names) || !marker.affected_node_names.includes(nodeName)) continue;
+    // A rotation can be written while this process is still completing its
+    // initial registration. Only the successor that claimed a supervised
+    // restart may complete the marker; do not erase an unclaimed handoff.
+    const requested = new Set((marker.restart_requested_node_names as string[] | undefined) ?? []);
+    if (!requested.has(nodeName)) continue;
     const affected = new Set((marker.affected_node_names as string[] | undefined) ?? []);
     const completed = new Set((marker.completed_node_names as string[] | undefined) ?? []);
     completed.add(nodeName);
