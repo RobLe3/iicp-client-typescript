@@ -825,6 +825,9 @@ async function runServe(opts: ServeOpts): Promise<number> {
     opts.backendUrl =
       opts.backendType === "anthropic" ? "https://api.anthropic.com" : "http://localhost:11434";
   }
+  // Resolve the public default only after a saved node has had the opportunity
+  // to supply its own directory URL. This preserves saved-node precedence.
+  if (!opts.directoryUrl) opts.directoryUrl = "https://iicp.network/api";
 
   // Onboarding: if no --model given, auto-select the first model the backend advertises
   // (Ollama /api/tags) so a bare `iicp-node serve` just works (parity with Rust/Python).
@@ -3112,7 +3115,7 @@ async function dispatch(argv: string[]): Promise<number> {
       (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? "",
     directoryUrl:
       (values["directory-url"] as string | undefined) ??
-      envOr("IICP_DIRECTORY_URL", "https://iicp.network/api")!,
+      envOr("IICP_DIRECTORY_URL") ?? "",
     region: (values.region as string | undefined) ?? envOr("IICP_REGION"),
     intent: (values.intent as string | undefined) ?? envOr("IICP_INTENT", "urn:iicp:intent:llm:chat:v1")!,
     maxConcurrent:

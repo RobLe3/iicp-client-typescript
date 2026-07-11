@@ -78,6 +78,16 @@ describe("#410 backend_url precedence (applySavedNode)", () => {
     const out = applySavedNode(baseOpts({ backendUrl: "" }), savedNode({ backend_url: "" }));
     assert.equal(out.backendUrl, "http://localhost:11434");
   });
+
+  it("saved directory_url applies when no flag/env supplied it", () => {
+    const out = applySavedNode(baseOpts({ directoryUrl: "" }), savedNode({ directory_url: "http://directory.test/api" }));
+    assert.equal(out.directoryUrl, "http://directory.test/api");
+  });
+
+  it("an explicit directory URL wins over the saved node", () => {
+    const out = applySavedNode(baseOpts({ directoryUrl: "http://flag.test/api" }), savedNode({ directory_url: "http://saved.test/api" }));
+    assert.equal(out.directoryUrl, "http://flag.test/api");
+  });
 });
 
 describe("provider auto-update loop", () => {
