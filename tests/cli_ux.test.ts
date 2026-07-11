@@ -171,6 +171,7 @@ describe("0.7.40 CLI-UX: per-subcommand --help never crashes", () => {
     ["update"],
     ["serve"],
     ["operator", "rename"],
+    ["operator", "dsr"],
     ["operator", "encrypt"],
     ["operator", "decrypt"],
   ]) {

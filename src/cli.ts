@@ -64,7 +64,7 @@ import {
   saveOperator,
   type NodeIdentity,
 } from "./identity.js";
-import { issueDelegation, signRename } from "./delegation.js";
+import { issueDelegation, signOperatorSelfService, signRename } from "./delegation.js";
 import { McpToolPolicy, toolRiskLabel } from "./mcp_policy.js";
 
 type UpdaterModule = typeof import("./updater.js");
@@ -231,6 +231,7 @@ function printHelp(): void {
       `  service                    Generate/install OS supervisor units for unattended node serving\n` +
       `  update                     Check whether a newer @iicp/client release is available\n` +
       `  operator rename <name>     Change your public display_name (signed by your operator key)\n` +
+      `  operator dsr <action>      Export, restrict, or anonymize your directory records\n` +
       `  operator encrypt           Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  operator decrypt           Remove at-rest encryption of the operator secret\n\n` +
       `Run an IICP provider node backed by an OpenAI-compatible server.\n\n` +
@@ -2223,12 +2224,130 @@ function printOperatorHelp(): void {
       `Manage your operator identity.\n\n` +
       `subcommands:\n` +
       `  rename <name>              Change your public display_name (signed by your operator key)\n` +
+      `  dsr <action>               Export, restrict, or anonymize your directory records\n` +
       `  encrypt                    Password-encrypt the operator secret at rest ($IICP_OPERATOR_PASSPHRASE)\n` +
       `  decrypt                    Remove at-rest encryption of the operator secret\n\n` +
       `operator rename options:\n` +
       `  --directory-url URL        IICP directory base URL (defaults to env / iicp.network)\n` +
       `  -h, --help                 Show this help and exit\n`,
   );
+}
+
+async function runOperatorDsr(argv: string[]): Promise<number> {
+  const { values, positionals } = safeParseArgs({
+    args: argv,
+    options: {
+      "directory-url": { type: "string" },
+      "tracking-id": { type: "string" },
+      output: { type: "string" },
+      yes: { type: "boolean" },
+      help: { type: "boolean", short: "h" },
+    },
+    allowPositionals: true,
+  });
+  if (values.help) {
+    process.stdout.write(
+      "usage: iicp-node operator dsr <export|restrict|anonymize> [options]\n\n" +
+        "The local operator key signs a one-use directory challenge. It never enters the browser or request body.\n\n" +
+        "  --output FILE             Required for export; creates a new mode-0600 local file\n" +
+        "  --yes                     Confirm restrict or anonymize after the retained-record notice\n" +
+        "  --tracking-id ID          Optional local reference\n" +
+        "  --directory-url URL       IICP directory base URL\n",
+    );
+    return 0;
+  }
+  const action = positionals[0];
+  if (action !== "export" && action !== "restrict" && action !== "anonymize") {
+    process.stderr.write("ERROR: usage: iicp-node operator dsr <export|restrict|anonymize> [options]\n");
+    return 2;
+  }
+  const outputPath = values.output as string | undefined;
+  if (action === "export" && !outputPath) {
+    process.stderr.write("ERROR: export requires --output <new-file>; it is not printed to the terminal.\n");
+    return 2;
+  }
+  if (outputPath && fs.existsSync(outputPath)) {
+    process.stderr.write("ERROR: --output already exists; choose a new path to avoid replacing an export.\n");
+    return 2;
+  }
+  if (action !== "export") {
+    process.stderr.write(
+      "This action restricts or anonymizes directory records. Minimal signed ledger, security and accounting records may be retained and are explained in the receipt.\n",
+    );
+    if (!values.yes) {
+      process.stderr.write("Re-run with --yes to confirm.\n");
+      return 2;
+    }
+  }
+  const op = loadOperator();
+  if (!op) {
+    process.stderr.write("ERROR: no operator identity — run `iicp-node init` first.\n");
+    return 1;
+  }
+  if (!operatorIsKeyBacked(op)) {
+    process.stderr.write("ERROR: this legacy operator identity cannot sign a rights request; regenerate a key-backed identity.\n");
+    return 1;
+  }
+  const directoryUrl =
+    (values["directory-url"] as string | undefined) ?? process.env["IICP_DIRECTORY_URL"] ?? "https://iicp.network/api";
+  const base = `${directoryUrl.replace(/\/+$/, "")}/v1/operator`;
+  let response: Response;
+  try {
+    const challenge = await fetch(`${base}/challenge`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator_pub: op.operator_id }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const challengeBody = (await challenge.json()) as { nonce?: unknown; error?: { message?: string } };
+    if (!challenge.ok || typeof challengeBody.nonce !== "string") {
+      throw new Error(challengeBody.error?.message ?? "directory challenge was incomplete");
+    }
+    const payload: Record<string, unknown> = {
+      operator_pub: op.operator_id,
+      nonce: challengeBody.nonce,
+      ts: Math.floor(Date.now() / 1000),
+      tracking_id: (values["tracking-id"] as string | undefined) ?? `dsr-${randomUUID()}`,
+    };
+    if (action !== "export") payload.confirm = true;
+    payload.sig = signOperatorSelfService(operatorSigningKey(op), `dsr_${action}`, payload);
+    response = await fetch(`${base}/dsr/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (err) {
+    process.stderr.write(`ERROR: rights request failed: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = (await response.json()) as Record<string, unknown>;
+  } catch {
+    body = {};
+  }
+  if (!response.ok) {
+    const err = body.error as { message?: string } | undefined;
+    process.stderr.write(`ERROR: directory rejected rights request: ${err?.message ?? response.status}\n`);
+    return 1;
+  }
+  if (action === "export" && outputPath) {
+    try {
+      fs.writeFileSync(outputPath, `${JSON.stringify(body, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      fs.chmodSync(outputPath, 0o600);
+    } catch (err) {
+      process.stderr.write(`ERROR: unable to save export safely: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 1;
+    }
+    process.stdout.write(`Saved redacted directory export to ${outputPath} (mode 0600).\n`);
+  } else {
+    process.stdout.write(`Directory ${action} request completed.\n`);
+  }
+  if (typeof body.tracking_id === "string") process.stdout.write(`Receipt reference: ${body.tracking_id}\n`);
+  const retention = body.retention_notice ?? body.retention_reason;
+  if (typeof retention === "string") process.stdout.write(`Retained records: ${retention}\n`);
+  return 0;
 }
 
 function printOperatorEncryptHelp(): void {
@@ -2275,6 +2394,7 @@ async function runOperator(argv: string[]): Promise<number> {
     if (rest.length > 0) throw new CliError(`unknown operator decrypt option '${rest[0]}'`);
     return runOperatorDecrypt();
   }
+  if (sub === "dsr") return runOperatorDsr(argv.slice(1));
   if (sub !== "rename") {
     process.stderr.write(`unknown operator subcommand: ${sub}\n`);
     printOperatorHelp();
