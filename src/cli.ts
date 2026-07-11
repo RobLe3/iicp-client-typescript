@@ -2360,6 +2360,20 @@ function writePrivateJsonNew(file: string, value: unknown): void {
   fs.chmodSync(file, 0o600);
 }
 
+function writeOperatorHandoffMarker(nodeNames: string[]): string {
+  const stamp = Math.floor(Date.now() / 1000);
+  const marker = path.join(configDir(), `operator-handoff-pending-${stamp}.json`);
+  writePrivateJsonNew(marker, {
+    schema: "iicp.operator-handoff.v1",
+    action: "rotate",
+    created_at_unix: stamp,
+    grace_seconds: 300,
+    affected_node_names: nodeNames,
+    restart_attempted: false,
+  });
+  return marker;
+}
+
 async function runOperatorKey(argv: string[]): Promise<number> {
   const { values, positionals } = safeParseArgs({
     args: argv,
@@ -2421,8 +2435,10 @@ async function runOperatorKey(argv: string[]): Promise<number> {
     if (action === "rotate" && successor) {
       saveOperator(successor);
       let migrated = 0;
-      for (const node of listNodes()) if (node.operator_id === old.operator_id) { node.operator_id = successor.operator_id; saveNode(node); migrated += 1; }
-      process.stdout.write(`Operator identity migrated; ${migrated} saved node(s) will re-register with the new key.\nEncrypted old-key backup: ${backupPath}\nRedacted receipt: ${receiptPath}\n`);
+      const nodeNames: string[] = [];
+      for (const node of listNodes()) if (node.operator_id === old.operator_id) { node.operator_id = successor.operator_id; nodeNames.push(node.name); saveNode(node); migrated += 1; }
+      const handoffPath = writeOperatorHandoffMarker(nodeNames);
+      process.stdout.write(`Operator identity migrated; ${migrated} saved node(s) will re-register with the new key.\nEncrypted old-key backup: ${backupPath}\nRedacted receipt: ${receiptPath}\nSupervised handoff marker: ${handoffPath} (one restart pass after 5 minutes).\n`);
     } else process.stdout.write(`Operator identity revoked; redacted receipt: ${receiptPath}\n`);
     return 0;
   } catch (e) {
