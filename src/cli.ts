@@ -2431,23 +2431,31 @@ function completeHandoffForNode(nodeName: string): void {
 
 function scheduleSupervisedHandoffRestart(nodeName: string | undefined): NodeJS.Timeout | null {
   if (!nodeName || !envBool("IICP_SUPERVISED")) return null;
-  for (const file of handoffMarkerPaths()) {
-    const marker = readHandoffMarker(file);
-    const delay = marker ? handoffRestartDelay(marker, nodeName, Math.floor(Date.now() / 1000)) : null;
-    if (delay === null) continue;
-    return setTimeout(() => {
-      const current = readHandoffMarker(file);
-      if (!current || handoffRestartDelay(current, nodeName, Math.floor(Date.now() / 1000)) !== 0) return;
-      const requested = new Set((current.restart_requested_node_names as string[] | undefined) ?? []);
-      requested.add(nodeName);
-      try {
-        fs.writeFileSync(file, `${JSON.stringify({ ...current, restart_requested_node_names: [...requested] }, null, 2)}\n`, { mode: 0o600 });
-        console.error(`[iicp-node] operator handoff grace period complete — exiting with code ${TUNNEL_DEAD_EXIT_CODE} so the supervisor reloads the successor identity.`);
-        process.exit(TUNNEL_DEAD_EXIT_CODE);
-      } catch { /* retry on next supervised start */ }
-    }, delay * 1000);
-  }
-  return null;
+  let checking = false;
+  const check = (): void => {
+    if (checking) return;
+    checking = true;
+    try {
+      for (const file of handoffMarkerPaths()) {
+        const marker = readHandoffMarker(file);
+        if (!marker || handoffRestartDelay(marker, nodeName, Math.floor(Date.now() / 1000)) !== 0) continue;
+        const requested = new Set((marker.restart_requested_node_names as string[] | undefined) ?? []);
+        requested.add(nodeName);
+        try {
+          fs.writeFileSync(file, `${JSON.stringify({ ...marker, restart_requested_node_names: [...requested] }, null, 2)}\n`, { mode: 0o600 });
+          console.error(`[iicp-node] operator handoff grace period complete — exiting with code ${TUNNEL_DEAD_EXIT_CODE} so the supervisor reloads the successor identity.`);
+          process.exit(TUNNEL_DEAD_EXIT_CODE);
+        } catch { /* retry on the next monitor pass */ }
+      }
+    } finally {
+      checking = false;
+    }
+  };
+  // The marker is written by a separate `operator key rotate` invocation,
+  // so it can appear after `serve` has already started. Re-check redacted
+  // local state rather than assuming startup saw every future handoff.
+  check();
+  return setInterval(check, 15_000);
 }
 
 async function runOperatorKey(argv: string[]): Promise<number> {
