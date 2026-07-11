@@ -316,16 +316,18 @@ describe("submit", () => {
 
   it("prefers ticketed dispatch and exposes only the redacted ticket prefix", async () => {
     const calls: string[] = [];
+    const ticketFixture = JSON.parse(readFileSync(new URL("../parity/dispatch-route-ticket-v1.json", import.meta.url), "utf8"));
     const restore = mockFetch((url) => {
       const value = url.toString();
       calls.push(value);
+      if (value.includes("/v1/directory-key")) return jsonResponse({ public_key: ticketFixture.public_key_hex, algorithm: "ed25519" });
       if (value.includes("/v1/dispatch/ticket")) {
         return jsonResponse({
-          ticket: "secret-ticket-token",
+          ticket: ticketFixture.valid.token,
           ticket_id_prefix: "abc123def456",
-          node_id: "node-ticket",
+          node_id: ticketFixture.valid.claims.node_id,
           route: {
-            node_id: "node-ticket",
+            node_id: ticketFixture.valid.claims.node_id,
             endpoint: "https://1.2.3.4:9484",
             score: 0.9,
             available: true,
@@ -336,12 +338,12 @@ describe("submit", () => {
       }
       return jsonResponse({ task_id: "task-ticket", status: "success", result: { answer: 42 } });
     });
-    const client = new IicpClient({ directory_url: "https://directory.example", route_discovery_mode: "auto" });
+    const client = new IicpClient({ directory_url: ticketFixture.valid.claims.iss, route_discovery_mode: "auto" });
     const response = await client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } });
     assert.equal(response.generated_by_ai, true);
     assert.equal(response.dispatch_ticket_id_prefix, "abc123def456");
     assert.equal(calls.some((url) => url.includes("/v1/discover")), false);
-    assert.equal(JSON.stringify(response).includes("secret-ticket-token"), false);
+    assert.equal(JSON.stringify(response).includes(ticketFixture.valid.token), false);
     restore();
   });
 

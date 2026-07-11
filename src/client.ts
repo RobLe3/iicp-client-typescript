@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 
 import { encryptPayload } from "./confidentiality.js";
+import { verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
 import {
@@ -229,6 +230,8 @@ export class IicpClient {
     };
   }
 
+  private dispatchTicketKey?: string;
+
   private async _ticketedCandidates(intent: string, opts: DiscoverOptions, traceparent: string): Promise<Node[]> {
     const url = `${this.cfg.directory_url.replace(/\/$/, "")}/v1/dispatch/ticket`;
     const base: Record<string, unknown> = { intent, limit: Math.min(opts.limit ?? 10, 50) };
@@ -259,6 +262,16 @@ export class IicpClient {
       const error = data.error as Record<string, unknown> | undefined;
       const errorCode = typeof error?.code === "string" ? error.code : undefined;
       if (response.status === 201) {
+        if (!this.dispatchTicketKey) {
+          const keyResponse = await fetch(`${this.cfg.directory_url.replace(/\/$/, "")}/v1/directory-key`, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(5_000) });
+          const keyData = await keyResponse.json().catch(() => ({})) as Record<string, unknown>;
+          if (keyResponse.status === 200 && typeof keyData.public_key === "string") this.dispatchTicketKey = keyData.public_key;
+        }
+        const nodeId = typeof data.node_id === "string" ? data.node_id : "";
+        const issuer = this.cfg.directory_url.replace(/\/$/, "").replace(/\/api$/, "");
+        if (typeof data.ticket !== "string" || !this.dispatchTicketKey || !verifyDispatchRouteTicket(data.ticket, this.dispatchTicketKey, issuer, nodeId, intent)) {
+          throw new IicpError("Directory returned an unverifiable dispatch ticket", "IICP-DISPATCH-TICKET-UNVERIFIED", { component: "directory" });
+        }
         const route = data.route as Record<string, unknown> | undefined;
         const node = route ? this._nodeFromRoute({ ...route, node_id: data.node_id ?? route.node_id }, String(data.ticket_id_prefix ?? "")) : undefined;
         if (!node) throw new IicpError("Directory returned malformed ticketed route material", "IICP-DISPATCH-TICKET-MALFORMED", { component: "directory" });
