@@ -15,8 +15,8 @@ export interface ClientConfig {
   use_confidentiality?: boolean;
   /** ε-greedy exploration probability for provider selection (R4). Default: 0.05. Override: IICP_ROUTING_EPSILON */
   routing_epsilon?: number;
-  /** Selection strategy. Default: epsilon. Override: IICP_ROUTING_STRATEGY */
-  routing_strategy?: "deterministic" | "epsilon" | "softmax_top_k";
+  /** Selection strategy. Default: epsilon. `weighted_v1` is opt-in. Override: IICP_ROUTING_STRATEGY */
+  routing_strategy?: "deterministic" | "epsilon" | "softmax_top_k" | "weighted_v1";
   /** Candidate pool for softmax_top_k. Default: 3. Override: IICP_ROUTING_TOP_K */
   routing_top_k?: number;
   /** Softmax temperature for softmax_top_k. Default: 0.04. Override: IICP_ROUTING_SOFTMAX_TAU */
@@ -115,6 +115,7 @@ export interface Node {
   node_id: string;
   endpoint: string;
   score: number;
+  load?: number;
   available: boolean;
   region: string;
   latency_estimate_ms?: number;

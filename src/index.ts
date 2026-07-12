@@ -1,4 +1,5 @@
 export { IicpClient } from "./client.js";
+export { weightedV1Order } from "./selection.js";
 export { evaluatePreNormativeProfile } from "./profile_compatibility.js";
 export type { ProfileCompatibilityDecision } from "./profile_compatibility.js";
 export { IicpError } from "./errors.js";

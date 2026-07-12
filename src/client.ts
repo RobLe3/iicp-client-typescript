@@ -9,6 +9,7 @@ import { encryptPayload } from "./confidentiality.js";
 import { verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
+import { weightedV1Order } from "./selection.js";
 import {
   ROUTING_POLICY_REFUSAL_CODE,
   filterNodesForRoutingPolicy,
@@ -142,7 +143,7 @@ export class IicpClient {
       }
     }
     const envStrategy = process.env["IICP_ROUTING_STRATEGY"];
-    if (envStrategy === "deterministic" || envStrategy === "epsilon" || envStrategy === "softmax_top_k") {
+    if (envStrategy === "deterministic" || envStrategy === "epsilon" || envStrategy === "softmax_top_k" || envStrategy === "weighted_v1") {
       merged.routing_strategy = envStrategy;
     }
     const envTopK = process.env["IICP_ROUTING_TOP_K"];
@@ -171,6 +172,7 @@ export class IicpClient {
   private _selectCandidates(nodes: Node[], maxRetries: number): Node[] {
     const strategy = this.cfg.routing_strategy ?? "epsilon";
     if (strategy === "deterministic" || nodes.length <= 1) return nodes.slice(0, maxRetries);
+    if (strategy === "weighted_v1") return weightedV1Order(nodes, maxRetries, Math.random());
     if (strategy === "softmax_top_k") {
       const topK = Math.max(1, Math.min(nodes.length, this.cfg.routing_top_k ?? DEFAULT_ROUTING_TOP_K));
       const pool = nodes.slice(0, topK);
@@ -207,6 +209,7 @@ export class IicpClient {
       node_id: nodeId,
       endpoint,
       score: Number(raw.score ?? 0),
+      load: Number(raw.load ?? 0),
       available: Boolean(raw.available ?? true),
       region: String(raw.region ?? ""),
       latency_estimate_ms: raw.latency_estimate_ms as number | undefined,
