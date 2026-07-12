@@ -133,17 +133,13 @@ export OPENAI_BASE_URL=http://127.0.0.1:9483/v1
 Then point LangChain, Cursor, liteLLM or another OpenAI-compatible tool at that
 base URL. Full guide: <https://iicp.network/docs/proxy>
 
-## Provider upgrade note
+## Keep provider nodes current
 
-> **Upgrade note (0.7.80)** — clients now support remote-routing policy profiles
-> that can refuse unsafe remote dispatch before any prompt leaves the caller.
-> Use `--routing-profile sensitive` for fail-closed no-remote behavior,
-> `eu-restricted` for EU/EEA node filtering, or `strict-policy` when a
-> no-retention node policy manifest is required.
->
-> Existing provider reachability fixes from 0.7.79 remain intact.
-
-### Keeping provider nodes current
+The current public release line is **0.7.87**. Upgrade through your package
+manager before troubleshooting an older installation. Routing profiles can
+refuse remote dispatch before a prompt leaves the client; use `sensitive` for
+local-only work, `eu-restricted` for EU/EEA routing, or `strict-policy` when a
+no-retention policy manifest is required.
 
 Provider nodes run an hourly official-registry check by default
 (`IICP_AUTO_UPDATE=1`, `IICP_AUTO_UPDATE_INTERVAL_S=3600`; minimum 300s).
@@ -151,12 +147,10 @@ When npm publishes a newer stable release, `serve` runs
 `npm install -g @iicp/client@latest` and re-execs the node so identity and cached
 node tokens are preserved.
 
-If a node is older than 0.7.67, perform one manual upgrade/restart first,
-especially for Dockerized Python or TypeScript providers: early updater wiring
-did not reliably cover every normal `serve` path. For Docker, use a Compose
+If an older supervised node does not update itself, perform one manual upgrade
+and restart through its normal supervisor. For Docker, use a Compose
 `restart: unless-stopped` policy (or `docker run --restart unless-stopped`) so
-0.7.80 can intentionally exit from a confirmed tunnel-dead state and let Docker
-bring it back cleanly.
+verified recovery can restart cleanly.
 
 > **Upgrade note (0.5.3)** — if you operate a node and use the native IICP
 > TCP transport on port 9484, upgrade to `^0.5.3`. Releases 0.5.0–0.5.2
