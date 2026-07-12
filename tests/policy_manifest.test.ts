@@ -37,3 +37,20 @@ test("pre-normative profile fixture has portable reasons", () => {
   assert.equal(fixture.scenarios.length, 9);
   assert.equal(fixture.scenarios.every((scenario: { expected_reason?: string }) => Boolean(scenario.expected_reason)), true);
 });
+
+test("profile fixture native policy scenarios use the routing gate", async () => {
+  const { filterNodesForRoutingPolicy } = await import("../src/routing_policy.js");
+  const fixture = JSON.parse(readFileSync(join(process.cwd(), "parity/profile-compatibility-v0.json"), "utf8"));
+  for (const scenario of fixture.native_policy_scenarios) {
+    const raw = scenario.node;
+    const node = {
+      node_id: `fixture-${scenario.name}`, endpoint: "https://node.example.test", score: 0.5,
+      available: true, region: raw.region,
+      cx_public_key: raw.cx_public_key ? { algorithm: "X25519", key: "fixture", key_id: "fixture" } : undefined,
+      node_policy_manifest: raw.node_policy_manifest,
+    };
+    const decision = filterNodesForRoutingPolicy([node], scenario.policy);
+    assert.equal(decision.eligible.length, 0);
+    assert.deepEqual(decision.rejectedReasons, [scenario.expected_reason]);
+  }
+});
