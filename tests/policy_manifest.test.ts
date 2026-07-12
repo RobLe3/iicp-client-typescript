@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createPublicKey, verify } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -27,4 +27,13 @@ test("policy manifest is signed by the operator without leaking its secret", () 
     () => loadAndSignPolicyManifest(path, { ...op, operator_id: Buffer.alloc(32).toString("base64") }, new Date("2026-07-10T00:00:00Z")),
     /does not match/,
   );
+});
+
+test("pre-normative profile fixture has portable reasons", () => {
+  const fixture = JSON.parse(readFileSync(join(process.cwd(), "parity/profile-compatibility-v0.json"), "utf8"));
+  assert.equal(fixture.fixture_version, "0.2.0-draft");
+  assert.equal(fixture.status, "pre-normative");
+  assert.equal(fixture.result_contract.unsupported_status, "unsupported_pre_normative_profile");
+  assert.equal(fixture.scenarios.length, 9);
+  assert.equal(fixture.scenarios.every((scenario: { expected_reason?: string }) => Boolean(scenario.expected_reason)), true);
 });
