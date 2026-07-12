@@ -1,4 +1,6 @@
 export { IicpClient } from "./client.js";
+export { evaluatePreNormativeProfile } from "./profile_compatibility.js";
+export type { ProfileCompatibilityDecision } from "./profile_compatibility.js";
 export { IicpError } from "./errors.js";
 export { IicpNode } from "./node.js";
 export { McpToolPolicy, toolRiskLabel, TOOL_RISK_KEYWORDS } from "./mcp_policy.js";

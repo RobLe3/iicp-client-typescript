@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { operatorSigningKey, type OperatorIdentity } from "../src/identity.js";
 import { canonicalPolicyManifest, loadAndSignPolicyManifest } from "../src/policy_manifest.js";
+import { evaluatePreNormativeProfile } from "../src/profile_compatibility.js";
 
 test("policy manifest is signed by the operator without leaking its secret", () => {
   const op: OperatorIdentity = {
@@ -31,11 +32,20 @@ test("policy manifest is signed by the operator without leaking its secret", () 
 
 test("pre-normative profile fixture has portable reasons", () => {
   const fixture = JSON.parse(readFileSync(join(process.cwd(), "parity/profile-compatibility-v0.json"), "utf8"));
-  assert.equal(fixture.fixture_version, "0.2.0-draft");
+  assert.equal(fixture.fixture_version, "0.3.0-draft");
   assert.equal(fixture.status, "pre-normative");
   assert.equal(fixture.result_contract.unsupported_status, "unsupported_pre_normative_profile");
-  assert.equal(fixture.scenarios.length, 9);
+  assert.equal(fixture.scenarios.length, 11);
   assert.equal(fixture.scenarios.every((scenario: { expected_reason?: string }) => Boolean(scenario.expected_reason)), true);
+});
+
+test("profile fixture scenarios use native compatibility evaluator", () => {
+  const fixture = JSON.parse(readFileSync(join(process.cwd(), "parity/profile-compatibility-v0.json"), "utf8"));
+  for (const scenario of fixture.scenarios) {
+    const decision = evaluatePreNormativeProfile(scenario.request, scenario.provider, fixture.intent_aliases, scenario.now_s ?? 0);
+    assert.equal(decision.eligible, scenario.expected === "eligible", scenario.name);
+    assert.equal(decision.reason, scenario.expected_reason, scenario.name);
+  }
 });
 
 test("profile fixture native policy scenarios use the routing gate", async () => {
