@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import { IicpClient } from "../src/client.js";
 
@@ -8,6 +10,15 @@ const request = {
   profile_fixture_sha256: "a".repeat(64),
   required: true,
 };
+
+test("profile negotiation fixture matches the discovery wire contract", () => {
+  const fixture = JSON.parse(fs.readFileSync(path.join(process.cwd(), "parity/profile-negotiation-v0.json"), "utf8"));
+  assert.equal(fixture.fixture_version, "0.2.0-draft");
+  assert.equal(fixture.profile_fixture_sha256, "4137ecf91b4748a2b368cf4428b4604c6947f8879d77402cc7937d11d24b2aaf");
+  for (const item of fixture.cases) {
+    if (item.expected.requested) assert.equal(item.request.profile_fixture_sha256.length, 64, item.name);
+  }
+});
 
 test("required profile negotiation is encoded and exposed", async () => {
   const originalFetch = globalThis.fetch;
