@@ -22,7 +22,9 @@ import type {
   ChatResponse,
   ClientConfig,
   DiscoverOptions,
+  DiscoveryResult,
   Node,
+  ProfileNegotiation,
   TaskRequest,
   TaskResponse,
 } from "./types.js";
@@ -296,7 +298,7 @@ export class IicpClient {
   }
 
   /** Discover nodes capable of handling the given intent. */
-  async discover(intent: string, opts?: DiscoverOptions, traceparent?: string): Promise<Node[]> {
+  async discoverWithNegotiation(intent: string, opts?: DiscoverOptions, traceparent?: string): Promise<DiscoveryResult> {
     const o = opts ?? {};
     const params = new URLSearchParams();
     params.set("intent", intent);
@@ -306,13 +308,28 @@ export class IicpClient {
     if (o.qos) params.set("qos", o.qos);
     if (o.min_reputation !== undefined)
       params.set("min_reputation", String(o.min_reputation));
+    if (o.profile_request) {
+      params.set("profile_id", o.profile_request.profile_id);
+      params.set("profile_version", o.profile_request.profile_version);
+      params.set("profile_fixture_sha256", o.profile_request.profile_fixture_sha256);
+      params.set("profile_required", String(o.profile_request.required ?? false));
+    }
 
     const data = await this._get(
       `${this.cfg.directory_url.replace(/\/$/, "")}/v1/discover?${params}`,
       5_000,
       traceparent,
     );
-    const raw: unknown[] = (data as { nodes?: unknown[] }).nodes ?? [];
+    const response = data as { nodes?: unknown[]; profile_negotiation?: ProfileNegotiation };
+    const negotiation = response.profile_negotiation;
+    if (o.profile_request?.required && (!negotiation || negotiation.status !== "compatible" || negotiation.dispatch_allowed !== true)) {
+      throw new IicpError(
+        "required pre-normative profile is not supported by the directory",
+        "unsupported_pre_normative_profile",
+        { component: "directory" },
+      );
+    }
+    const raw: unknown[] = response.nodes ?? [];
     const nodes: Node[] = [];
     for (const n of raw) {
       const rawNode = n as Record<string, unknown>;
@@ -328,7 +345,12 @@ export class IicpClient {
       }
       nodes.push(node);
     }
-    return nodes;
+    return { nodes, profile_negotiation: negotiation };
+  }
+
+  /** Backwards-compatible node-only discovery helper. */
+  async discover(intent: string, opts?: DiscoverOptions, traceparent?: string): Promise<Node[]> {
+    return (await this.discoverWithNegotiation(intent, opts, traceparent)).nodes;
   }
 
   /**
@@ -341,10 +363,14 @@ export class IicpClient {
     const discoverOpts: DiscoverOptions = {
       region: req.constraints?.region ?? this.cfg.region,
       min_reputation: req.constraints?.min_reputation,
+      profile_request: this.cfg.profile_request,
     };
     let nodes: Node[];
-    if (this.cfg.route_discovery_mode === "legacy") {
-      nodes = await this.discover(req.intent, discoverOpts, tp);
+    let profileNegotiation: ProfileNegotiation | undefined;
+    if (this.cfg.route_discovery_mode === "legacy" || this.cfg.profile_request) {
+      const discovered = await this.discoverWithNegotiation(req.intent, discoverOpts, tp);
+      nodes = discovered.nodes;
+      profileNegotiation = discovered.profile_negotiation;
     } else {
       try {
         nodes = await this._ticketedCandidates(req.intent, discoverOpts, tp);
@@ -353,7 +379,9 @@ export class IicpClient {
         if (this.cfg.route_discovery_mode === "ticketed") {
           throw new IicpError("Directory does not support ticketed dispatch", "IICP-DISPATCH-TICKET-UNAVAILABLE", { component: "directory" });
         }
-        nodes = await this.discover(req.intent, discoverOpts, tp);
+        const discovered = await this.discoverWithNegotiation(req.intent, discoverOpts, tp);
+        nodes = discovered.nodes;
+        profileNegotiation = discovered.profile_negotiation;
       }
     }
 
@@ -448,6 +476,14 @@ export class IicpClient {
               | undefined,
             generated_by_ai: true,
             dispatch_ticket_id_prefix: node.dispatch_ticket_id_prefix,
+            routing_receipt: {
+              receipt_version: "iicp-routing-receipt-v1",
+              selection_profile: profileNegotiation ? (this.cfg.routing_strategy ?? "epsilon") : "directory_ticket_v1",
+              eligible_candidate_count: decision.eligible.length,
+              selected_node_id_prefix: _nodeShortId(node.node_id),
+              profile_negotiation: profileNegotiation,
+              redaction: "prompt_response_endpoint_token_excluded",
+            },
           };
         } catch (err) {
           if (err instanceof IicpError) {

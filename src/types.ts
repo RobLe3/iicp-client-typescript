@@ -27,6 +27,8 @@ export interface ClientConfig {
   routing_policy?: RoutingPolicy;
   /** Route endpoint migration mode. Default: auto. */
   route_discovery_mode?: "auto" | "ticketed" | "legacy";
+  /** Optional profile request used by legacy discovery before task dispatch. */
+  profile_request?: ProfileRequest;
 }
 
 export interface TaskConstraints {
@@ -67,6 +69,17 @@ export interface TaskResponse {
   metrics?: TaskMetrics;
   generated_by_ai?: boolean;
   dispatch_ticket_id_prefix?: string;
+  routing_receipt?: RoutingReceipt;
+}
+
+/** Local-only metadata; task content, endpoints and tokens are excluded. */
+export interface RoutingReceipt {
+  receipt_version: "iicp-routing-receipt-v1";
+  selection_profile: string;
+  eligible_candidate_count: number;
+  selected_node_id_prefix: string;
+  profile_negotiation?: ProfileNegotiation;
+  redaction: "prompt_response_endpoint_token_excluded";
 }
 
 export interface DiscoverOptions {
@@ -76,6 +89,27 @@ export interface DiscoverOptions {
   min_reputation?: number;
   /** Browser-like consumers: keep only HTTPS/loopback endpoints. Native default: false. */
   browser_usable_only?: boolean;
+  /** Optional additive pre-normative directory profile negotiation. */
+  profile_request?: ProfileRequest;
+}
+
+export interface ProfileRequest {
+  profile_id: string;
+  profile_version: string;
+  profile_fixture_sha256: string;
+  required?: boolean;
+}
+
+export interface ProfileNegotiation {
+  requested: boolean;
+  status?: "compatible" | "unsupported";
+  reason?: "compatible" | "unsupported_pre_normative_profile";
+  dispatch_allowed?: boolean;
+}
+
+export interface DiscoveryResult {
+  nodes: Node[];
+  profile_negotiation?: ProfileNegotiation;
 }
 
 export interface CxPublicKey {
