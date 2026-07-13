@@ -29,6 +29,7 @@ import { loadNode, saveNode } from "./identity.js";
 import {
   RECOVERY_EXIT_CODE,
   classifyRecovery,
+  effectivePublicRouteAvailable,
   envCheckEveryHeartbeats,
   envGraceChecks,
   registryRouteStatus,
@@ -204,6 +205,8 @@ export interface NodeConfig {
   model?: string;
   /** Detected backend server flavor: ollama/lmstudio/vllm/llamacpp/anthropic/custom. */
   backend?: string;
+  /** Backend-local aliases that must not be advertised as public capabilities. */
+  excludedModels?: string[];
   region?: string;
   capabilities?: string[];
   directoryUrl?: string;
@@ -302,11 +305,12 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "backend" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint" | "operatorDelegation" | "operatorDisplayName" | "operatorCreatedAt" | "operatorIntegrityHash" | "policyManifest" | "backendUrl" | "backendApiKey"
+      "model" | "backend" | "excludedModels" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint" | "operatorDelegation" | "operatorDisplayName" | "operatorCreatedAt" | "operatorIntegrityHash" | "policyManifest" | "backendUrl" | "backendApiKey"
     >
   > & {
     model: string | undefined;
     backend: string | undefined;
+    excludedModels: string[];
     region: string | undefined;
     capabilities: string[];
     transportEndpoint: string | undefined;
@@ -344,6 +348,7 @@ export class IicpNode {
   private _runtimeToken: string = "";
   /** Runtime public reachability gate. Quick Tunnel recovery sets this false while stale/rebuilding. */
   private _runtimeAvailable = true;
+  private _runtimeRelayBound = false;
   /** #343 — UPnP IPv6 pinhole UID captured by applyNatProfile, revoked on shutdown. */
   private _pinholeUid: number | null = null;
   private _pinholeLeaseSeconds = 3600;
@@ -383,6 +388,7 @@ export class IicpNode {
     this._cfg = {
       nodeId: config.nodeId,
       backend: config.backend,
+      excludedModels: config.excludedModels ?? [],
       endpoint: config.endpoint,
       intent: config.intent,
       model: config.model,
@@ -798,7 +804,9 @@ export class IicpNode {
       const r = await fetch(`${root}/api/tags`, { headers, signal: AbortSignal.timeout(2_000) });
       if (r.ok) {
         const d = (await r.json()) as { models?: { name?: string }[] };
-        return [...new Set((d.models ?? []).flatMap((m) => (m.name ? [m.name] : [])))].sort();
+        return [...new Set((d.models ?? []).flatMap((m) => (m.name ? [m.name] : [])))]
+          .filter((model) => !(this._cfg.excludedModels ?? []).includes(model))
+          .sort();
       }
     } catch { /* fall through */ }
     // OpenAI-compatible /v1/models
@@ -806,7 +814,9 @@ export class IicpNode {
       const r = await fetch(`${root}/v1/models`, { headers, signal: AbortSignal.timeout(2_000) });
       if (r.ok) {
         const d = (await r.json()) as { data?: { id?: string }[] };
-        return (d.data ?? []).flatMap((m) => (m.id ? [m.id] : []));
+        return (d.data ?? [])
+          .flatMap((m) => (m.id ? [m.id] : []))
+          .filter((model) => !(this._cfg.excludedModels ?? []).includes(model));
       }
     } catch { /* fall through */ }
     return null;
@@ -857,7 +867,12 @@ export class IicpNode {
         const presence = routeStatus.presence;
         const publicAvailable = this._runtimeAvailable;
         const routeNeedsPromotion = routeStatus.routeNeedsPromotion;
-        if (!publicAvailable || routeNeedsPromotion || presence === "absent") {
+        const effectivePublicRoute = effectivePublicRouteAvailable({
+          runtimeAvailable: publicAvailable,
+          routeNeedsPromotion,
+          relayBound: this._runtimeRelayBound,
+        });
+        if (!effectivePublicRoute || presence === "absent") {
           this._recoveryFailures += 1;
         } else if (presence === "present") {
           this._recoveryFailures = 0;
@@ -865,7 +880,7 @@ export class IicpNode {
         const graceChecks = envGraceChecks();
         const { state, action } = classifyRecovery({
           localHealthOk: true,
-          publicAvailable: publicAvailable && !routeNeedsPromotion,
+          publicAvailable: effectivePublicRoute,
           directoryPresence: presence,
           consecutiveFailures: this._recoveryFailures,
           graceChecks,
@@ -1112,6 +1127,7 @@ export class IicpNode {
       let currentToken = nodeToken;
       const self = this;
       const onBind = async (rHost: string, rPort: number, _wId: string) => {
+        self._runtimeRelayBound = true;
         // Path-scoped endpoint (#450): consumers compose "{endpoint}/v1/task",
         // so the scoped path makes the relay forward to THIS worker's bound
         // session instead of executing the task on its own backend. rPort is
@@ -1130,6 +1146,10 @@ export class IicpNode {
           console.warn(`[iicp-node] relay worker: re-registration failed: ${exc instanceof Error ? exc.message : exc}`);
         }
       };
+      const onDisconnect = async () => {
+        self._runtimeRelayBound = false;
+        console.warn("[iicp-node] relay worker session ended — route is no longer bound");
+      };
       import("./relay_worker_client.js").then(({ RelayWorkerClient }) => {
         const rwc = new RelayWorkerClient({
           workerId: this._cfg.nodeId,
@@ -1141,6 +1161,7 @@ export class IicpNode {
           directoryUrl: this._cfg.directoryUrl,
           nodeToken: currentToken,
           onBind,
+          onDisconnect,
         });
         stopRelayWorker = rwc.start();
         console.log(`[iicp-node] relay worker started → ${relayHost}:${relayPort}`);

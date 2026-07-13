@@ -136,6 +136,7 @@ export interface ServeOpts {
   backendUrl: string;
   policyManifest?: string;
   backendType: string;
+  experimental?: boolean;
   /** #5 — Bearer key for an auth-requiring OpenAI-compat backend (LM Studio, hosted). Empty = none. */
   backendApiKey: string;
   model: string;
@@ -239,9 +240,10 @@ function printHelp(): void {
       `  --model NAME               IICP_BACKEND_MODEL — model name (e.g. qwen2.5:0.5b)\n` +
       `  (or --node NAME            load both from ~/.iicp/nodes/<NAME>.json after \`iicp-node init\`)\n\n` +
       `serve optional:\n` +
-      `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434; anthropic → https://api.anthropic.com)\n` +
-      `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | anthropic (default openai_compat)\n` +
+      `  --backend-url URL          IICP_BACKEND_URL — local backend (MeshLLM → http://localhost:9337/v1)\n` +
+      `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | meshllm | anthropic (default openai_compat)\n` +
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for an auth'd backend (LM Studio, hosted); anthropic uses it as x-api-key\n` +
+      `  --experimental             IICP_EXPERIMENTAL — enable an explicitly selected preview backend feature\n` +
       `  --policy-manifest FILE     IICP_POLICY_MANIFEST_FILE — sign and advertise a public node-policy JSON document\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
@@ -317,8 +319,9 @@ function printServeHelp(): void {
       `  --node NAME                load ~/.iicp/nodes/<NAME>.json from \`iicp-node init\`\n\n` +
       `Core options:\n` +
       `  --backend-url URL          IICP_BACKEND_URL — Ollama / vLLM / LM Studio (default http://localhost:11434; anthropic → https://api.anthropic.com)\n` +
-      `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | anthropic\n` +
+      `  --backend-type TYPE        IICP_BACKEND_TYPE — openai_compat | vllm | llamacpp | meshllm | anthropic\n` +
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for auth'd backends\n` +
+      `  --experimental             IICP_EXPERIMENTAL — enable an explicitly selected preview backend feature\n` +
       `  --policy-manifest FILE     IICP_POLICY_MANIFEST_FILE — sign and advertise a public node-policy JSON document\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
@@ -457,7 +460,7 @@ async function checkDependencies(backendUrl: string): Promise<DepIssue[]> {
  * else probe /api/version → ollama, else custom.
  */
 async function detectBackendFlavor(backendUrl: string, apiKey: string, backendType: string): Promise<string> {
-  if (backendType === "anthropic" || backendType === "vllm" || backendType === "llamacpp") return backendType;
+  if (backendType === "anthropic" || backendType === "vllm" || backendType === "llamacpp" || backendType === "meshllm") return backendType;
   const base = backendUrl.replace(/\/$/, "");
   const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
   const headers: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
@@ -822,8 +825,11 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // so a bare `serve --model x` works without --backend-url. An `anthropic` backend
   // defaults to the Anthropic API, not localhost Ollama. Mirrors Python cli.py ~704.
   if (!opts.backendUrl) {
-    opts.backendUrl =
-      opts.backendType === "anthropic" ? "https://api.anthropic.com" : "http://localhost:11434";
+    opts.backendUrl = opts.backendType === "anthropic"
+      ? "https://api.anthropic.com"
+      : opts.backendType === "meshllm"
+        ? "http://localhost:9337/v1"
+        : "http://localhost:11434";
   }
   // Resolve the public default only after a saved node has had the opportunity
   // to supply its own directory URL. This preserves saved-node precedence.
@@ -846,6 +852,32 @@ async function runServe(opts: ServeOpts): Promise<number> {
     } catch {
       // best-effort; the required-model check below surfaces a clear error
     }
+    // MeshLLM is OpenAI-compatible rather than Ollama-compatible. Its model
+    // inventory decides routing, so never choose an arbitrary model when several
+    // are available.
+    if (!opts.model) {
+      try {
+        const root = opts.backendUrl.replace(/\/$/, "").replace(/\/v1$/, "");
+        const r = await fetch(`${root}/v1/models`, { signal: AbortSignal.timeout(3000) });
+        if (r.ok) {
+          const d = (await r.json()) as { data?: Array<{ id?: string }> };
+          const models = (d.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+          if (opts.backendType === "meshllm" && models.length > 1) {
+            process.stderr.write(`ERROR: MeshLLM advertises multiple models; select one with --model: ${models.join(", ")}\n`);
+            return 2;
+          }
+          if (models.length === 1) {
+            opts.model = models[0];
+            process.stderr.write(`[iicp-node] no --model given — auto-selected '${opts.model}' from ${opts.backendUrl}\n`);
+          }
+        }
+      } catch { /* required-model check below remains authoritative */ }
+    }
+  }
+
+  if (opts.backendType === "meshllm" && opts.model === "mesh" && !opts.experimental) {
+    process.stderr.write("ERROR: MeshLLM model 'mesh' is experimental; pass --experimental explicitly to enable it.\n");
+    return 2;
   }
 
   if (!opts.backendUrl || !opts.model) {
@@ -1237,7 +1269,9 @@ async function runServe(opts: ServeOpts): Promise<number> {
       } catch { /* best-effort */ }
       return [];
     })();
-    const extra = allModels.filter((m) => m !== opts.model);
+    const extra = allModels.filter(
+      (m) => m !== opts.model && (opts.backendType !== "meshllm" || opts.experimental || m !== "mesh"),
+    );
     if (extra.length > 0) {
       node["_cfg"].capabilities = extra;
       // eslint-disable-next-line no-console
@@ -1245,6 +1279,9 @@ async function runServe(opts: ServeOpts): Promise<number> {
     }
   } catch {
     // best-effort; no-op on error
+  }
+  if (opts.backendType === "meshllm" && !opts.experimental) {
+    (node["_cfg"] as Record<string, unknown>).excludedModels = ["mesh"];
   }
 
   // NAT-4 guard: if endpoint is non-routable and no relay configured, skip
@@ -3075,6 +3112,7 @@ async function dispatch(argv: string[]): Promise<number> {
       "policy-manifest": { type: "string" },
       "backend-type": { type: "string" },
       "backend-api-key": { type: "string" },
+      experimental: { type: "boolean" },
       model: { type: "string" },
       "public-endpoint": { type: "string" },
       "directory-url": { type: "string" },
@@ -3115,6 +3153,7 @@ async function dispatch(argv: string[]): Promise<number> {
       envOr("IICP_BACKEND_TYPE", "openai_compat")!,
     backendApiKey:
       (values["backend-api-key"] as string | undefined) ?? envOr("IICP_BACKEND_API_KEY") ?? "",
+    experimental: Boolean(values.experimental) || envBool("IICP_EXPERIMENTAL"),
     model: (values.model as string | undefined) ?? envOr("IICP_BACKEND_MODEL") ?? "",
     publicEndpoint:
       (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? "",

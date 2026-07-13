@@ -78,6 +78,67 @@ describe("backend stability observer", () => {
     assert.deepEqual(calls, ["http://localhost:1234/api/v1/models"]);
   });
 
+  it("requires MeshLLM readyz and the selected model before admission", async () => {
+    const calls: string[] = [];
+    const obs = await observeBackendStability({
+      backendUrl: "http://localhost:9337/v1",
+      backend: "meshllm",
+      expectedModel: "model-a",
+      fetchImpl: (async (url: string | URL | Request) => {
+        calls.push(String(url));
+        if (String(url).endsWith("/readyz")) return new Response(JSON.stringify({ status: "ready" }), { status: 200 });
+        return new Response(JSON.stringify({ data: [{ id: "model-a" }] }), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.equal(obs.backendState, "ok");
+    assert.deepEqual(calls, ["http://localhost:9337/readyz", "http://localhost:9337/v1/models"]);
+  });
+
+  it("drains MeshLLM when readiness or selected-model inventory is unavailable", async () => {
+    const notReady = await observeBackendStability({
+      backendUrl: "http://localhost:9337/v1",
+      backend: "meshllm",
+      expectedModel: "model-a",
+      fetchImpl: (async () => new Response("not ready", { status: 503 })) as typeof fetch,
+    });
+    assert.equal(notReady.backendState, "draining");
+    assert.equal(notReady.reasonClass, "backend_loading");
+
+    const missingModel = await observeBackendStability({
+      backendUrl: "http://localhost:9337/v1",
+      backend: "meshllm",
+      expectedModel: "model-a",
+      fetchImpl: (async (url: string | URL | Request) => {
+        if (String(url).endsWith("/readyz")) return new Response("{}", { status: 200 });
+        return new Response(JSON.stringify({ data: [{ id: "other-model" }] }), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.equal(missingModel.backendState, "draining");
+    assert.equal(missingModel.reasonClass, "backend_loading");
+  });
+
+  it("drains MeshLLM when its model inventory is empty or invalid", async () => {
+    const empty = await observeBackendStability({
+      backendUrl: "http://localhost:9337/v1",
+      backend: "meshllm",
+      fetchImpl: (async (url: string | URL | Request) => {
+        if (String(url).endsWith("/readyz")) return new Response("{}", { status: 200 });
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.equal(empty.backendState, "draining");
+
+    const invalid = await observeBackendStability({
+      backendUrl: "http://localhost:9337/v1",
+      backend: "meshllm",
+      fetchImpl: (async (url: string | URL | Request) => {
+        if (String(url).endsWith("/readyz")) return new Response("{}", { status: 200 });
+        return new Response(JSON.stringify({ unexpected: true }), { status: 200 });
+      }) as typeof fetch,
+    });
+    assert.equal(invalid.backendState, "draining");
+  });
+
   it("public dict exposes only coarse fields", () => {
     const obs = new BackendStabilityObservation({
       backendState: "draining",

@@ -165,6 +165,29 @@ export async function observeBackendStability(opts: {
   const f = opts.fetchImpl ?? fetch;
   const signal = () => AbortSignal.timeout(opts.timeoutMs ?? 2000);
   try {
+    if (flavor === "meshllm") {
+      const ready = await f(`${root}/readyz`, { headers, signal: signal() });
+      if (!ready.ok) return new BackendStabilityObservation({
+        backendState: "draining", reasonClass: "backend_loading", drainUntilMs: Date.now() + 30_000,
+        diagnostics: { ready: false },
+      });
+      const inventory = await f(`${root}/v1/models`, { headers, signal: signal() });
+      if (!inventory.ok) return new BackendStabilityObservation({
+        backendState: "draining", reasonClass: "backend_loading", drainUntilMs: Date.now() + 30_000,
+        diagnostics: { ready: false },
+      });
+      const inventoryBody: unknown = await inventory.json();
+      const models = typeof inventoryBody === "object" && inventoryBody !== null
+        && Array.isArray((inventoryBody as { data?: unknown }).data)
+        ? (inventoryBody as { data: Array<{ id?: unknown }> }).data
+        : null;
+      const present = models?.some((model) => typeof model.id === "string" && modelMatches(model.id, opts.expectedModel)) ?? false;
+      if (!models || models.length === 0 || (opts.expectedModel && !present)) return new BackendStabilityObservation({
+        backendState: "draining", reasonClass: "backend_loading", drainUntilMs: Date.now() + 30_000,
+        diagnostics: { selected_model_ready: false },
+      });
+      return new BackendStabilityObservation({ diagnostics: { ready: true } });
+    }
     if (flavor === "ollama" || flavor === "") {
       const r = await f(`${root}/api/ps`, { headers, signal: signal() });
       if (r.ok) return parseOllamaPs(await r.json(), opts.expectedModel);

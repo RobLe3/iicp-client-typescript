@@ -75,6 +75,15 @@ export function classifyRecovery(opts: {
   return { state: "unknown", action: "none" };
 }
 
+/** A relay counts only after its worker session has completed a bind handshake. */
+export function effectivePublicRouteAvailable(opts: {
+  runtimeAvailable: boolean;
+  routeNeedsPromotion: boolean;
+  relayBound: boolean;
+}): boolean {
+  return opts.runtimeAvailable && (opts.relayBound || !opts.routeNeedsPromotion);
+}
+
 export async function registryNodePresence(
   directoryUrl: string,
   nodeId: string,

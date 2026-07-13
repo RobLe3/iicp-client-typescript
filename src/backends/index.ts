@@ -11,15 +11,17 @@ import { type BackendHandler, type BackendOptions } from "./base.js";
 import { openaiCompatHandler } from "./openai_compat.js";
 import { vllmHandler } from "./vllm.js";
 import { llamacppHandler } from "./llamacpp.js";
+import { meshllmHandler } from "./meshllm.js";
 import { anthropicHandler } from "./anthropic.js";
 
-export const BACKEND_TYPES = ["openai_compat", "vllm", "llamacpp", "anthropic"] as const;
+export const BACKEND_TYPES = ["openai_compat", "vllm", "llamacpp", "meshllm", "anthropic"] as const;
 export type BackendType = (typeof BACKEND_TYPES)[number];
 
 const FACTORIES: Record<BackendType, (opts: BackendOptions) => BackendHandler> = {
   openai_compat: openaiCompatHandler,
   vllm: vllmHandler,
   llamacpp: llamacppHandler,
+  meshllm: meshllmHandler,
   anthropic: anthropicHandler,
 };
 

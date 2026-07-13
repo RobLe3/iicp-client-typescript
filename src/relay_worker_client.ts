@@ -71,6 +71,7 @@ export class RelayWorkerClient {
   private readonly _handler: RelayTaskHandler;
   private readonly _models: string[];
   private readonly _onBind?: (relayHost: string, relayPort: number, workerId: string) => Promise<void>;
+  private readonly _onDisconnect?: () => Promise<void>;
   private readonly _bindTicket?: string;
   private readonly _directoryUrl?: string;
   private readonly _nodeToken?: string;
@@ -95,6 +96,8 @@ export class RelayWorkerClient {
      * the HTTP port comes from RELAY_ACK field 4 (fallback 9484). Use to re-register
      * with the directory advertising {relay}/v1/relay-for/{workerId} (#358/#450). */
     onBind?: (relayHost: string, relayPort: number, workerId: string) => Promise<void>;
+    /** Called after a previously bound session ends. */
+    onDisconnect?: () => Promise<void>;
   }) {
     this._workerId = opts.workerId;
     this._intent = opts.intent;
@@ -103,6 +106,7 @@ export class RelayWorkerClient {
     this._handler = opts.handler;
     this._models = opts.models ?? [];
     this._onBind = opts.onBind;
+    this._onDisconnect = opts.onDisconnect;
     this._bindTicket = opts.bindTicket;
     this._directoryUrl = opts.directoryUrl;
     this._nodeToken = opts.nodeToken;
@@ -228,6 +232,7 @@ export class RelayWorkerClient {
         console.warn(`[relay-worker] onBind callback failed: ${exc instanceof Error ? exc.message : exc}`);
       }
     }
+    const bound = true;
 
     // Step 3: session loop
     const pingTimer = setInterval(() => {
@@ -249,6 +254,11 @@ export class RelayWorkerClient {
       }
     } finally {
       clearInterval(pingTimer);
+      if (bound && this._onDisconnect) {
+        try { await this._onDisconnect(); } catch (exc) {
+          console.warn(`[relay-worker] onDisconnect callback failed: ${exc instanceof Error ? exc.message : exc}`);
+        }
+      }
     }
   }
 

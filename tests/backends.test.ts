@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { openaiCompatHandler } from "../src/backends/openai_compat.js";
 import { vllmHandler } from "../src/backends/vllm.js";
 import { llamacppHandler } from "../src/backends/llamacpp.js";
+import { meshllmHandler } from "../src/backends/meshllm.js";
 import { getBackendHandler, BACKEND_TYPES } from "../src/backends/index.js";
 
 let originalFetch: typeof globalThis.fetch;
@@ -312,8 +313,18 @@ describe("dedicated backends", () => {
 });
 
 describe("getBackendHandler selector", () => {
-  it("BACKEND_TYPES lists all four", () => {
-    assert.deepEqual([...BACKEND_TYPES].sort(), ["anthropic", "llamacpp", "openai_compat", "vllm"]);
+  it("BACKEND_TYPES lists all named backends", () => {
+    assert.deepEqual([...BACKEND_TYPES].sort(), ["anthropic", "llamacpp", "meshllm", "openai_compat", "vllm"]);
+  });
+
+  it("meshllm uses port 9337 and rejects non-chat intents", async () => {
+    mockFetchJson({ choices: [] });
+    const handler = meshllmHandler({ model: "model-a" });
+    const chat = await handler({ intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } });
+    assert.equal((chat as { error_code?: number }).error_code, undefined);
+    assert.equal(lastRequest!.url, "http://localhost:9337/v1/chat/completions");
+    const rejected = await handler({ intent: "urn:iicp:intent:llm:embedding:v1", payload: { input: "x" } });
+    assert.equal((rejected as { error_code: number }).error_code, 400);
   });
 
   it("returns a callable for each type", () => {

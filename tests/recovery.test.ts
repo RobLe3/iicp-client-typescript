@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyRecovery, nodeRegistryPrefix, routeNeedsPromotionFromRegistryJson } from "../src/recovery.js";
+import { classifyRecovery, effectivePublicRouteAvailable, nodeRegistryPrefix, routeNeedsPromotionFromRegistryJson } from "../src/recovery.js";
 
 describe("recovery helpers", () => {
   it("uses eight-character public prefixes for UUID nodes", () => {
@@ -92,5 +92,14 @@ describe("recovery helpers", () => {
       }),
       { state: "restart_recommended", action: "restart_self" },
     );
+  });
+
+  it("keeps a live relay-bound worker eligible while directory promotion converges", () => {
+    assert.equal(effectivePublicRouteAvailable({
+      runtimeAvailable: true, routeNeedsPromotion: true, relayBound: false,
+    }), false);
+    assert.equal(effectivePublicRouteAvailable({
+      runtimeAvailable: true, routeNeedsPromotion: true, relayBound: true,
+    }), true);
   });
 });
