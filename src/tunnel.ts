@@ -44,6 +44,7 @@ export const TUNNEL_DOH_TIMEOUT_MS = 5_000;
 export const TUNNEL_RATE_LIMIT_COOLDOWN_MS = 15 * 60_000;
 export const TUNNEL_CREATE_MIN_INTERVAL_MS = 120_000;
 export const TUNNEL_CREATE_LEASE_MS = 45_000;
+export const TUNNEL_CREATE_JITTER_MAX_MS = 15_000;
 export const TUNNEL_DEAD_RETRY_INITIAL_MS = 30_000;
 export const TUNNEL_DEAD_RETRY_MAX_MS = 300_000;
 
@@ -127,6 +128,24 @@ function tunnelCreateLeaseMs(): number {
   const raw = process.env.IICP_TUNNEL_CREATE_LEASE_S;
   const seconds = raw ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : TUNNEL_CREATE_LEASE_MS;
+}
+
+function tunnelCreateJitterMaxMs(): number {
+  const raw = process.env.IICP_TUNNEL_CREATE_JITTER_MAX_S;
+  const seconds = raw ? Number.parseFloat(raw) : Number.NaN;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : TUNNEL_CREATE_JITTER_MAX_MS;
+}
+
+function quickTunnelWaitWithJitterMs(remainingMs: number): number {
+  return Math.max(0, remainingMs) + Math.random() * tunnelCreateJitterMaxMs();
+}
+
+function quickTunnelWaitForCapacity(): boolean {
+  return !["0", "false", "no"].includes((process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY ?? "1").trim().toLowerCase());
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function readJsonFieldNumber(statePath: string, field: string): number {
@@ -586,42 +605,66 @@ export class QuickTunnel {
  * Rejects with INSTALL_HINT when the binary is absent, or a timeout error
  * when no URL appears within `timeoutMs`.
  */
-export function openQuickTunnel(
+export async function openQuickTunnel(
   localPort: number,
   timeoutMs: number = TUNNEL_START_TIMEOUT_MS,
   binary?: string,
 ): Promise<QuickTunnel> {
-  return new Promise((resolve, reject) => {
-    const remainingMs = quickTunnelRateLimitRemainingMs();
-    if (remainingMs > 0) {
-      reject(new Error(
-        `accountless Quick Tunnel creation paused for ${Math.ceil(remainingMs / 1000)}s after Cloudflare rate limiting; ` +
-          "retry later or configure a named tunnel / IICP_PUBLIC_ENDPOINT",
-      ));
-      return;
-    }
-    const createRemainingMs = quickTunnelCreateGateRemainingMs();
-    if (createRemainingMs > 0) {
-      reject(new Error(
-        `accountless Quick Tunnel creation paced for ${Math.ceil(createRemainingMs / 1000)}s to avoid Cloudflare rate limits; ` +
-          "falling back to the previous reachability method while the tunnel budget recovers",
-      ));
-      return;
-    }
+  const resolved = binary ?? cloudflaredPath();
+  if (!resolved) throw new Error(INSTALL_HINT);
 
-    const resolved = binary ?? cloudflaredPath();
-    if (!resolved) {
-      reject(new Error(INSTALL_HINT));
-      return;
+  // Coordinate at the single tunnel-open boundary so startup and watchdog
+  // recovery share one host-wide budget. Waiting here avoids synchronized
+  // supervisor restarts when several services wake together.
+  let createLease: QuickTunnelCreateLease;
+  while (true) {
+    let remainingMs = quickTunnelRateLimitRemainingMs();
+    let reason = "Cloudflare rate-limit cooldown";
+    if (remainingMs <= 0) {
+      remainingMs = quickTunnelCreateGateRemainingMs();
+      reason = "shared Quick Tunnel pacing";
     }
-    let createLease: QuickTunnelCreateLease;
+    if (remainingMs > 0) {
+      if (!quickTunnelWaitForCapacity()) {
+        if (reason === "Cloudflare rate-limit cooldown") {
+          throw new Error(
+            `accountless Quick Tunnel creation paused for ${Math.ceil(remainingMs / 1000)}s after Cloudflare rate limiting; ` +
+              "retry later or configure a named tunnel / IICP_PUBLIC_ENDPOINT",
+          );
+        }
+        throw new Error(
+          `accountless Quick Tunnel creation paced for ${Math.ceil(remainingMs / 1000)}s to avoid Cloudflare rate limits; ` +
+            "falling back to the previous reachability method while the tunnel budget recovers",
+        );
+      }
+      const waitMs = quickTunnelWaitWithJitterMs(remainingMs);
+      console.log(
+        `[quick-tunnel] waiting ${Math.ceil(waitMs / 1000)}s for ${reason}; ` +
+          "shared jitter avoids synchronized retries.",
+      );
+      await sleep(waitMs);
+      continue;
+    }
     try {
       createLease = acquireQuickTunnelCreateLease();
-      markQuickTunnelCreateAttempt();
     } catch (exc) {
-      reject(exc);
-      return;
+      if (!quickTunnelWaitForCapacity()) throw exc;
+      const text = exc instanceof Error ? exc.message : String(exc);
+      const match = /for ([0-9.]+)s/.exec(text);
+      const leaseWaitMs = match ? Number(match[1]) * 1000 : tunnelCreateLeaseMs();
+      const waitMs = quickTunnelWaitWithJitterMs(leaseWaitMs);
+      console.log(
+        `[quick-tunnel] waiting ${Math.ceil(waitMs / 1000)}s for another local node's create lease; ` +
+          "shared jitter avoids synchronized retries.",
+      );
+      await sleep(waitMs);
+      continue;
     }
+    break;
+  }
+  markQuickTunnelCreateAttempt();
+
+  return new Promise((resolve, reject) => {
     const proc = spawn(resolved, ["tunnel", "--url", `http://127.0.0.1:${localPort}`], {
       stdio: ["ignore", "pipe", "pipe"],
     });

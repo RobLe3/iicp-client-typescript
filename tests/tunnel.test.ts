@@ -38,6 +38,8 @@ function useTempIicpHome(): () => void {
   const oldCreateLockFile = process.env.IICP_TUNNEL_CREATE_LOCK_FILE;
   const oldCreateMinInterval = process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S;
   const oldCreateLease = process.env.IICP_TUNNEL_CREATE_LEASE_S;
+  const oldWaitForCapacity = process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY;
+  const oldCreateJitter = process.env.IICP_TUNNEL_CREATE_JITTER_MAX_S;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-home-"));
   process.env.IICP_HOME = dir;
   delete process.env.IICP_TUNNEL_RATE_LIMIT_STATE_FILE;
@@ -45,6 +47,9 @@ function useTempIicpHome(): () => void {
   delete process.env.IICP_TUNNEL_CREATE_LOCK_FILE;
   process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = "0";
   process.env.IICP_TUNNEL_CREATE_LEASE_S = "45";
+  // Unit cases assert raw coordinator errors; production defaults to waiting
+  // in the opener so supervised services do not restart-storm.
+  process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY = "0";
   __resetQuickTunnelRateLimitForTests({ clearPersistent: true });
   return () => {
     __resetQuickTunnelRateLimitForTests({ clearPersistent: true });
@@ -60,6 +65,10 @@ function useTempIicpHome(): () => void {
     else process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = oldCreateMinInterval;
     if (oldCreateLease === undefined) delete process.env.IICP_TUNNEL_CREATE_LEASE_S;
     else process.env.IICP_TUNNEL_CREATE_LEASE_S = oldCreateLease;
+    if (oldWaitForCapacity === undefined) delete process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY;
+    else process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY = oldWaitForCapacity;
+    if (oldCreateJitter === undefined) delete process.env.IICP_TUNNEL_CREATE_JITTER_MAX_S;
+    else process.env.IICP_TUNNEL_CREATE_JITTER_MAX_S = oldCreateJitter;
     fs.rmSync(dir, { recursive: true, force: true });
   };
 }
@@ -153,6 +162,24 @@ describe("initiation", () => {
       () => openQuickTunnel(9485, 1_000, fakeBin({ name: "paced-two" })),
       /creation paced/,
     );
+  });
+
+  it("waits through shared capacity with jitter instead of failing", async () => {
+    process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY = "1";
+    process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = "1";
+    process.env.IICP_TUNNEL_CREATE_JITTER_MAX_S = "0";
+    const first = await openQuickTunnel(9484, 10_000, fakeBin({ name: "wait-one" }));
+    const started = Date.now();
+    const second = await openQuickTunnel(9485, 10_000, fakeBin({ name: "wait-two" }));
+    try {
+      // URL parsing already consumes part of the one-second gate before the second
+      // opener starts; it must still wait rather than reject.
+      assert.ok(Date.now() - started >= 700);
+      assert.match(second.url, /wait-two\.trycloudflare\.com$/);
+    } finally {
+      first.close();
+      second.close();
+    }
   });
 
   it("serializes parallel accountless Quick Tunnel creation with a host-wide lease", async () => {
