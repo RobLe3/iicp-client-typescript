@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 
-import { encryptPayload } from "./confidentiality.js";
+import { decryptResponse, encryptPayloadWithContext } from "./confidentiality.js";
 import { verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
@@ -219,7 +219,13 @@ export class IicpClient {
       health_label: raw.health_label as string | undefined,
       exposure_mode: raw.exposure_mode as string | undefined,
       cx_public_key: rawCx && rawCx.algorithm && rawCx.key && rawCx.key_id
-        ? { algorithm: rawCx.algorithm, encoding: rawCx.encoding, key: rawCx.key, key_id: rawCx.key_id }
+        ? {
+            algorithm: rawCx.algorithm,
+            encoding: rawCx.encoding,
+            key: rawCx.key,
+            key_id: rawCx.key_id,
+            features: Array.isArray(rawCx.features) ? rawCx.features.map(String) : undefined,
+          }
         : undefined,
       transport: Array.isArray(raw.transport) ? raw.transport.map(String) : undefined,
       directory_observed_reachable: typeof raw.directory_observed_reachable === "boolean"
@@ -445,8 +451,14 @@ export class IicpClient {
         intent: req.intent,
         constraints: req.constraints ?? {},
       };
+      let cxSharedSecret: Buffer | undefined;
+      let requireEncryptedResponse = false;
       if (node.cx_public_key) {
-        body["iicp_conf"] = encryptPayload(req.payload, node.cx_public_key, taskId, req.intent);
+        const encrypted = encryptPayloadWithContext(req.payload, node.cx_public_key, taskId, req.intent);
+        body["iicp_conf"] = encrypted.envelope;
+        cxSharedSecret = encrypted.sharedSecret;
+        requireEncryptedResponse = node.cx_public_key.features?.includes("response_encryption_v1") === true;
+        if (requireEncryptedResponse) body["cx_response_encryption"] = "required";
       } else {
         console.warn(
           `IICP-CX: node ${node.node_id} advertises no encryption key — sending UNENCRYPTED ` +
@@ -460,13 +472,27 @@ export class IicpClient {
       let nodeConnected = true;
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         try {
-          const data = await this._post(
+          let data = await this._post(
             `${node.endpoint}/v1/task`,
             body,
             req.constraints?.timeout_ms ?? this.cfg.timeout_ms,
             nodeHeaders,
             tp,
           );
+          if (requireEncryptedResponse) {
+            const envelope = (data as Record<string, unknown>)["iicp_conf_resp"];
+            if (!envelope || typeof envelope !== "object" || !cxSharedSecret) {
+              throw new IicpError(
+                "node advertised response encryption but returned plaintext",
+                "IICP-CX-RESP-REQUIRED",
+              );
+            }
+            const opened = decryptResponse(envelope as Record<string, unknown>, cxSharedSecret, taskId);
+            if (!opened || typeof opened !== "object") {
+              throw new IicpError("encrypted response did not contain an object", "IICP-CX-RESP-INVALID");
+            }
+            data = opened as Record<string, unknown>;
+          }
           return {
             task_id: taskId,
             result: (data as Record<string, unknown>).result,

@@ -6,7 +6,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { encryptPayload, decryptPayload } from "../src/confidentiality.js";
+import {
+  decryptPayload,
+  decryptPayloadWithContext,
+  decryptResponse,
+  encryptPayload,
+  encryptPayloadWithContext,
+  encryptResponse,
+} from "../src/confidentiality.js";
 import type { CxPublicKey } from "../src/types.js";
 
 function generateTestKeypair(): { cxPublicKey: CxPublicKey; privBytes: Buffer; pubBytes: Buffer } {
@@ -73,5 +80,17 @@ describe("IICP-CX Tier-2 §5a.3 response encryption", () => {
     const env = encryptResponse(resp, shared, "task-resp-1");
     assert.deepEqual(Object.keys(env).sort(), ["encrypted_body", "nonce", "version"]);
     assert.deepEqual(decryptResponse(env, shared, "task-resp-1"), resp);
+  });
+
+  it("uses the request context for an authenticated response", () => {
+    const { cxPublicKey, privBytes, pubBytes } = generateTestKeypair();
+    const request = encryptPayloadWithContext(
+      { secret: "request" }, cxPublicKey, "task-context", "urn:iicp:intent:llm:chat:v1",
+    );
+    const provider = decryptPayloadWithContext(request.envelope, privBytes, pubBytes);
+    assert.deepEqual(provider.payload, { secret: "request" });
+    assert.deepEqual(provider.sharedSecret, request.sharedSecret);
+    const response = encryptResponse({ secret: "response" }, provider.sharedSecret, "task-context");
+    assert.deepEqual(decryptResponse(response, request.sharedSecret, "task-context"), { secret: "response" });
   });
 });

@@ -254,6 +254,26 @@ describe("openaiCompatHandler", () => {
     assert.equal((result as { error_code: number }).error_code, 429);
   });
 
+  it("timeout is classified deterministically", async () => {
+    globalThis.fetch = ((_: string | URL | Request, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    })) as typeof fetch;
+    const result = await openaiCompatHandler({ model: "q", timeoutMs: 1 })({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [] },
+    });
+    assert.equal((result as { error_code: number }).error_code, 408);
+  });
+
+  it("connection refused is classified as a transport error", async () => {
+    globalThis.fetch = (async () => { throw new TypeError("fetch failed: connection refused"); }) as typeof fetch;
+    const result = await openaiCompatHandler({ model: "q" })({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { messages: [] },
+    });
+    assert.equal((result as { error_code: number }).error_code, 502);
+  });
+
   it("api_key sets Authorization header", async () => {
     mockFetchJson({});
     const handler = openaiCompatHandler({ model: "q", apiKey: "sk-test-1234" });
