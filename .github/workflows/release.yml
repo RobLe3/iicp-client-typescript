@@ -1,8 +1,9 @@
 name: Publish release
 
+# Manual-only while the guarded local publisher remains authoritative.
+# Enabling release:published before registry trust is validated would create
+# two competing publishers for the same immutable version.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       version:
@@ -11,26 +12,23 @@ on:
         type: string
 
 concurrency:
-  group: typescript-release-${{ github.event.release.tag_name || inputs.version }}
+  group: typescript-release-${{ inputs.version }}
   cancel-in-progress: false
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment: npm
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.version && format('v{0}', inputs.version) || github.event.release.tag_name }}
+          ref: v${{ inputs.version }}
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
-          registry-url: https://registry.npmjs.org
           cache: npm
       - name: Use trusted-publishing npm
         run: npm install --global npm@^11.5.1
@@ -38,7 +36,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          expected="${{ inputs.version || github.event.release.tag_name }}"
+          expected="${{ inputs.version }}"
           expected="${expected#v}"
           actual=$(node -p 'require("./package.json").version')
           test "$actual" = "$expected"
@@ -46,15 +44,45 @@ jobs:
           npm run typecheck
           npm test
           npm run build
-      - name: Clean-install smoke
+      - name: Package and clean-install smoke
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/iicp-release-smoke
-          tgz=$(npm pack --silent --pack-destination /tmp/iicp-release-smoke | tail -1)
+          mkdir -p release-artifact /tmp/iicp-release-smoke
+          tgz=$(npm pack --silent --pack-destination release-artifact | tail -1)
           cd /tmp/iicp-release-smoke
           npm init -y >/dev/null
-          npm install "./$tgz" >/dev/null
+          npm install "$GITHUB_WORKSPACE/release-artifact/$tgz" >/dev/null
           node -e 'import("@iicp/client").then(() => console.log("import ok"))'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typescript-dist-${{ inputs.version }}
+          path: release-artifact/*.tgz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: typescript-dist-${{ inputs.version }}
+          path: release-artifact
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Use trusted-publishing npm
+        run: npm install --global npm@^11.5.1
       - name: Publish to npm with OIDC provenance
-        run: npm publish --access public --provenance
+        env:
+          # npm >=11.5.1 prefers a matching OIDC publisher and falls back to
+          # this scoped token until registry-side trust has been validated.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish release-artifact/*.tgz --access public --provenance
