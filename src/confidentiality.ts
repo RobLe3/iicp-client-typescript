@@ -102,6 +102,15 @@ export function encryptPayload(
   taskId: string,
   intent: string,
 ): Record<string, unknown> {
+  return encryptPayloadWithContext(payload, cxPublicKey, taskId, intent).envelope;
+}
+
+export function encryptPayloadWithContext(
+  payload: unknown,
+  cxPublicKey: CxPublicKey,
+  taskId: string,
+  intent: string,
+): { envelope: Record<string, unknown>; sharedSecret: Buffer } {
   if (cxPublicKey.algorithm !== "X25519") {
     throw new Error(`Unsupported cx_public_key algorithm: ${cxPublicKey.algorithm}`);
   }
@@ -134,7 +143,7 @@ export function encryptPayload(
   const ciphertext = Buffer.concat([cipher.update(payloadJson), cipher.final()]);
   const tag = cipher.getAuthTag();
 
-  return {
+  return { envelope: {
     version: 1,
     recipient_key_id: cxPublicKey.key_id,
     kem_ciphertext: b64urlEncode(ephemPubBytes),
@@ -142,7 +151,7 @@ export function encryptPayload(
     nonce: b64urlEncode(nonce),
     aad: b64urlEncode(aad),
     plaintext_size: payloadJson.length,
-  };
+  }, sharedSecret };
 }
 
 /**
@@ -154,6 +163,14 @@ export function decryptPayload(
   privKeyBytes: Buffer,
   pubKeyBytes: Buffer,
 ): unknown {
+  return decryptPayloadWithContext(iicpConf, privKeyBytes, pubKeyBytes).payload;
+}
+
+export function decryptPayloadWithContext(
+  iicpConf: Record<string, unknown>,
+  privKeyBytes: Buffer,
+  pubKeyBytes: Buffer,
+): { payload: unknown; sharedSecret: Buffer } {
   const privX = b64urlEncode(privKeyBytes);
   const pubX = b64urlEncode(pubKeyBytes);
   const nodePriv = createPrivateKey({
@@ -187,7 +204,7 @@ export function decryptPayload(
   decipher.setAAD(aadBytes);
   decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return JSON.parse(plaintext.toString());
+  return { payload: JSON.parse(plaintext.toString()), sharedSecret };
 }
 
 // ── Tier-2 §5a.3: bidirectional (response) encryption ────────────────────────

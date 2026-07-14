@@ -18,6 +18,34 @@ describe("MsgType relay extensions", () => {
 // ── RelaySessionRegistry ─────────────────────────────────────────────────────
 
 describe("RelaySessionRegistry", () => {
+  it("rate-limits each source independently and recovers after the window", () => {
+    process.env.IICP_RELAY_BIND_RATE_LIMIT = "2";
+    try {
+      const reg = new RelaySessionRegistry();
+      assert.equal(reg.allowBind("source-a", { now: 10 }), true);
+      assert.equal(reg.allowBind("source-a", { now: 10 }), true);
+      assert.equal(reg.allowBind("source-a", { now: 10 }), false);
+      assert.equal(reg.allowBind("source-b", { now: 10 }), true);
+      assert.equal(reg.allowBind("source-a", { now: 60_011 }), true);
+    } finally {
+      delete process.env.IICP_RELAY_BIND_RATE_LIMIT;
+    }
+  });
+
+  it("exempts recovery and supports diagnostic disable", () => {
+    process.env.IICP_RELAY_BIND_RATE_LIMIT = "1";
+    const reg = new RelaySessionRegistry();
+    assert.equal(reg.allowBind("source-a", { now: 10 }), true);
+    assert.equal(reg.allowBind("source-a", { rebind: true, now: 10 }), true);
+    process.env.IICP_RELAY_BIND_RATE_LIMIT = "0";
+    try {
+      const disabled = new RelaySessionRegistry();
+      for (let i = 0; i < 100; i += 1) assert.equal(disabled.allowBind("source-a", { now: 10 }), true);
+    } finally {
+      delete process.env.IICP_RELAY_BIND_RATE_LIMIT;
+    }
+  });
+
   it("bind and get returns the session", () => {
     const reg = new RelaySessionRegistry();
     const sock = { write: () => {}, destroy: () => {}, destroyed: false } as never;

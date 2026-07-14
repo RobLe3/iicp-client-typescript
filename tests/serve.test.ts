@@ -13,7 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IicpNode } from "../src/node.js";
 import type { NodeConfig } from "../src/node.js";
-import { encryptPayload, loadOrCreateNodeCxKey } from "../src/confidentiality.js";
+import {
+  decryptResponse,
+  encryptPayloadWithContext,
+  loadOrCreateNodeCxKey,
+} from "../src/confidentiality.js";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -187,14 +191,22 @@ describe("IicpNode server", () => {
     try {
       await waitPort(cxPort);
       const payload = { messages: [{ role: "user", content: "secret" }] };
-      const env = encryptPayload(payload, cx.publicKey, "cx-ts-1", cfg.intent);
+      const encrypted = encryptPayloadWithContext(payload, cx.publicKey, "cx-ts-1", cfg.intent);
       const { status, body } = await jsonReq("POST", cxPort, "/v1/task", {
         task_id: "cx-ts-1",
         intent: cfg.intent,
-        iicp_conf: env,
+        iicp_conf: encrypted.envelope,
+        cx_response_encryption: "required",
       });
       assert.equal(status, 200);
-      assert.equal((body as Record<string, unknown>).status, "completed");
+      const encryptedBody = body as Record<string, unknown>;
+      assert.equal(encryptedBody.status, "encrypted");
+      const opened = decryptResponse(
+        encryptedBody.iicp_conf_resp as Record<string, unknown>,
+        encrypted.sharedSecret,
+        "cx-ts-1",
+      ) as Record<string, unknown>;
+      assert.equal(opened.status, "completed");
       assert.deepEqual(captured.payload, payload);
       assert.equal(captured._cx_encrypted, true);
     } finally {
@@ -203,6 +215,17 @@ describe("IicpNode server", () => {
       else process.env.IICP_CX_KEY_DIR = oldCxDir;
       rmSync(cxDir, { recursive: true, force: true });
     }
+  });
+
+  it("rejects required encrypted response without an encrypted request", async () => {
+    const { status, body } = await jsonReq("POST", port, "/v1/task", {
+      task_id: "cx-plain-required",
+      intent: cfg.intent,
+      payload: { secret: true },
+      cx_response_encryption: "required",
+    });
+    assert.equal(status, 400);
+    assert.equal(((body as { error: { code: string } }).error).code, "IICP-CX-03");
   });
 
   // ── Concurrency gate (IICP-E021) ────────────────────────────────────────────

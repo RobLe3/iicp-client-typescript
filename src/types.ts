@@ -117,6 +117,7 @@ export interface CxPublicKey {
   encoding?: string;
   key: string;
   key_id: string;
+  features?: string[];
 }
 
 export interface NodePolicyManifest {

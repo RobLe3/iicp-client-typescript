@@ -220,10 +220,35 @@ export type RelaySession = RelayWorkerSession | HttpPollWorkerSession;
 // Red-team F5 (2026-06-12): cap concurrent relay sessions so a bind-flood
 // can't exhaust relay memory / starve legitimate workers.
 export const MAX_RELAY_SESSIONS = 256;
+export const DEFAULT_RELAY_BIND_RATE_LIMIT = 30;
+const RELAY_BIND_RATE_WINDOW_MS = 60_000;
 
 export class RelaySessionRegistry {
   private readonly _sessions = new Map<string, RelaySession>();
-  constructor(private readonly _max: number = MAX_RELAY_SESSIONS) {}
+  private readonly _bindRateLimit: number;
+  private readonly _bindRateBuckets = new Map<string, { start: number; count: number }>();
+
+  constructor(private readonly _max: number = MAX_RELAY_SESSIONS) {
+    const parsed = Number(process.env["IICP_RELAY_BIND_RATE_LIMIT"] ?? DEFAULT_RELAY_BIND_RATE_LIMIT);
+    this._bindRateLimit = Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : DEFAULT_RELAY_BIND_RATE_LIMIT;
+  }
+
+  /** Bound bind attempts per transport source without persisting or logging it. */
+  allowBind(source: string, opts: { rebind?: boolean; now?: number } = {}): boolean {
+    if (opts.rebind || this._bindRateLimit === 0) return true;
+    const now = opts.now ?? Date.now();
+    let bucket = this._bindRateBuckets.get(source);
+    if (!bucket || now - bucket.start >= RELAY_BIND_RATE_WINDOW_MS) bucket = { start: now, count: 0 };
+    bucket.count += 1;
+    this._bindRateBuckets.set(source, bucket);
+    if (this._bindRateBuckets.size > 4096) {
+      const cutoff = now - RELAY_BIND_RATE_WINDOW_MS;
+      for (const [key, value] of this._bindRateBuckets) {
+        if (value.start < cutoff) this._bindRateBuckets.delete(key);
+      }
+    }
+    return bucket.count <= this._bindRateLimit;
+  }
 
   /** True if a NEW worker_id can't be admitted (cap reached). A rebind of an
    * already-bound worker_id is always allowed (F5). */
@@ -408,15 +433,21 @@ export class RelayAcceptServer {
     // hijack). Rebind after socket death (legitimate reconnect) still works.
     const existing = this._registry.get(workerId);
     if (existing && existing.isAlive()) {
-      const remote = `${socket.remoteAddress ?? "?"}:${socket.remotePort ?? "?"}`;
       console.warn(
-        `[relay-accept] rejected RELAY_BIND for worker=${workerId} from ${remote}: ` +
-        `worker_id already bound to an alive session (#510)`,
+        `[relay-accept] rejected RELAY_BIND for worker=${workerId}: worker_id already bound to an alive session (#510)`,
       );
       socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
         [1, "error"],
         [2, workerId],
         [3, "worker_id already bound to an alive session"],
+      ])) as Buffer));
+      socket.destroy();
+      return;
+    }
+
+    if (!this._registry.allowBind(socket.remoteAddress ?? "unknown", { rebind: existing !== undefined })) {
+      socket.write(makeFrame(MT_RELAY_ACK, _enc(new Map<number, unknown>([
+        [1, "error"], [2, workerId], [3, "relay_bind_rate_limited"],
       ])) as Buffer));
       socket.destroy();
       return;

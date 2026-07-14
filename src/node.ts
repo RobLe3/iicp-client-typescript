@@ -21,7 +21,7 @@ import { HttpPollWorkerSession, RelaySessionRegistry } from "./relay_session.js"
 import { getCipPolicy } from "./cip_policy.js"; // #403 — per-task admission gate
 import type { Delegation } from "./delegation.js"; // #407 — ADR-045 operator delegation
 import type { CxPublicKey } from "./types.js";
-import { decryptPayload, loadOrCreateNodeCxKey } from "./confidentiality.js";
+import { decryptPayloadWithContext, encryptResponse, loadOrCreateNodeCxKey } from "./confidentiality.js";
 import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTicket } from "./relay_ticket.js";
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
 import { autoUpdateStatusPayload } from "./updater.js";
@@ -652,7 +652,9 @@ export class IicpNode {
     body.sdk_language = "typescript";
     body.sdk_version = SDK_VERSION;
     Object.assign(body, autoUpdateStatusPayload());
-    if (this._cxPublicKey) body.cx_public_key = this._cxPublicKey;
+    if (this._cxPublicKey) {
+      body.cx_public_key = { ...this._cxPublicKey, features: ["response_encryption_v1"] };
+    }
     if (this._cfg.backend) body.backend = this._cfg.backend;
     if (this._cfg.relayCapable) {
       body.relay_capable = true;
@@ -1151,12 +1153,61 @@ export class IicpNode {
         console.warn("[iicp-node] relay worker session ended — route is no longer bound");
       };
       import("./relay_worker_client.js").then(({ RelayWorkerClient }) => {
+        const relayHandler = async (task: Record<string, unknown>): Promise<Record<string, unknown>> => {
+          let sharedSecret: Buffer | undefined;
+          if (task.iicp_conf && typeof task.iicp_conf === "object" && task.payload === undefined) {
+            if (!this._cxPrivateKeyBytes || !this._cxPublicKeyBytes) {
+              return { error: { code: "IICP-CX-01", message: "node has no CX private key" } };
+            }
+            try {
+              const opened = decryptPayloadWithContext(
+                task.iicp_conf as Record<string, unknown>,
+                this._cxPrivateKeyBytes,
+                this._cxPublicKeyBytes,
+              );
+              task.payload = opened.payload;
+              sharedSecret = opened.sharedSecret;
+              task._cx_encrypted = true;
+            } catch (exc) {
+              return {
+                error: {
+                  code: "IICP-CX-02",
+                  message: `iicp_conf decrypt failed: ${exc instanceof Error ? exc.message : String(exc)}`,
+                },
+              };
+            }
+          }
+          const result = await handler(task);
+          if (task.cx_response_encryption === "required") {
+            if (!sharedSecret) {
+              return {
+                error: {
+                  code: "IICP-CX-03",
+                  message: "encrypted response requested without an encrypted request",
+                },
+              };
+            }
+            const taskId = String(task.task_id ?? "");
+            const plainResponse = {
+              task_id: taskId,
+              status: "completed",
+              ...result,
+              generated_by_ai: true,
+            };
+            return {
+              task_id: taskId,
+              status: "encrypted",
+              iicp_conf_resp: encryptResponse(plainResponse, sharedSecret, taskId),
+            };
+          }
+          return result;
+        };
         const rwc = new RelayWorkerClient({
           workerId: this._cfg.nodeId,
           intent: this._cfg.intent,
           relayHost,
           relayPort,
-          handler: handler as never,
+          handler: relayHandler,
           models: this._cfg.model ? [this._cfg.model] : [],
           directoryUrl: this._cfg.directoryUrl,
           nodeToken: currentToken,
@@ -1333,6 +1384,17 @@ export class IicpNode {
       if (existing && existing.isAlive()) {
         this._relayJson(res, 409, {
           error: { code: "IICP-E038", message: "worker_id has an alive relay session — rebind rejected" },
+        });
+        return;
+      }
+      const source = req.socket.remoteAddress ?? `worker:${workerId}`;
+      if (!this._relaySessions.allowBind(source, { rebind: existing !== undefined })) {
+        this._relayJson(res, 429, {
+          error: {
+            code: "IICP-E039",
+            reason: "relay_bind_rate_limited",
+            message: "relay bind rate limit exceeded",
+          },
         });
         return;
       }
@@ -1688,6 +1750,7 @@ export class IicpNode {
           return;
         }
 
+        let cxSharedSecret: Buffer | undefined;
         if (task.iicp_conf && typeof task.iicp_conf === "object" && task.payload === undefined) {
           if (!this._cxPrivateKeyBytes || !this._cxPublicKeyBytes) {
             this._activeTasks--;
@@ -1697,11 +1760,13 @@ export class IicpNode {
             return;
           }
           try {
-            task.payload = decryptPayload(
+            const opened = decryptPayloadWithContext(
               task.iicp_conf as Record<string, unknown>,
               this._cxPrivateKeyBytes,
               this._cxPublicKeyBytes,
             );
+            task.payload = opened.payload;
+            cxSharedSecret = opened.sharedSecret;
             task._cx_encrypted = true;
           } catch (exc) {
             this._activeTasks--;
@@ -1711,6 +1776,19 @@ export class IicpNode {
             res.end(body);
             return;
           }
+        }
+
+        if (task.cx_response_encryption === "required" && !cxSharedSecret) {
+          this._activeTasks--;
+          const body = JSON.stringify({
+            error: {
+              code: "IICP-CX-03",
+              message: "encrypted response requested without an encrypted request",
+            },
+          });
+          res.writeHead(400, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
+          res.end(body);
+          return;
         }
 
         // W3C traceparent propagation
@@ -1739,7 +1817,15 @@ export class IicpNode {
           }
           this._tasksSuccessPending++;
           if (latencyMs > 0) this._tasksLatencyTotalMsPending += latencyMs;
-          const body = JSON.stringify({ task_id: taskId, status: "completed", ...result, generated_by_ai: true });
+          let response: Record<string, unknown> = { task_id: taskId, status: "completed", ...result, generated_by_ai: true };
+          if (task.cx_response_encryption === "required" && cxSharedSecret) {
+            response = {
+              task_id: taskId,
+              status: "encrypted",
+              iicp_conf_resp: encryptResponse(response, cxSharedSecret, taskId),
+            };
+          }
+          const body = JSON.stringify(response);
           res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
           res.end(body);
           // TC-9c: fire best-effort CIPWorkerReceipt to the directory (server-side award path).
