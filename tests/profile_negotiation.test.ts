@@ -6,7 +6,7 @@ import { IicpClient } from "../src/client.js";
 
 const request = {
   profile_id: "iicp.profile.compatibility.v0",
-  profile_version: "0.3.0-draft",
+  profile_version: "0.4.0-draft",
   profile_fixture_sha256: "a".repeat(64),
   required: true,
 };
@@ -14,7 +14,7 @@ const request = {
 test("profile negotiation fixture matches the discovery wire contract", () => {
   const fixture = JSON.parse(fs.readFileSync(path.join(process.cwd(), "parity/profile-negotiation-v0.json"), "utf8"));
   assert.equal(fixture.fixture_version, "0.2.0-draft");
-  assert.equal(fixture.profile_fixture_sha256, "4137ecf91b4748a2b368cf4428b4604c6947f8879d77402cc7937d11d24b2aaf");
+  assert.equal(fixture.profile_fixture_sha256, "d039eaf52afca6866832779261db7bdd2ffd818a36bc8ba9aea1db0c9c115012");
   for (const item of fixture.cases) {
     if (item.expected.requested) assert.equal(item.request.profile_fixture_sha256.length, 64, item.name);
   }

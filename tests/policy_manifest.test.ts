@@ -32,10 +32,10 @@ test("policy manifest is signed by the operator without leaking its secret", () 
 
 test("pre-normative profile fixture has portable reasons", () => {
   const fixture = JSON.parse(readFileSync(join(process.cwd(), "parity/profile-compatibility-v0.json"), "utf8"));
-  assert.equal(fixture.fixture_version, "0.3.0-draft");
+  assert.equal(fixture.fixture_version, "0.4.0-draft");
   assert.equal(fixture.status, "pre-normative");
   assert.equal(fixture.result_contract.unsupported_status, "unsupported_pre_normative_profile");
-  assert.equal(fixture.scenarios.length, 11);
+  assert.equal(fixture.scenarios.length, 15);
   assert.equal(fixture.scenarios.every((scenario: { expected_reason?: string }) => Boolean(scenario.expected_reason)), true);
 });
 
