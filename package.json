@@ -1,6 +1,6 @@
 {
   "name": "@iicp/client",
-  "version": "0.7.91",
+  "version": "0.7.92",
   "description": "Use the open IICP AI mesh from TypeScript or JavaScript without running a node",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
