@@ -180,7 +180,9 @@ export class IicpClient {
   private _selectCandidates(nodes: Node[], maxRetries: number): Node[] {
     const strategy = this.cfg.routing_strategy ?? "epsilon";
     if (strategy === "deterministic" || nodes.length <= 1) return nodes.slice(0, maxRetries);
-    if (strategy === "weighted_v1") return weightedV1Order(nodes, maxRetries, Math.random());
+    if (strategy === "weighted_v1") {
+      return weightedV1Order(nodes, maxRetries, Math.random(), this.cfg.routing_top_k ?? DEFAULT_ROUTING_TOP_K);
+    }
     if (strategy === "softmax_top_k") {
       const topK = Math.max(1, Math.min(nodes.length, this.cfg.routing_top_k ?? DEFAULT_ROUTING_TOP_K));
       const pool = nodes.slice(0, topK);

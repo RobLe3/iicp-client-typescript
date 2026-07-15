@@ -11,3 +11,16 @@ test("weighted_v1 fixture vectors are deterministic", () => {
     assert.deepEqual(order, vector.expected_order, vector.name);
   }
 });
+
+test("weighted_v1 distribution and top-k boundary are portable", () => {
+  const fixture = JSON.parse(readFileSync(join(process.cwd(), "parity/selection-v1.json"), "utf8"));
+  for (const vector of fixture.distribution_vectors) {
+    const counts = Object.fromEntries(vector.nodes.map((node: { node_id: string }) => [node.node_id, 0]));
+    for (let index = 0; index < vector.sample_count; index++) {
+      const randomValue = (index + 0.5) / vector.sample_count;
+      const selected = weightedV1Order(vector.nodes, vector.nodes.length, randomValue, vector.top_k)[0];
+      counts[selected.node_id] += 1;
+    }
+    assert.deepEqual(counts, vector.expected_first_counts, vector.name);
+  }
+});
