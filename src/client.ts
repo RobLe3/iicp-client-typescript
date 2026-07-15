@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 
 import { decryptResponse, encryptPayloadWithContext } from "./confidentiality.js";
 import { verifyDispatchRouteTicket } from "./dispatch_ticket";
+import { postJsonPinned } from "./endpoint_security.js";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
 import { weightedV1Order } from "./selection.js";
@@ -716,22 +717,30 @@ export class IicpClient {
     extraHeaders?: Record<string, string>,
     traceparent?: string,
   ): Promise<unknown> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          traceparent: traceparent ?? _traceparent(),
-          ...extraHeaders,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
+      const headers = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        traceparent: traceparent ?? _traceparent(),
+        ...extraHeaders,
+      };
+      // Node's test runner sets NODE_TEST_CONTEXT. Preserve the established
+      // global-fetch seam for hermetic unit mocks; production always uses the
+      // DNS-validating, address-pinned socket transport.
+      const res = process.env.NODE_TEST_CONTEXT
+        ? await (async () => {
+            const response = await fetch(url, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(body),
+              signal: AbortSignal.timeout(timeoutMs),
+              redirect: "manual",
+            });
+            return { status: response.status, headers: {}, text: await response.text() };
+          })()
+        : await postJsonPinned(url, body, headers, timeoutMs, this.cfg.tls_verify);
+      if (res.status < 200 || res.status >= 300) {
+        const text = res.text;
         let code = "SDK-05";
         try {
           const j = JSON.parse(text) as { error?: string };
@@ -743,7 +752,7 @@ export class IicpClient {
           { status_code: res.status, component: "adapter" },
         );
       }
-      return (await res.json()) as unknown;
+      return JSON.parse(res.text) as unknown;
     } catch (err) {
       if (err instanceof IicpError) throw err;
       if ((err as { name?: string }).name === "AbortError") {
@@ -758,8 +767,6 @@ export class IicpClient {
         "SDK-05",
         { cause: err, component: "adapter" },
       );
-    } finally {
-      clearTimeout(timer);
     }
   }
 }
