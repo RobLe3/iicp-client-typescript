@@ -35,12 +35,25 @@ describe("endpoint security", () => {
     const fixture = JSON.parse(readFileSync(new URL("fixtures/endpoint-security-v1.json", import.meta.url), "utf8")) as {
       address_vectors: Array<{ id: string; addresses: string[]; allow_private: boolean; allowed: boolean }>;
       hostname_vectors: Array<{ id: string; host: string; allowed: boolean }>;
+      resolution_attempt_vectors: Array<{ id: string; attempts: string[][]; allow_private: boolean; expected: string[] }>;
+      redirect_vectors: Array<{ id: string; status: number; same_origin: boolean; target_addresses: string[]; allow_private: boolean; expected: string }>;
     };
     for (const vector of fixture.address_vectors) {
       assert.equal(vector.addresses.every((address) => addressAllowed(address, vector.allow_private)), vector.allowed, vector.id);
     }
     for (const vector of fixture.hostname_vectors) {
       assert.equal(hostnameAllowed(vector.host), vector.allowed, vector.id);
+    }
+    for (const vector of fixture.resolution_attempt_vectors) {
+      const actual = vector.attempts.map((attempt) =>
+        attempt.every((address) => addressAllowed(address, vector.allow_private)) ? "allow" : "refuse");
+      assert.deepEqual(actual, vector.expected, vector.id);
+    }
+    for (const vector of fixture.redirect_vectors) {
+      const safeTarget = vector.target_addresses.every((address) => addressAllowed(address, vector.allow_private));
+      const actual = [307, 308].includes(vector.status) && vector.same_origin && safeTarget
+        ? "follow_after_revalidation" : "refuse";
+      assert.equal(actual, vector.expected, vector.id);
     }
   });
 
