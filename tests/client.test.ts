@@ -347,6 +347,43 @@ describe("submit", () => {
     restore();
   });
 
+  it("projects chat model and QoS into ticketed discovery and provider execution", async () => {
+    const ticketFixture = JSON.parse(readFileSync(new URL("../parity/dispatch-route-ticket-v1.json", import.meta.url), "utf8"));
+    let ticketBody: Record<string, unknown> = {};
+    let taskBody: Record<string, unknown> = {};
+    const restore = mockFetch((url, init) => {
+      const value = url.toString();
+      if (value.includes("/v1/directory-key")) return jsonResponse({ public_key: ticketFixture.public_key_hex });
+      if (value.includes("/v1/dispatch/ticket")) {
+        ticketBody = JSON.parse(String(init?.body ?? "{}"));
+        return jsonResponse({
+          ticket: ticketFixture.valid.token,
+          node_id: ticketFixture.valid.claims.node_id,
+          route: {
+            node_id: ticketFixture.valid.claims.node_id,
+            endpoint: "https://1.2.3.4:9484",
+            score: 0.9,
+            available: true,
+            region: "eu-central",
+            cx_public_key: fixtureCxKey(),
+          },
+        }, 201);
+      }
+      taskBody = JSON.parse(String(init?.body ?? "{}"));
+      return jsonResponse({ task_id: "projection", status: "success", result: { choices: [], model: "model-a" } });
+    });
+    const client = new IicpClient({ directory_url: ticketFixture.valid.claims.iss, route_discovery_mode: "ticketed" });
+    await client.chat([{ role: "user", content: "hello" }], {
+      model: "model-a", qos: "realtime", region: "eu-central", min_reputation: 0.8,
+    });
+    assert.equal(ticketBody.model, "model-a");
+    assert.equal(ticketBody.qos, "realtime");
+    assert.equal(ticketBody.region, "eu-central");
+    assert.equal(ticketBody.min_reputation, 0.8);
+    assert.deepEqual(taskBody.constraints, { timeout_ms: 30_000, qos: "realtime", model: "model-a" });
+    restore();
+  });
+
   it("does not downgrade after a ticket policy refusal", async () => {
     let legacyCalled = false;
     const restore = mockFetch((url) => {
