@@ -4,6 +4,20 @@ export { evaluatePreNormativeProfile } from "./profile_compatibility.js";
 export type { ProfileCompatibilityDecision } from "./profile_compatibility.js";
 export type { DiscoveryResult, ProfileNegotiation, ProfileRequest, RouteConstraints } from "./types.js";
 export { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
+export {
+  DISPATCH_TICKET_V2_PROFILE,
+  LocalDispatchReplayCache,
+  canonicalTicketClaims,
+  verifyDispatchTicketV2,
+} from "./dispatch_ticket_trust.js";
+export type {
+  DispatchTicketBindings,
+  DispatchTrustBundle,
+  DispatchTrustDecision,
+  DispatchTrustKey,
+} from "./dispatch_ticket_trust.js";
+export { LifecycleConflict, LifecycleResumeUnavailable, LifecycleStore, SERVICE_LIFECYCLE_PROFILE, TERMINAL_LIFECYCLE_STATES, UnknownLifecycleTask } from "./service_lifecycle.js";
+export type { LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
 export { IicpError } from "./errors.js";
 export { IicpNode } from "./node.js";
 export { McpToolPolicy, toolRiskLabel, TOOL_RISK_KEYWORDS } from "./mcp_policy.js";

@@ -579,6 +579,16 @@ Conformance tier: `iicp:sdk:v1` (spec S.14) · [Request a badge](https://iicp.ne
 
 ---
 
+## Opt-in protocol research APIs
+
+`verifyDispatchTicketV2` verifies pre-normative v2 tickets against a
+caller-supplied trust bundle. `LifecycleStore` is a transport-neutral bounded
+reference store with replay and restart snapshots. Neither is used by normal
+discovery, submission or node serving. These are unstable research surfaces,
+not deployed protocol guarantees.
+
+---
+
 ## Development
 
 ```bash
