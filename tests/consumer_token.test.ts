@@ -40,6 +40,31 @@ function cxKey(keyId = "cx-fixture") {
 }
 
 describe("consumer token acquisition (#496)", () => {
+  it("required mode refuses silent unauthenticated downgrade", async () => {
+    let taskCalled = false;
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("/consumer-token")) return json({}, 503);
+      if (u.includes("/discover")) return json({
+        nodes: [{ node_id: "node-required", endpoint: "https://node.example.com", score: 1, available: true, region: "eu", cx_public_key: cxKey() }],
+      });
+      taskCalled = true;
+      return json({ status: "success", result: {} });
+    });
+    const client = new IicpClient({
+      directory_url: "https://iicp.network/api",
+      node_token: "node-token",
+      consumer_auth_mode: "required",
+      route_discovery_mode: "legacy",
+    });
+    await assert.rejects(
+      () => client.submit({ intent: "urn:iicp:intent:llm:chat:v1", payload: {} }),
+      (error: unknown) => error instanceof Error && error.message.includes("Consumer authentication is required"),
+    );
+    assert.equal(taskCalled, false);
+    restore();
+  });
+
   it("sends X-IICP-Consumer-Token when node_token is configured", async () => {
     const capturedHeaders: Record<string, string>[] = [];
     const exp = Math.floor(Date.now() / 1000) + 300;

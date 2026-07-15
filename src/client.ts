@@ -10,6 +10,7 @@ import { verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
 import { weightedV1Order } from "./selection.js";
+import { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
 import {
   ROUTING_POLICY_REFUSAL_CODE,
   filterNodesForRoutingPolicy,
@@ -111,6 +112,7 @@ const DEFAULT_CONFIG: ClientConfig = {
   routing_top_k: DEFAULT_ROUTING_TOP_K,
   routing_softmax_tau: DEFAULT_ROUTING_SOFTMAX_TAU,
   route_discovery_mode: "auto",
+  consumer_auth_mode: "optional",
 };
 
 const CONSUMER_TOKEN_EXPIRY_BUFFER_S = 30;
@@ -135,6 +137,9 @@ export class IicpClient {
         `timeout_ms must be ≤ ${MAX_TIMEOUT_MS}; got ${merged.timeout_ms}`,
         "SDK-04",
       );
+    }
+    if (!["optional", "required", "disabled"].includes(merged.consumer_auth_mode ?? "optional")) {
+      throw new IicpError("consumer_auth_mode must be optional, required, or disabled", "SDK-AUTH-MODE");
     }
     // IICP_ROUTING_EPSILON overrides config; clamp to [0.0, 1.0]
     const envEps = process.env["IICP_ROUTING_EPSILON"];
@@ -250,6 +255,7 @@ export class IicpClient {
     if (region) base.region = region;
     if (opts.qos) base.qos = opts.qos;
     if (opts.min_reputation !== undefined) base.min_reputation = opts.min_reputation;
+    if (opts.model) base.model = opts.model;
     const excluded: string[] = [];
     const candidates: Node[] = [];
 
@@ -314,6 +320,7 @@ export class IicpClient {
     if (o.qos) params.set("qos", o.qos);
     if (o.min_reputation !== undefined)
       params.set("min_reputation", String(o.min_reputation));
+    if (o.model) params.set("model", o.model);
     if (o.profile_request) {
       params.set("profile_id", o.profile_request.profile_id);
       params.set("profile_version", o.profile_request.profile_version);
@@ -366,11 +373,7 @@ export class IicpClient {
   async submit(req: TaskRequest): Promise<TaskResponse> {
     this._validateIntent(req.intent);
     const tp = _traceparent(); // SDK-06: shared trace across discover + submit
-    const discoverOpts: DiscoverOptions = {
-      region: req.constraints?.region ?? this.cfg.region,
-      min_reputation: req.constraints?.min_reputation,
-      profile_request: this.cfg.profile_request,
-    };
+    const discoverOpts = projectRouteOptions(req, this.cfg);
     let nodes: Node[];
     let profileNegotiation: ProfileNegotiation | undefined;
     if (this.cfg.route_discovery_mode === "legacy" || this.cfg.profile_request) {
@@ -438,7 +441,16 @@ export class IicpClient {
     for (const node of candidates) {
       // Phase 2 (#496): acquire directory-issued consumer token when caller has directory identity.
       const nodeHeaders = { ...headers };
-      const ct = await this._acquireConsumerToken(node.node_id, req.intent);
+      const ct = this.cfg.consumer_auth_mode === "disabled"
+        ? null
+        : await this._acquireConsumerToken(node.node_id, req.intent);
+      if (this.cfg.consumer_auth_mode === "required" && !ct) {
+        throw new IicpError(
+          "Consumer authentication is required but no directory-issued token is available",
+          "IICP-CONSUMER-AUTH-REQUIRED",
+          { component: "directory" },
+        );
+      }
       if (ct) {
         nodeHeaders["X-IICP-Consumer-Token"] = ct;
       }
@@ -449,7 +461,7 @@ export class IicpClient {
       const body: Record<string, unknown> = {
         task_id: taskId,
         intent: req.intent,
-        constraints: req.constraints ?? {},
+        constraints: projectExecutionConstraints(req),
       };
       let cxSharedSecret: Buffer | undefined;
       let requireEncryptedResponse = false;
@@ -547,8 +559,18 @@ export class IicpClient {
       },
       constraints: {
         timeout_ms: o.timeout_ms ?? this.cfg.timeout_ms,
+        qos: o.qos ?? "interactive",
+        ...(o.model ? { model: o.model } : {}),
         ...(o.region ? { region: o.region } : {}),
         ...(o.min_reputation !== undefined ? { min_reputation: o.min_reputation } : {}),
+      },
+      route_constraints: o.route_constraints ?? {
+        region: o.region,
+        qos: o.qos ?? "interactive",
+        model: o.model,
+        min_reputation: o.min_reputation,
+        browser_usable_only: o.browser_usable_only,
+        profile_request: o.profile_request,
       },
       routing_policy: o.routing_policy,
     });

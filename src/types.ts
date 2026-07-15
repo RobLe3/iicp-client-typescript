@@ -23,6 +23,8 @@ export interface ClientConfig {
   routing_softmax_tau?: number;
   /** Phase 2 (#496): caller's JWT from directory registration, used to acquire consumer tokens. */
   node_token?: string;
+  /** Directory-issued consumer identity policy. Default: optional. */
+  consumer_auth_mode?: "optional" | "required" | "disabled";
   /** Phase 6 (#585): default client-side policy evaluated before remote prompt dispatch. */
   routing_policy?: RoutingPolicy;
   /** Route endpoint migration mode. Default: auto. */
@@ -36,6 +38,18 @@ export interface TaskConstraints {
   qos?: string;
   timeout_ms?: number;
   min_reputation?: number;
+  model?: string;
+}
+
+/** Prompt-free criteria used only for provider discovery and selection. */
+export interface RouteConstraints {
+  region?: string;
+  qos?: string;
+  model?: string;
+  min_reputation?: number;
+  browser_usable_only?: boolean;
+  profile_request?: ProfileRequest;
+  limit?: number;
 }
 
 export interface TaskAuth {
@@ -54,6 +68,7 @@ export interface TaskRequest {
   intent: string;
   payload: Record<string, unknown>;
   constraints?: TaskConstraints;
+  route_constraints?: RouteConstraints;
   auth?: TaskAuth;
   task_id?: string;
   /** #488 — querying node identity for self-query neutrality at the directory. */
@@ -87,6 +102,7 @@ export interface DiscoverOptions {
   region?: string;
   qos?: string;
   min_reputation?: number;
+  model?: string;
   /** Browser-like consumers: keep only HTTPS/loopback endpoints. Native default: false. */
   browser_usable_only?: boolean;
   /** Optional additive pre-normative directory profile negotiation. */
@@ -203,10 +219,14 @@ export interface ChatOptions {
   region?: string;
   timeout_ms?: number;
   min_reputation?: number;
+  qos?: string;
   model?: string;
   max_tokens?: number;
   temperature?: number;
   routing_policy?: RoutingPolicy;
+  browser_usable_only?: boolean;
+  profile_request?: ProfileRequest;
+  route_constraints?: RouteConstraints;
 }
 
 export type RoutingProfile =
