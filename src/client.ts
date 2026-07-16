@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 
 import { decryptResponse, encryptPayloadWithContext } from "./confidentiality.js";
-import { verifyDispatchRouteTicket } from "./dispatch_ticket";
+import { policyManifestBindingMatches, verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { postJsonPinned } from "./endpoint_security.js";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
@@ -289,10 +289,16 @@ export class IicpClient {
         }
         const nodeId = typeof data.node_id === "string" ? data.node_id : "";
         const issuer = this.cfg.directory_url.replace(/\/$/, "").replace(/\/api$/, "");
-        if (typeof data.ticket !== "string" || !this.dispatchTicketKey || !verifyDispatchRouteTicket(data.ticket, this.dispatchTicketKey, issuer, nodeId, intent)) {
+        const claims = typeof data.ticket === "string" && this.dispatchTicketKey
+          ? verifyDispatchRouteTicket(data.ticket, this.dispatchTicketKey, issuer, nodeId, intent)
+          : null;
+        if (!claims) {
           throw new IicpError("Directory returned an unverifiable dispatch ticket", "IICP-DISPATCH-TICKET-UNVERIFIED", { component: "directory" });
         }
         const route = data.route as Record<string, unknown> | undefined;
+        if (!policyManifestBindingMatches(claims, route)) {
+          throw new IicpError("Directory ticket does not match the route policy manifest", "IICP-POLICY-MANIFEST-BINDING-MISMATCH", { component: "directory" });
+        }
         const node = route ? this._nodeFromRoute({ ...route, node_id: data.node_id ?? route.node_id }, String(data.ticket_id_prefix ?? "")) : undefined;
         if (!node) throw new IicpError("Directory returned malformed ticketed route material", "IICP-DISPATCH-TICKET-MALFORMED", { component: "directory" });
         candidates.push(node);
