@@ -156,4 +156,6 @@ export type {
   TaskResponse,
 } from "./types.js";
 export { evaluatePolicyDataHandling } from "./policy_data_handling.js";
+export { evaluatePolicyOperationalEvidence } from "./policy_operational_evidence.js";
+export type { PolicyEvidenceDecision, PolicyEvidenceRecord } from "./policy_operational_evidence.js";
 export type { PolicyDataDecision, PolicyDataRecord } from "./policy_data_handling.js";
