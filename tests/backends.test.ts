@@ -320,6 +320,11 @@ describe("backend lifecycle cancellation",()=>{
       const result=await pending;
       assert.equal(result.error_code,499);
       assert.match(String(result.error_message),/cancelled/);
+      assert.deepEqual(registry.evidence(`cancel-${name}`),{
+        task_id:`cancel-${name}`,
+        outcome:"transport_aborted",
+        cleanup_complete:true,
+      });
     });
   }
 });

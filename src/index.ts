@@ -27,7 +27,7 @@ export type {
   TrustBundleStore,
 } from "./dispatch_ticket_trust.js";
 export { BackendCancellationRegistry, BoundedObserverBuffer, LifecycleConflict, LifecycleResumeUnavailable, LifecycleStore, ObserverLagged, SERVICE_LIFECYCLE_PROFILE, TERMINAL_LIFECYCLE_STATES, UnknownLifecycleTask } from "./service_lifecycle.js";
-export type { BackendCancellationHandler, BackendCancellationOutcome, LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
+export type { BackendCancellationEvidence, BackendCancellationEvidenceLevel, BackendCancellationHandler, BackendCancellationOutcome, LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
 export { IicpError } from "./errors.js";
 export { IicpNode } from "./node.js";
 export { McpToolPolicy, toolRiskLabel, TOOL_RISK_KEYWORDS } from "./mcp_policy.js";

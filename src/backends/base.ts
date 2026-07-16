@@ -55,7 +55,8 @@ export type BackendHandler = (task: TaskHandlerInput) => Promise<TaskHandlerOutp
 
 type CancellationRegistry = {
   register(taskId:string,handler:()=>boolean|void):void;
-  complete(taskId:string):void;
+  report?(taskId:string,outcome:"transport_aborted"):unknown;
+  complete(taskId:string):unknown;
 };
 
 /** Bind one backend invocation to the opt-in lifecycle cancellation registry. */
@@ -64,7 +65,11 @@ export function withBackendCancellation(handler:BackendHandler,registry:Cancella
     if(!task.task_id) return handler(task);
     const controller=new AbortController();
     registry.register(task.task_id,()=>{controller.abort();return true;});
-    try { return await handler({...task,abortSignal:controller.signal}); }
+    try {
+      const result=await handler({...task,abortSignal:controller.signal});
+      if(result.error_code===499) registry.report?.(task.task_id,"transport_aborted");
+      return result;
+    }
     finally { registry.complete(task.task_id); }
   };
 }
