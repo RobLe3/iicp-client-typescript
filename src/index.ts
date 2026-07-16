@@ -159,3 +159,8 @@ export { evaluatePolicyDataHandling } from "./policy_data_handling.js";
 export { evaluatePolicyOperationalEvidence } from "./policy_operational_evidence.js";
 export type { PolicyEvidenceDecision, PolicyEvidenceRecord } from "./policy_operational_evidence.js";
 export type { PolicyDataDecision, PolicyDataRecord } from "./policy_data_handling.js";
+export { decideLifecycleAccounting } from "./service_lifecycle_accounting.js";
+export type {
+  LifecycleAccountingDecision,
+  LifecycleAccountingInput,
+} from "./service_lifecycle_accounting.js";
