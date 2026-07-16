@@ -26,8 +26,8 @@ export type {
   TrustBundleInstallStatus,
   TrustBundleStore,
 } from "./dispatch_ticket_trust.js";
-export { LifecycleConflict, LifecycleResumeUnavailable, LifecycleStore, SERVICE_LIFECYCLE_PROFILE, TERMINAL_LIFECYCLE_STATES, UnknownLifecycleTask } from "./service_lifecycle.js";
-export type { LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
+export { BackendCancellationRegistry, BoundedObserverBuffer, LifecycleConflict, LifecycleResumeUnavailable, LifecycleStore, ObserverLagged, SERVICE_LIFECYCLE_PROFILE, TERMINAL_LIFECYCLE_STATES, UnknownLifecycleTask } from "./service_lifecycle.js";
+export type { BackendCancellationHandler, BackendCancellationOutcome, LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
 export { IicpError } from "./errors.js";
 export { IicpNode } from "./node.js";
 export { McpToolPolicy, toolRiskLabel, TOOL_RISK_KEYWORDS } from "./mcp_policy.js";
@@ -86,6 +86,7 @@ export type { AnthropicOptions } from "./backends/anthropic.js";
 export { getBackendHandler, BACKEND_TYPES } from "./backends/index.js";
 export type { BackendType } from "./backends/index.js";
 export type { BackendHandler, BackendOptions } from "./backends/base.js";
+export { withBackendCancellation } from "./backends/base.js";
 export { qosPriority, isQueueEligible, QOS_PRIORITY, QUEUE_ELIGIBLE, QUEUE_WAIT_MS } from "./scheduler.js";
 export { AvailabilityEvaluator } from "./availability.js";
 export type { Window } from "./availability.js";

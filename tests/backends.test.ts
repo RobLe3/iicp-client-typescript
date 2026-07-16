@@ -12,6 +12,8 @@ import { vllmHandler } from "../src/backends/vllm.js";
 import { llamacppHandler } from "../src/backends/llamacpp.js";
 import { meshllmHandler } from "../src/backends/meshllm.js";
 import { getBackendHandler, BACKEND_TYPES } from "../src/backends/index.js";
+import { withBackendCancellation } from "../src/backends/base.js";
+import { BackendCancellationRegistry } from "../src/service_lifecycle.js";
 
 let originalFetch: typeof globalThis.fetch;
 let lastRequest: { url: string; init: RequestInit | undefined } | null = null;
@@ -297,6 +299,29 @@ describe("openaiCompatHandler", () => {
     });
     assert.equal(lastRequest!.url, "http://localhost:11434/v1/chat/completions");
   });
+});
+
+describe("backend lifecycle cancellation",()=>{
+  for(const [name,factory] of [
+    ["Ollama",()=>openaiCompatHandler({baseUrl:"http://localhost:11434/v1",model:"test"})],
+    ["LM Studio",()=>openaiCompatHandler({baseUrl:"http://localhost:1234/v1",model:"test"})],
+    ["vLLM",()=>vllmHandler({model:"test"})],
+    ["MeshLLM",()=>meshllmHandler({model:"test"})],
+  ] as const){
+    it(`propagates cancellation to ${name}`,async()=>{
+      globalThis.fetch=((_url:string|URL|Request,init?:RequestInit)=>new Promise((_resolve,reject)=>{
+        init?.signal?.addEventListener("abort",()=>reject(new DOMException("aborted","AbortError")),{once:true});
+      })) as typeof fetch;
+      const registry=new BackendCancellationRegistry();
+      const handler=withBackendCancellation(factory(),registry);
+      const pending=handler({task_id:`cancel-${name}`,intent:"urn:iicp:intent:llm:chat:v1",payload:{messages:[]}});
+      await new Promise(resolve=>setImmediate(resolve));
+      assert.equal(registry.request(`cancel-${name}`,"running"),"cancel_signalled");
+      const result=await pending;
+      assert.equal(result.error_code,499);
+      assert.match(String(result.error_message),/cancelled/);
+    });
+  }
 });
 
 // ── Dedicated backends (vLLM / llama.cpp) + selector — parity Block B ────────

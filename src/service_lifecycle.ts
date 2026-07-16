@@ -15,6 +15,81 @@ export interface LifecycleSnapshot { profile:typeof SERVICE_LIFECYCLE_PROFILE; r
 export class LifecycleConflict extends Error {}
 export class UnknownLifecycleTask extends Error {}
 export class LifecycleResumeUnavailable extends Error { constructor(public readonly record:LifecycleRecord) { super("resume_unavailable"); } }
+export class ObserverLagged extends Error {
+  constructor(public readonly earliestAvailable:number, public readonly latestSequence:number) {
+    super("observer_lagged");
+  }
+}
+
+export type BackendCancellationOutcome = "cancel_signalled" | "cancel_unsupported" | "already_terminal";
+export type BackendCancellationHandler = () => boolean | void;
+
+/** Opt-in bridge from lifecycle cancellation to an active backend handle. */
+export class BackendCancellationRegistry {
+  private readonly handlers = new Map<string,BackendCancellationHandler>();
+  private readonly signalled = new Set<string>();
+
+  register(taskId:string,handler:BackendCancellationHandler):void {
+    this.handlers.set(taskId,handler);
+    this.signalled.delete(taskId);
+  }
+
+  complete(taskId:string):void {
+    this.handlers.delete(taskId);
+    this.signalled.delete(taskId);
+  }
+
+  request(taskId:string,state:string):BackendCancellationOutcome {
+    if(TERMINAL_LIFECYCLE_STATES.has(state)) {
+      this.complete(taskId);
+      return "already_terminal";
+    }
+    if(this.signalled.has(taskId)) return "cancel_signalled";
+    const handler=this.handlers.get(taskId);
+    if(!handler) return "cancel_unsupported";
+    if(handler()===false) return "cancel_unsupported";
+    this.signalled.add(taskId);
+    return "cancel_signalled";
+  }
+}
+
+/** Content-free ordered event buffer with explicit slow-consumer failure. */
+export class BoundedObserverBuffer {
+  private readonly events:LifecycleEvent[]=[];
+  private readonly observers=new Set<string>();
+  private terminal=false;
+
+  constructor(private readonly capacity:number,private readonly maxObservers=32) {
+    this.capacity=Math.max(1,capacity);
+    this.maxObservers=Math.max(1,maxObservers);
+  }
+
+  subscribe(observerId:string):void {
+    if(!this.observers.has(observerId)&&this.observers.size>=this.maxObservers) {
+      throw new LifecycleConflict("observer capacity exhausted");
+    }
+    this.observers.add(observerId);
+  }
+
+  disconnect(observerId:string):void { this.observers.delete(observerId); }
+
+  publish(event:LifecycleEvent):void {
+    const last=this.events.at(-1);
+    if(last&&event.sequence<=last.sequence) throw new LifecycleConflict("observer sequence must increase");
+    this.events.push(structuredClone(event));
+    if(this.events.length>this.capacity) this.events.splice(0,this.events.length-this.capacity);
+    this.terminal=event.is_final;
+  }
+
+  poll(afterSequence:number):LifecycleEvent[] {
+    const first=this.events[0]; const last=this.events.at(-1);
+    if(first&&last&&afterSequence+1<first.sequence) throw new ObserverLagged(first.sequence,last.sequence);
+    return this.events.filter(event=>event.sequence>afterSequence).map(event=>structuredClone(event));
+  }
+
+  get closed():boolean { return this.terminal; }
+  get observerCount():number { return this.observers.size; }
+}
 
 export class LifecycleStore {
   private readonly records = new Map<string,LifecycleRecord>();
