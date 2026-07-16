@@ -155,3 +155,5 @@ export type {
   TaskRequest,
   TaskResponse,
 } from "./types.js";
+export { evaluatePolicyDataHandling } from "./policy_data_handling.js";
+export type { PolicyDataDecision, PolicyDataRecord } from "./policy_data_handling.js";
