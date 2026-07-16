@@ -6,15 +6,25 @@ export type { DiscoveryResult, ProfileNegotiation, ProfileRequest, RouteConstrai
 export { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
 export {
   DISPATCH_TICKET_V2_PROFILE,
+  FileDispatchTrustBundleStore,
   LocalDispatchReplayCache,
+  TrustBundleStoreCorrupt,
+  TrustBundleStoreError,
+  TrustBundleStoreLocked,
+  canonicalDispatchTrustBundle,
   canonicalTicketClaims,
   verifyDispatchTicketV2,
 } from "./dispatch_ticket_trust.js";
 export type {
   DispatchTicketBindings,
+  AdminRecoveryAuthorization,
   DispatchTrustBundle,
   DispatchTrustDecision,
   DispatchTrustKey,
+  StoredDispatchTrustBundle,
+  TrustBundleInstallResult,
+  TrustBundleInstallStatus,
+  TrustBundleStore,
 } from "./dispatch_ticket_trust.js";
 export { LifecycleConflict, LifecycleResumeUnavailable, LifecycleStore, SERVICE_LIFECYCLE_PROFILE, TERMINAL_LIFECYCLE_STATES, UnknownLifecycleTask } from "./service_lifecycle.js";
 export type { LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
