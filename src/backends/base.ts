@@ -45,11 +45,50 @@ export type TaskHandlerInput = {
   task_id?: string;
   intent?: string;
   payload?: Record<string, unknown>;
+  /** Local-only cancellation signal; never serialized into an IICP task. */
+  abortSignal?: AbortSignal;
 };
 
 export type TaskHandlerOutput = Record<string, unknown>;
 
 export type BackendHandler = (task: TaskHandlerInput) => Promise<TaskHandlerOutput>;
+
+type CancellationRegistry = {
+  register(taskId:string,handler:()=>boolean|void):void;
+  complete(taskId:string):void;
+};
+
+/** Bind one backend invocation to the opt-in lifecycle cancellation registry. */
+export function withBackendCancellation(handler:BackendHandler,registry:CancellationRegistry):BackendHandler {
+  return async (task) => {
+    if(!task.task_id) return handler(task);
+    const controller=new AbortController();
+    registry.register(task.task_id,()=>{controller.abort();return true;});
+    try { return await handler({...task,abortSignal:controller.signal}); }
+    finally { registry.complete(task.task_id); }
+  };
+}
+
+function requestController(timeoutMs:number,external?:AbortSignal) {
+  const controller=new AbortController(); let timedOut=false;
+  const externalAbort=()=>controller.abort(external?.reason);
+  if(external?.aborted) externalAbort();
+  else external?.addEventListener("abort",externalAbort,{once:true});
+  const timer=setTimeout(()=>{timedOut=true;controller.abort();},timeoutMs);
+  return {
+    signal:controller.signal,
+    timedOut:()=>timedOut,
+    externallyCancelled:()=>external?.aborted===true,
+    cleanup:()=>{clearTimeout(timer);external?.removeEventListener("abort",externalAbort);},
+  };
+}
+
+function transportFailure(engine:string,exc:unknown,control:ReturnType<typeof requestController>):TaskHandlerOutput {
+  const msg=exc instanceof Error?exc.message:String(exc);
+  if(control.externallyCancelled()) return {error_code:499,error_message:`${engine}: backend request cancelled`};
+  if(control.timedOut()) return {error_code:408,error_message:`${engine}: backend timed out`};
+  return {error_code:502,error_message:`${engine}: HTTP transport error: ${msg}`};
+}
 
 /**
  * Build a TaskHandler that proxies CALLs to an OpenAI-dialect server. `engine` is the
@@ -122,23 +161,20 @@ export function buildOpenAiDialectHandler(
 
       const mpHeaders: Record<string, string> = {};
       if (apiKey) mpHeaders["Authorization"] = `Bearer ${apiKey}`;
-      const ctrlA = new AbortController();
-      const tA = setTimeout(() => ctrlA.abort(), timeoutMs);
+      const control = requestController(timeoutMs,task.abortSignal);
       let respA: Response;
       try {
         respA = await fetch(`${baseUrl}${path}`, {
           method: "POST",
           headers: mpHeaders,
           body: form,
-          signal: ctrlA.signal,
+          signal: control.signal,
         });
       } catch (exc) {
-        clearTimeout(tA);
-        const msg = exc instanceof Error ? exc.message : String(exc);
-        if (ctrlA.signal.aborted) return { error_code: 408, error_message: `${engine}: backend timed out` };
-        return { error_code: 502, error_message: `${engine}: HTTP transport error: ${msg}` };
+        return transportFailure(engine,exc,control);
+      } finally {
+        control.cleanup();
       }
-      clearTimeout(tA);
       if (!respA.ok) {
         const text = await respA.text().catch(() => "");
         return {
@@ -175,23 +211,20 @@ export function buildOpenAiDialectHandler(
 
       const headersS: Record<string, string> = { "Content-Type": "application/json" };
       if (apiKey) headersS["Authorization"] = `Bearer ${apiKey}`;
-      const ctrlS = new AbortController();
-      const tS = setTimeout(() => ctrlS.abort(), timeoutMs);
+      const control = requestController(timeoutMs,task.abortSignal);
       let respS: Response;
       try {
         respS = await fetch(`${baseUrl}${path}`, {
           method: "POST",
           headers: headersS,
           body: JSON.stringify(speechBody),
-          signal: ctrlS.signal,
+          signal: control.signal,
         });
       } catch (exc) {
-        clearTimeout(tS);
-        const msg = exc instanceof Error ? exc.message : String(exc);
-        if (ctrlS.signal.aborted) return { error_code: 408, error_message: `${engine}: backend timed out` };
-        return { error_code: 502, error_message: `${engine}: HTTP transport error: ${msg}` };
+        return transportFailure(engine,exc,control);
+      } finally {
+        control.cleanup();
       }
-      clearTimeout(tS);
       if (!respS.ok) {
         const errText = await respS.text().catch(() => "");
         return {
@@ -224,25 +257,20 @@ export function buildOpenAiDialectHandler(
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const control = requestController(timeoutMs,task.abortSignal);
     let resp: Response;
     try {
       resp = await fetch(`${baseUrl}${path}`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: ctrl.signal,
+        signal: control.signal,
       });
     } catch (exc) {
-      clearTimeout(t);
-      const msg = exc instanceof Error ? exc.message : String(exc);
-      if (ctrl.signal.aborted) {
-        return { error_code: 408, error_message: `${engine}: backend timed out` };
-      }
-      return { error_code: 502, error_message: `${engine}: HTTP transport error: ${msg}` };
+      return transportFailure(engine,exc,control);
+    } finally {
+      control.cleanup();
     }
-    clearTimeout(t);
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
