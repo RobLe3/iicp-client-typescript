@@ -13,7 +13,17 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import * as net from "node:net";
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { IicpNode } from "../src/node.js";
+import {
+  decryptPayloadWithContext,
+  decryptResponse,
+  encryptPayloadWithContext,
+  encryptResponse,
+  loadOrCreateNodeCxKey,
+} from "../src/confidentiality.js";
 import {
   HttpPollWorkerSession,
   RelayAcceptServer,
@@ -257,6 +267,86 @@ describe("relay HTTP-poll endpoints", () => {
     const resp = await dispatch.json();
     assert.equal(resp.status, "completed");
     assert.equal((resp.result as Record<string, unknown>).text, "MESH OK from browser");
+  });
+
+  it("strict bind keeps encrypted request and response opaque through the relay", async () => {
+    const workerId = "w-cx-roundtrip";
+    const taskId = "t-cx-relay-1";
+    const secretText = "relay must never observe this plaintext";
+    const ticket = signedTicket(workerId, "relay-node");
+    const oldKey = process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"];
+    const oldRequire = process.env["IICP_RELAY_REQUIRE_BIND_TICKET"];
+    const oldCxDir = process.env["IICP_CX_KEY_DIR"];
+    const cxDir = mkdtempSync(join(tmpdir(), "iicp-relay-cx-"));
+    process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"] = ticket.publicKeyHex;
+    process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] = "1";
+    process.env["IICP_CX_KEY_DIR"] = cxDir;
+    try {
+      const keys = loadOrCreateNodeCxKey(workerId, "relay://test");
+      keys.publicKey.features = ["response_encryption_v1"];
+      const encrypted = encryptPayloadWithContext(
+        { secret: secretText }, keys.publicKey, taskId, "urn:iicp:intent:llm:chat:v1",
+      );
+      const bresp = await bind(workerId, [], { bind_ticket: ticket.token });
+      assert.equal(bresp.status, 200);
+      const { session_token: token } = await bresp.json();
+      let relayVisible: Record<string, unknown> = {};
+
+      const worker = (async () => {
+        const pull = await fetch(`${base}/v1/relay/pull`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        assert.equal(pull.status, 200);
+        const call = await pull.json();
+        relayVisible = call;
+        const task = call.task as Record<string, unknown>;
+        assert.equal("payload" in task, false);
+        const opened = decryptPayloadWithContext(
+          task.iicp_conf as Record<string, unknown>, keys.privateKeyBytes, keys.publicKeyBytes,
+        );
+        assert.deepEqual(opened.payload, { secret: secretText });
+        const plainResponse = {
+          task_id: taskId,
+          status: "success",
+          result: { text: "encrypted relay response" },
+        };
+        const responseEnvelope = encryptResponse(plainResponse, opened.sharedSecret, taskId);
+        await fetch(`${base}/v1/relay/result`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ call_id: call.call_id, result: { iicp_conf_resp: responseEnvelope } }),
+        });
+      })();
+
+      const dispatch = await fetch(`${base}/v1/relay-for/${workerId}/v1/task`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          task_id: taskId,
+          intent: "urn:iicp:intent:llm:chat:v1",
+          iicp_conf: encrypted.envelope,
+          cx_response_encryption: "required",
+        }),
+      });
+      await worker;
+      assert.equal(dispatch.status, 200);
+      const response = await dispatch.json();
+      assert.equal("result" in response, false);
+      const openedResponse = decryptResponse(
+        response.iicp_conf_resp as Record<string, unknown>, encrypted.sharedSecret, taskId,
+      ) as Record<string, unknown>;
+      assert.equal(((openedResponse.result as Record<string, unknown>).text), "encrypted relay response");
+      assert.equal(JSON.stringify(relayVisible).includes(secretText), false);
+      assert.equal(JSON.stringify(response).includes("encrypted relay response"), false);
+    } finally {
+      if (oldKey === undefined) delete process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"];
+      else process.env["IICP_RELAY_BIND_TICKET_PUBLIC_KEY"] = oldKey;
+      if (oldRequire === undefined) delete process.env["IICP_RELAY_REQUIRE_BIND_TICKET"];
+      else process.env["IICP_RELAY_REQUIRE_BIND_TICKET"] = oldRequire;
+      if (oldCxDir === undefined) delete process.env["IICP_CX_KEY_DIR"];
+      else process.env["IICP_CX_KEY_DIR"] = oldCxDir;
+      rmSync(cxDir, { recursive: true, force: true });
+    }
   });
 
   it("relay-for unknown worker → 404 IICP-E030", async () => {
