@@ -161,6 +161,7 @@ export { evaluatePolicyOperationalEvidence } from "./policy_operational_evidence
 export type { PolicyEvidenceDecision, PolicyEvidenceRecord } from "./policy_operational_evidence.js";
 export { POLICY_DETAIL_FIELDS, evaluatePolicyDetailDisclosure, verifyPolicyDetailConsumerToken } from "./policy_detail_disclosure.js";
 export type { PolicyDetailDisclosureDecision } from "./policy_detail_disclosure.js";
+export { evaluateDistributedLifecycle } from "./service_lifecycle_distributed.js";
 export type { PolicyDataDecision, PolicyDataRecord } from "./policy_data_handling.js";
 export { decideLifecycleAccounting } from "./service_lifecycle_accounting.js";
 export type {
