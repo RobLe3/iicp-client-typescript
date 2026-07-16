@@ -18,6 +18,17 @@ test("consumes shared runtime cancellation vectors",()=>{
       assert.equal(calls,1);
     }
   }
+  for(const vector of fixture.cancellation_evidence.vectors){
+    const registry=new BackendCancellationRegistry();
+    registry.register(vector.id,()=>true);
+    assert.equal(registry.request(vector.id,"running"),"cancel_signalled");
+    registry.report(vector.id,vector.reported);
+    assert.deepEqual(registry.complete(vector.id),{
+      task_id:vector.id,
+      outcome:vector.expected,
+      cleanup_complete:vector.cleanup_complete,
+    });
+  }
 });
 
 test("bounded observation reports lag, terminal closure and slot release",()=>{

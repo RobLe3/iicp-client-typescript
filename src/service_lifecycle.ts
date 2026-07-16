@@ -23,32 +23,62 @@ export class ObserverLagged extends Error {
 
 export type BackendCancellationOutcome = "cancel_signalled" | "cancel_unsupported" | "already_terminal";
 export type BackendCancellationHandler = () => boolean | void;
+export type BackendCancellationEvidenceLevel = "cancel_requested" | "transport_aborted" | "backend_acknowledged" | "execution_stopped" | "cancel_unsupported" | "already_terminal";
+export type BackendCancellationEvidence = {task_id:string;outcome:BackendCancellationEvidenceLevel;cleanup_complete:boolean};
 
 /** Opt-in bridge from lifecycle cancellation to an active backend handle. */
 export class BackendCancellationRegistry {
   private readonly handlers = new Map<string,BackendCancellationHandler>();
   private readonly signalled = new Set<string>();
+  private readonly evidenceByTask = new Map<string,BackendCancellationEvidence>();
+  private readonly evidenceOrder:string[] = [];
 
   register(taskId:string,handler:BackendCancellationHandler):void {
     this.handlers.set(taskId,handler);
     this.signalled.delete(taskId);
   }
 
-  complete(taskId:string):void {
+  report(taskId:string,outcome:BackendCancellationEvidenceLevel):BackendCancellationEvidence {
+    const current=this.evidenceByTask.get(taskId);
+    const evidence={task_id:taskId,outcome,cleanup_complete:current?.cleanup_complete??false};
+    this.remember(evidence);
+    return evidence;
+  }
+
+  complete(taskId:string,outcome?:BackendCancellationEvidenceLevel):BackendCancellationEvidence {
     this.handlers.delete(taskId);
     this.signalled.delete(taskId);
+    const current=this.evidenceByTask.get(taskId);
+    if(!current&&!outcome) return {task_id:taskId,outcome:"cancel_unsupported",cleanup_complete:true};
+    const evidence={task_id:taskId,outcome:outcome??current?.outcome??"cancel_unsupported",cleanup_complete:true};
+    this.remember(evidence);
+    return evidence;
+  }
+
+  evidence(taskId:string):BackendCancellationEvidence|undefined { return this.evidenceByTask.get(taskId); }
+
+  private remember(evidence:BackendCancellationEvidence):void {
+    if(!this.evidenceByTask.has(evidence.task_id)){
+      this.evidenceOrder.push(evidence.task_id);
+      if(this.evidenceOrder.length>256){
+        const oldest=this.evidenceOrder.shift();
+        if(oldest) this.evidenceByTask.delete(oldest);
+      }
+    }
+    this.evidenceByTask.set(evidence.task_id,evidence);
   }
 
   request(taskId:string,state:string):BackendCancellationOutcome {
     if(TERMINAL_LIFECYCLE_STATES.has(state)) {
-      this.complete(taskId);
+      this.complete(taskId,"already_terminal");
       return "already_terminal";
     }
     if(this.signalled.has(taskId)) return "cancel_signalled";
     const handler=this.handlers.get(taskId);
-    if(!handler) return "cancel_unsupported";
-    if(handler()===false) return "cancel_unsupported";
+    if(!handler){this.complete(taskId,"cancel_unsupported");return "cancel_unsupported";}
+    if(handler()===false){this.complete(taskId,"cancel_unsupported");return "cancel_unsupported";}
     this.signalled.add(taskId);
+    this.report(taskId,"cancel_requested");
     return "cancel_signalled";
   }
 }
