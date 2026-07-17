@@ -9,6 +9,28 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.93] — 2026-07-17
+
+### Added — opt-in lifecycle security and policy evidence
+- Added durable dispatch-ticket trust state, policy-manifest binding, data-handling and operational-evidence evaluation, and bounded runtime controls for the pre-normative service-lifecycle prototype.
+- Added authenticated policy-detail disclosure, explicit lifecycle identity and distributed-guarantee decisions, and accounting and backend-cancellation evidence.
+- Kept economic enforcement and lifecycle participation disabled unless an application explicitly enables the corresponding prototype components.
+
+### Security — encrypted relay evidence
+- Added an end-to-end relay test proving that negotiated encrypted responses remain opaque to the relay while the intended consumer can authenticate and decrypt them.
+
+All lifecycle and policy additions in this release remain opt-in and pre-normative; existing non-participating applications retain their previous behavior.
+
+## [0.7.92] — 2026-07-16
+
+### Security — provider endpoint and ticket trust
+- Provider connections resolve and pin validated public addresses, with DNS-rebinding fixtures covering prohibited address changes.
+- Dispatch-ticket verification now has cryptographic known-answer coverage instead of relying only on structural ticket tests.
+
+### Added — pre-normative lifecycle foundations
+- Added opt-in ticket-trust and service-lifecycle prototypes without changing the default request-response path.
+- Added weighted-selection distribution and top-k parity evidence shared with the other official SDKs.
+
 ## [0.7.91] — 2026-07-15
 
 ### Fixed — cross-SDK route projection parity
