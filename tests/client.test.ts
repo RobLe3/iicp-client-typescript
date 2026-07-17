@@ -714,6 +714,25 @@ describe("SDK-06 traceparent", () => {
     assert.equal((captured as Record<string, unknown>).backend, "ollama");
   });
 
+  it("register advertises only the enabled consumer cosignature receipt profile", async () => {
+    let captured: Record<string, unknown> | null = null;
+    const restore = mockFetch((_url, init) => {
+      captured = JSON.parse(init?.body as string);
+      return jsonResponse({ node_token: "tok-1", node_id: "n-receipt" }, 201);
+    });
+    const node = new IicpNode({
+      nodeId: "n-receipt",
+      endpoint: "https://provider.example.com:8080",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      model: "llama-3-8b",
+      directoryUrl: "https://iicp.test",
+      supportedReceiptProfiles: ["unknown_v1", "consumer_cosignature_v1", "consumer_cosignature_v1"],
+    });
+    await node.register();
+    restore();
+    assert.deepEqual((captured as Record<string, unknown>).supported_receipt_profiles, ["consumer_cosignature_v1"]);
+  });
+
   it("#407 ADR-045: register attaches operator_delegation when configured", async () => {
     const { issueDelegation, generateOperatorKey, verifyDelegation } = await import("../src/delegation.js");
     const delegation = issueDelegation(generateOperatorKey(), "n-1", 3600);

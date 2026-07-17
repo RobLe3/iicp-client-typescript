@@ -41,11 +41,12 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "cbor-x": "^1.6.4"
+    "cbor-x": "^1.6.4",
+    "json-canonicalize": "2.0.0"
   },
   "peerDependencies": {
-    "prom-client": ">=14",
-    "nat-upnp": ">=1.1"
+    "nat-upnp": ">=1.1",
+    "prom-client": ">=14"
   },
   "peerDependenciesMeta": {
     "prom-client": {
