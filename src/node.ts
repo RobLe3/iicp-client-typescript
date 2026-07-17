@@ -207,6 +207,8 @@ export interface NodeConfig {
   backend?: string;
   /** Backend-local aliases that must not be advertised as public capabilities. */
   excludedModels?: string[];
+  /** Pre-normative receipt profiles explicitly enabled by the operator. */
+  supportedReceiptProfiles?: string[];
   region?: string;
   capabilities?: string[];
   directoryUrl?: string;
@@ -389,6 +391,7 @@ export class IicpNode {
       nodeId: config.nodeId,
       backend: config.backend,
       excludedModels: config.excludedModels ?? [],
+      supportedReceiptProfiles: config.supportedReceiptProfiles ?? [],
       endpoint: config.endpoint,
       intent: config.intent,
       model: config.model,
@@ -645,6 +648,10 @@ export class IicpNode {
       if (this._cfg.operatorIntegrityHash) body.operator_integrity_hash = this._cfg.operatorIntegrityHash;
     }
     if (this._cfg.policyManifest) body.policy_manifest = this._cfg.policyManifest;
+    const receiptProfiles = [...new Set(
+      this._cfg.supportedReceiptProfiles.filter((profile) => profile === "consumer_cosignature_v1"),
+    )];
+    if (receiptProfiles.length > 0) body.supported_receipt_profiles = receiptProfiles;
 
     // SDK self-identification — directory surfaces these on /v1/discover
     // so dashboards can render a language badge. Free-form so future SDKs

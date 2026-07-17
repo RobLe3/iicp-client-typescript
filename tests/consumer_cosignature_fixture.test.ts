@@ -3,21 +3,12 @@ import { createHash, createPublicKey, verify, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import { canonicalizeJcs } from "../src/jcs.js";
 
 const fixture = JSON.parse(
   readFileSync(join(process.cwd(), "parity/cip-consumer-cosignature-v1.json"), "utf8"),
 );
 const domain = Buffer.from("IICP-CIP-CONSUMER-COSIGNATURE-V1\0", "utf8");
-
-function canonical(value: unknown): string {
-  if (typeof value === "number" && Object.is(value, -0)) return "0";
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  const entries = Object.entries(value as Record<string, unknown>)
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`);
-  return `{${entries.join(",")}}`;
-}
 
 function decode(value: string): Buffer {
   return Buffer.from(value, "base64url");
@@ -51,7 +42,7 @@ function evaluate(value: Record<string, string>): Record<string, string> {
 
 test("consumer co-signature fixture is byte-identical in Node and browser crypto", async () => {
   const vector = fixture.canonical_vector;
-  const encoded = Buffer.from(canonical(vector.receipt), "utf8");
+  const encoded = Buffer.from(canonicalizeJcs(vector.receipt), "utf8");
   assert.equal(encoded.toString(), vector.canonical_json_utf8);
   assert.equal(createHash("sha256").update(encoded).digest("hex"), vector.canonical_json_sha256);
   const digest = createHash("sha256").update(domain).update(encoded).digest();
@@ -87,4 +78,14 @@ test("consumer co-signature fixture is byte-identical in Node and browser crypto
   const receiptFields = new Set(Object.keys(vector.receipt));
   for (const field of fixture.privacy_contract.forbidden_fields) assert.equal(receiptFields.has(field), false);
   assert.equal(fixture.privacy_contract.self_reported_metrics_have_authority, false);
+});
+
+test("full JCS vectors and invalid number domain", () => {
+  for (const vector of fixture.jcs_vectors) {
+    assert.equal(canonicalizeJcs(vector.input), vector.canonical_json_utf8, vector.name);
+  }
+  for (const invalid of [Number.NaN, Number.POSITIVE_INFINITY, 9_007_199_254_740_992]) {
+    assert.throws(() => canonicalizeJcs({ invalid }), /JCS/);
+  }
+  assert.throws(() => canonicalizeJcs({ invalid: undefined }), /unsupported JCS/);
 });
