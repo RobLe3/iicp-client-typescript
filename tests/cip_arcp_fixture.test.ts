@@ -72,6 +72,23 @@ function evaluate(c: Record<string, any>): { passed: boolean; score: number } {
   throw new Error(`unsupported evaluator ${c.evaluator}`);
 }
 
+function coordinatorTranscript(c: Record<string, any>): Record<string, any> {
+  const dispatched = new Set<string>(), results = new Set<string>();
+  let terminal = "running", settlement = "release_unspent", duplicates = 0;
+  for (const event of c.events) {
+    if (event.type === "dispatch" && terminal === "running") dispatched.add(event.worker);
+    else if (event.type === "duplicate_result") duplicates += 1;
+    else if (event.type === "result" && terminal === "running" && dispatched.has(event.worker) && !results.has(event.worker)) {
+      if (event.attribution === "same_operator") { settlement = "exclude_self_dealing"; continue; }
+      results.add(event.worker);
+      if (results.size >= c.quorum) { terminal = "completed"; settlement = "settle_contributors"; }
+    } else if (event.type === "cancel" && terminal === "running") terminal = "cancelled";
+    else if (event.type === "timeout" && terminal === "running") terminal = c.strict_replicas ? "local_fallback" : "failed";
+    else if (event.type === "coordinator_failure" && terminal === "running") terminal = "failed";
+  }
+  return { terminal, counted_results: results.size, duplicates_ignored: duplicates, settlement };
+}
+
 test("CIP conformance fixture is portable", () => {
   const data = fixture("cip-conformance-v0.json");
   for (const c of data.cases) assert.deepEqual(cip(c.input), c.expected, c.name);
@@ -83,4 +100,10 @@ test("CIP conformance fixture is portable", () => {
 test("ARCP evaluator fixture is portable", () => {
   const data = fixture("arcp-evaluator-v0.json");
   for (const c of data.cases) assert.deepEqual(evaluate(c), c.expected, c.name);
+});
+
+test("ARCP coordinator transcript fixture is portable", () => {
+  const data = fixture("arcp-coordinator-transcript-v0.json");
+  assert.equal(data.status, "pre-normative");
+  for (const c of data.cases) assert.deepEqual(coordinatorTranscript(c), c.expected, c.name);
 });
