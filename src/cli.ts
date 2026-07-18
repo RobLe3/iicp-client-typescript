@@ -135,6 +135,8 @@ export function startProviderAutoUpdate(options: ProviderAutoUpdateOptions = {})
 export interface ServeOpts {
   backendUrl: string;
   policyManifest?: string;
+  /** Explicit operator receipt-profile opt-in; undefined allows saved-node fallback. */
+  receiptProfiles?: string[];
   backendType: string;
   experimental?: boolean;
   /** #5 — Bearer key for an auth-requiring OpenAI-compat backend (LM Studio, hosted). Empty = none. */
@@ -162,6 +164,22 @@ export interface ServeOpts {
   withProxy?: boolean;
   /** TC-9c — pre-loaded from saved node config; passed to IicpNode so receipts work on restart. */
   nodeHmacKey?: string;
+}
+
+export function resolveReceiptProfiles(
+  cliValues: string[] | undefined,
+  envValue: string | undefined,
+  savedValues?: string[],
+): string[] {
+  const raw = cliValues ?? (envValue !== undefined ? envValue.split(",") : (savedValues ?? []));
+  const profiles = [...new Set(raw.map((value) => value.trim()).filter(Boolean))];
+  const unsupported = profiles.filter((value) => value !== "consumer_cosignature_v1");
+  if (unsupported.length > 0) {
+    throw new CliError(
+      `unsupported receipt profile(s): ${unsupported.join(", ")}. Supported: consumer_cosignature_v1.`,
+    );
+  }
+  return profiles;
 }
 
 function envOr(name: string, fallback?: string): string | undefined {
@@ -245,6 +263,7 @@ function printHelp(): void {
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for an auth'd backend (LM Studio, hosted); anthropic uses it as x-api-key\n` +
       `  --experimental             IICP_EXPERIMENTAL — enable an explicitly selected preview backend feature\n` +
       `  --policy-manifest FILE     IICP_POLICY_MANIFEST_FILE — sign and advertise a public node-policy JSON document\n` +
+      `  --receipt-profile PROFILE  IICP_SUPPORTED_RECEIPT_PROFILES — repeatable; supported: consumer_cosignature_v1\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --region REGION            IICP_REGION (e.g. us-east; unknown if unset)\n` +
@@ -323,6 +342,7 @@ function printServeHelp(): void {
       `  --backend-api-key KEY      IICP_BACKEND_API_KEY — Bearer key for auth'd backends\n` +
       `  --experimental             IICP_EXPERIMENTAL — enable an explicitly selected preview backend feature\n` +
       `  --policy-manifest FILE     IICP_POLICY_MANIFEST_FILE — sign and advertise a public node-policy JSON document\n` +
+      `  --receipt-profile PROFILE  IICP_SUPPORTED_RECEIPT_PROFILES — repeatable; supported: consumer_cosignature_v1\n` +
       `  --public-endpoint URL      IICP_PUBLIC_ENDPOINT — externally reachable URL of this node\n` +
       `  --directory-url URL        IICP_DIRECTORY_URL (default https://iicp.network/api)\n` +
       `  --region REGION            IICP_REGION (e.g. eu-central)\n` +
@@ -777,6 +797,7 @@ export function applySavedNode(opts: ServeOpts, saved: NodeIdentity): ServeOpts 
     autoDetectNat: opts.autoDetectNat || saved.auto_detect_nat,
     externalIpProbeUrl: opts.externalIpProbeUrl || saved.external_ip_probe_url,
     nodeHmacKey: opts.nodeHmacKey || saved.node_hmac_key || undefined,
+    receiptProfiles: opts.receiptProfiles ?? resolveReceiptProfiles(undefined, undefined, saved.supported_receipt_profiles),
   };
 }
 
@@ -1175,6 +1196,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
     operatorCreatedAt: _opCreatedAt,
     operatorIntegrityHash: _opIntegrityHash,
     policyManifest,
+    supportedReceiptProfiles: opts.receiptProfiles ?? [],
     // #494 — wire backend URL for live health_models probing in heartbeats.
     backendUrl: opts.backendUrl || undefined,
     backendApiKey: opts.backendApiKey || undefined,
@@ -3110,6 +3132,7 @@ async function dispatch(argv: string[]): Promise<number> {
       node: { type: "string" },
       "backend-url": { type: "string" },
       "policy-manifest": { type: "string" },
+      "receipt-profile": { type: "string", multiple: true },
       "backend-type": { type: "string" },
       "backend-api-key": { type: "string" },
       experimental: { type: "boolean" },
@@ -3148,6 +3171,13 @@ async function dispatch(argv: string[]): Promise<number> {
     node: (values.node as string | undefined) ?? envOr("IICP_NODE_NAME") ?? "",
     backendUrl: (values["backend-url"] as string | undefined) ?? envOr("IICP_BACKEND_URL") ?? "",
     policyManifest: (values["policy-manifest"] as string | undefined) ?? envOr("IICP_POLICY_MANIFEST_FILE") ?? "",
+    receiptProfiles:
+      values["receipt-profile"] !== undefined || process.env.IICP_SUPPORTED_RECEIPT_PROFILES !== undefined
+        ? resolveReceiptProfiles(
+            values["receipt-profile"] as string[] | undefined,
+            envOr("IICP_SUPPORTED_RECEIPT_PROFILES"),
+          )
+        : undefined,
     backendType:
       (values["backend-type"] as string | undefined) ??
       envOr("IICP_BACKEND_TYPE", "openai_compat")!,
