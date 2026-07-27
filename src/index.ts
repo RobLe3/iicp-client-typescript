@@ -157,6 +157,19 @@ export type {
   TaskRequest,
   TaskResponse,
 } from "./types.js";
+export {
+  DISPATCH_ADMISSION_V2_PROFILE,
+  TERMINAL_ADMISSION_STATES,
+  DispatchAdmissionStorageError,
+  SqliteDispatchAdmissionStore,
+  evaluateDispatchAdmission,
+} from "./dispatch_admission.js";
+export type {
+  DispatchAdmissionClaim,
+  DispatchAdmissionDecision,
+  DispatchAdmissionRecord,
+  DispatchAdmissionStore,
+} from "./dispatch_admission.js";
 export { evaluatePolicyDataHandling } from "./policy_data_handling.js";
 export { evaluatePolicyOperationalEvidence } from "./policy_operational_evidence.js";
 export type { PolicyEvidenceDecision, PolicyEvidenceRecord } from "./policy_operational_evidence.js";
