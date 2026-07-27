@@ -46,6 +46,7 @@ describe("model drift re-registration (#494)", () => {
     const node = makeNode();
     // Simulate prior registration: registered phi3:mini + llama3.2:1b
     (node as any)._registeredModels = new Set(["phi3:mini", "llama3.2:1b"]);
+    (node as any)._runtimeToken = "tok-current-ts";
 
     const registerCalls: unknown[] = [];
     globalThis.fetch = async (url: RequestInfo | URL, opts?: RequestInit) => {
@@ -71,6 +72,7 @@ describe("model drift re-registration (#494)", () => {
 
     assert.equal(registerCalls.length, 1, "re-register must fire when models drift");
     const body = registerCalls[0] as Record<string, unknown>;
+    assert.equal(body.current_node_token, "tok-current-ts");
     const caps = (body.capabilities as { models?: string[] }[]) ?? [];
     const registered = new Set(caps.flatMap((c) => c.models ?? []));
     assert.deepEqual(registered, new Set(["phi3:mini"]));
