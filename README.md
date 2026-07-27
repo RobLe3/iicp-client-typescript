@@ -358,6 +358,19 @@ iicp-node serve --backend-type meshllm --model <meshllm-model-id>
 The upstream experimental `mesh` ensemble is never selected automatically. Use it
 only with an explicit `--model mesh --experimental` opt-in.
 
+### Experimental durable dispatch admission
+
+`SqliteDispatchAdmissionStore` provides provider-local, single-use admission
+for the pre-normative `dispatch-admission:v2` profile. It is never enabled by
+`IicpNode` automatically: verify the dispatch ticket first and invoke
+`evaluateDispatchAdmission` explicitly. The adapter stores only JTI and
+content-free binding digests.
+
+The SQLite adapter uses Node's built-in `node:sqlite` and therefore requires
+Node 22.5 or newer when instantiated. Importing the SDK and all established
+features remain supported on Node 18+. Storage failure rejects admission
+instead of falling back to an in-memory replay cache.
+
 MeshLLM remains the local inference runtime. IICP uses its local OpenAI-compatible
 gateway for task execution and does not publish MeshLLM peer or topology details
 through IICP discovery.
