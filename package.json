@@ -19,7 +19,8 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "test": "tsx --test tests/*.test.ts",
+    "test": "npm run repository-hygiene && tsx --test tests/*.test.ts",
+    "repository-hygiene": "node scripts/check-repository-hygiene.mjs",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
