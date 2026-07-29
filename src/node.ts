@@ -602,11 +602,17 @@ export class IicpNode {
   }
 
   async register(): Promise<string> {
+    return this._registerWithModels();
+  }
+
+  private async _registerWithModels(modelOverride?: string[]): Promise<string> {
     // spec/iicp-dir.md §3.1 REGISTER + v0.7.0 dual-endpoint extension.
     // Pre-iter-1412 sent a non-spec flat-`intent` shape that the production
     // directory rejects with 422; fixed below.
-    const models = this._cfg.model ? [this._cfg.model] : [];
-    if (this._cfg.capabilities.length) {
+    const models = modelOverride
+      ? [...new Set(modelOverride)]
+      : this._cfg.model ? [this._cfg.model] : [];
+    if (!modelOverride && this._cfg.capabilities.length) {
       // Legacy flat capabilities list → fold into the models array.
       for (const m of this._cfg.capabilities) {
         if (!models.includes(m)) models.push(m);
@@ -710,7 +716,13 @@ export class IicpNode {
       }
     }
     this._persistSavedCredentials(token);
-    // #494 — track registered model set for drift detection.
+    // Commit drift only after the directory accepts this projection.
+    // `/iicp/health` reads the same config and therefore cannot move ahead of
+    // the registered directory state after a failed request.
+    if (modelOverride) {
+      this._cfg.model = models[0];
+      this._cfg.capabilities = models.slice(1);
+    }
     this._registeredModels = new Set(models);
     return token;
   }
@@ -845,12 +857,9 @@ export class IicpNode {
     const liveSet = new Set(live);
     if (liveSet.size === this._registeredModels.size && [...liveSet].every((m) => this._registeredModels.has(m)))
       return token;
-    // Drift detected — update config and re-register.
     const liveSorted = [...liveSet].sort();
-    this._cfg.model = liveSorted[0];
-    this._cfg.capabilities = liveSorted.slice(1);
     try {
-      const newToken = await this.register();
+      const newToken = await this._registerWithModels(liveSorted);
       return newToken;
     } catch {
       /* soft failure — retry next tick */
