@@ -156,6 +156,34 @@ describe("model drift re-registration (#494)", () => {
     assert.equal(registerFired, false, "must not re-register when models unchanged");
   });
 
+  it("preserves the health model projection when re-registration fails", async () => {
+    const node = makeNode();
+    (node as any)._registeredModels = new Set(["phi3:mini", "llama3.2:1b"]);
+
+    globalThis.fetch = async (url: RequestInfo | URL) => {
+      const u = url.toString();
+      if (u.includes("/api/tags")) {
+        return new Response(JSON.stringify({ models: [{ name: "new-model" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (u.includes("/v1/register")) {
+        return new Response("{}", { status: 503 });
+      }
+      return new Response("{}", { status: 200 });
+    };
+
+    await (node as any)._maybeReregisterOnModelDrift("tok-old");
+
+    assert.equal((node as any)._cfg.model, "phi3:mini");
+    assert.deepEqual((node as any)._cfg.capabilities, ["llama3.2:1b"]);
+    assert.deepEqual(
+      (node as any)._registeredModels,
+      new Set(["phi3:mini", "llama3.2:1b"]),
+    );
+  });
+
   it("does not re-register when backend returns empty model list", async () => {
     const node = makeNode();
     (node as any)._registeredModels = new Set(["phi3:mini"]);
