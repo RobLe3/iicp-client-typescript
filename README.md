@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml/badge.svg)](https://github.com/RobLe3/iicp-client-typescript/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Protocol](https://img.shields.io/badge/IICP-v1.7-indigo.svg)](https://iicp.network/spec)
+[![Protocol](https://img.shields.io/badge/IICP-v1.9-indigo.svg)](https://github.com/RobLe3/IICP)
 [![npm](https://img.shields.io/badge/npm-%40iicp%2Fclient-red?logo=npm)](https://www.npmjs.com/package/@iicp/client)
 
 Use the open AI mesh from your TypeScript or JavaScript app. Install the
@@ -615,7 +615,9 @@ npm run build      # emit to dist/
 
 ## Links
 
-- [Protocol spec](https://iicp.network/spec) — full IICP specification
+- [Protocol specification](https://github.com/RobLe3/IICP) — normative IICP documents
+- [Agent bootstrap guide](https://github.com/RobLe3/IICP/blob/main/docs/agent-bootstrap.md) — connect a consumer or provider agent
+- [Implementation registry](https://github.com/RobLe3/IICP/blob/main/IMPLEMENTATIONS.md) — supported and preview components
 - [Node setup guide](https://iicp.network/docs/node-setup) — run your own node
 - [Error reference](https://iicp.network/docs/error-reference) — all error codes
 - [iicp-client-python](https://github.com/RobLe3/iicp-client-python) — Python SDK
