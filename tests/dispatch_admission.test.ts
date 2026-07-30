@@ -11,6 +11,15 @@ import {
   evaluateDispatchAdmission,
 } from "../src/index.js";
 
+const sqliteTest = (() => {
+  try {
+    require("node:sqlite");
+    return test;
+  } catch {
+    return test.skip;
+  }
+})();
+
 interface FixtureCase {
   id: string;
   claim: DispatchAdmissionClaim;
@@ -44,7 +53,7 @@ function temporaryStore(): {
   return { dir, path, store: new SqliteDispatchAdmissionStore(path) };
 }
 
-test("shared dispatch admission vectors pass", () => {
+sqliteTest("shared dispatch admission vectors pass", () => {
   assert.equal(fixture.profile, DISPATCH_ADMISSION_V2_PROFILE);
   for (const vector of fixture.cases) {
     const { dir, path } = temporaryStore();
@@ -78,7 +87,7 @@ test("shared dispatch admission vectors pass", () => {
   }
 });
 
-test("concurrent store instances admit a JTI exactly once", async () => {
+sqliteTest("concurrent store instances admit a JTI exactly once", async () => {
   const { dir, path } = temporaryStore();
   try {
     const claim: DispatchAdmissionClaim = {
@@ -109,7 +118,7 @@ test("concurrent store instances admit a JTI exactly once", async () => {
   }
 });
 
-test("terminal transitions persist and cleanup is bounded", () => {
+sqliteTest("terminal transitions persist and cleanup is bounded", () => {
   const { dir, path, store } = temporaryStore();
   try {
     for (let index = 0; index < 3; index += 1) {
