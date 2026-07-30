@@ -15,7 +15,8 @@ test("canonical dispatch ticket vectors fail closed", () => {
    const token = vector.token === "valid" ? fixture.valid.token : vector.token === "valid+0" ? `${fixture.valid.token}0` : vector.token === "wrong_audience" ? fixture.wrong_audience.token : vector.token;
    const result = verifyDispatchRouteTicket(token, fixture.public_key_hex, vector.issuer, vector.node_id, vector.intent, vector.now_s);
    assert.equal(Boolean(result), vector.expected === "valid", vector.name);
-}
+ }
+});
 
 test("policy manifest binding is additive and fails closed when present", () => {
  const claims = { v:1 as const, typ:"dispatch-route-ticket" as const, iss:"https://directory.example", aud:"iicp.directory.dispatch", jti:"0".repeat(24), node_id:"node", intent:"urn:iicp:intent:llm:chat:v1", iat:1, exp:2, policy_manifest_sha256:"a".repeat(64) };
@@ -25,5 +26,4 @@ test("policy manifest binding is additive and fails closed when present", () => 
  assert.equal(policyManifestBindingMatches(claims, altered), false);
  assert.equal(policyManifestBindingMatches(claims, {}), false);
  assert.equal(policyManifestBindingMatches({ ...claims, policy_manifest_sha256: undefined }, {}), true);
-});
 });
