@@ -9,6 +9,12 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.99] — 2026-07-31
+
+### Changed — supported-runtime verification
+- Package hygiene checks now work in detached source trees, and the optional SQLite dispatch-admission adapter is skipped on Node.js 18 where `node:sqlite` is unavailable.
+- Dispatch-ticket cases now run independently on every supported runtime. Runtime behavior and the IICP wire contract are unchanged.
+
 ## [0.7.98] — 2026-07-29
 
 ### Fixed — transactional model-health recovery
