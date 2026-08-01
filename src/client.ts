@@ -242,6 +242,15 @@ export class IicpClient {
       route_evidence: typeof raw.route_evidence === "string" ? raw.route_evidence : undefined,
       routing_hint: typeof raw.routing_hint === "string" ? raw.routing_hint : undefined,
       browser_usable: typeof raw.browser_usable === "boolean" ? raw.browser_usable : undefined,
+      latency_evidence: raw.latency_evidence && typeof raw.latency_evidence === "object"
+        ? raw.latency_evidence as Record<string, unknown> : undefined,
+      health_reasons: Array.isArray(raw.health_reasons)
+        ? raw.health_reasons.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+        : undefined,
+      trust_progress: raw.trust_progress && typeof raw.trust_progress === "object"
+        ? raw.trust_progress as Record<string, unknown> : undefined,
+      sdk_release: raw.sdk_release && typeof raw.sdk_release === "object"
+        ? raw.sdk_release as Record<string, unknown> : undefined,
       node_policy_manifest: raw.node_policy_manifest && typeof raw.node_policy_manifest === "object"
         ? raw.node_policy_manifest as Record<string, unknown>
         : raw.node_policy_manifest === null ? null : undefined,
@@ -342,7 +351,7 @@ export class IicpClient {
       5_000,
       traceparent,
     );
-    const response = data as { nodes?: unknown[]; profile_negotiation?: ProfileNegotiation };
+    const response = data as { nodes?: unknown[]; profile_negotiation?: ProfileNegotiation; diversity_evidence?: Record<string, unknown> };
     const negotiation = response.profile_negotiation;
     if (o.profile_request?.required && (!negotiation || negotiation.status !== "compatible" || negotiation.dispatch_allowed !== true)) {
       throw new IicpError(
@@ -367,7 +376,7 @@ export class IicpClient {
       }
       nodes.push(node);
     }
-    return { nodes, profile_negotiation: negotiation };
+    return { nodes, profile_negotiation: negotiation, diversity_evidence: response.diversity_evidence };
   }
 
   /** Backwards-compatible node-only discovery helper. */
