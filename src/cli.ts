@@ -66,6 +66,13 @@ import {
 } from "./identity.js";
 import { issueDelegation, signOperatorSelfService, signRename } from "./delegation.js";
 import { McpToolPolicy, toolRiskLabel } from "./mcp_policy.js";
+import {
+  LEGACY_MCP_REVISION,
+  MODERN_MCP_REVISION,
+  SUPPORTED_MCP_REVISIONS,
+  buildModernMcpRequest,
+  validateModernMcpResponse,
+} from "./mcp_negotiation.js";
 
 type UpdaterModule = typeof import("./updater.js");
 
@@ -2814,7 +2821,10 @@ async function runMcpGateway(argv: string[]): Promise<number> {
         `  --allow-dangerous-tools  IICP_MCP_ALLOW_DANGEROUS_TOOLS (requires all controls below)\n` +
         `  --authz-policy ID    IICP_MCP_AUTHZ_POLICY\n` +
         `  --sandbox PROFILE    IICP_MCP_SANDBOX (strict/container/sandbox)\n` +
-        `  --audit-redaction    IICP_MCP_AUDIT_REDACTION\n`,
+        `  --audit-redaction    IICP_MCP_AUDIT_REDACTION\n` +
+        `  --mcp-revision REV   IICP_MCP_REVISION (legacy default; 2026-07-28 is opt-in)\n` +
+        `  --mcp-server-name N  IICP_MCP_SERVER_NAME (required for modern MCP)\n` +
+        `  --mcp-extensions X   IICP_MCP_EXTENSIONS (tasks,skills,apps)\n`,
     );
     return 0;
   }
@@ -2834,11 +2844,26 @@ async function runMcpGateway(argv: string[]): Promise<number> {
       "authz-policy": { type: "string" },
       sandbox: { type: "string" },
       "audit-redaction": { type: "boolean" },
+      "mcp-revision": { type: "string" },
+      "mcp-server-name": { type: "string" },
+      "mcp-extensions": { type: "string" },
     },
     allowPositionals: false,
   });
 
   const mcpUrl = ((values["mcp-url"] as string | undefined) ?? envOr("IICP_MCP_URL") ?? "http://localhost:8001").replace(/\/$/, "");
+  const mcpRevision = (values["mcp-revision"] as string | undefined) ?? envOr("IICP_MCP_REVISION") ?? LEGACY_MCP_REVISION;
+  const mcpServerName = ((values["mcp-server-name"] as string | undefined) ?? envOr("IICP_MCP_SERVER_NAME") ?? "").trim();
+  const mcpExtensions = ((values["mcp-extensions"] as string | undefined) ?? envOr("IICP_MCP_EXTENSIONS") ?? "")
+    .split(",").map((extension) => extension.trim().toLowerCase()).filter(Boolean);
+  if (![...SUPPORTED_MCP_REVISIONS].includes(mcpRevision as typeof SUPPORTED_MCP_REVISIONS[number])) {
+    process.stderr.write(`ERROR: unsupported MCP revision ${mcpRevision}.\n`);
+    return 2;
+  }
+  if (mcpRevision === MODERN_MCP_REVISION && !mcpServerName) {
+    process.stderr.write("ERROR: --mcp-server-name is required with MCP 2026-07-28.\n");
+    return 2;
+  }
   const rawTools = ((values["tools"] as string | undefined) ?? envOr("IICP_MCP_TOOLS") ?? "")
     .split(",").map((t) => t.trim()).filter(Boolean);
   const toolPolicy = new McpToolPolicy({
@@ -2872,9 +2897,7 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   const publicEndpoint = (values["public-endpoint"] as string | undefined) ?? envOr("IICP_PUBLIC_ENDPOINT") ?? `http://localhost:${port}`;
   const intents = activeTools.map(_toolToIntent);
   const capabilities = activeTools.map((tool, index) => ({
-    intent: intents[index],
-    models: [`mcp:${tool}`],
-    max_tokens: 65536,
+    intent: intents[index], models: [`mcp:${tool}`], max_tokens: 65536,
   }));
 
   let nodeToken = envOr("IICP_NODE_TOKEN") ?? "";
@@ -2918,15 +2941,20 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   let mcpRpcId = 0;
   async function callMcp(toolName: string, args: Record<string, unknown>): Promise<unknown> {
     mcpRpcId += 1;
-    const rpc = { jsonrpc: "2.0", id: mcpRpcId, method: "tools/call", params: { name: toolName, arguments: args } };
+    const params = { name: toolName, arguments: args };
+    const modern = mcpRevision === MODERN_MCP_REVISION
+      ? buildModernMcpRequest({ requestId: mcpRpcId, method: "tools/call", name: toolName, params, extensions: mcpExtensions })
+      : null;
+    const rpc = modern?.body ?? { jsonrpc: "2.0", id: mcpRpcId, method: "tools/call", params };
     const resp = await fetch(`${mcpUrl}/mcp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...(modern?.headers ?? {}) },
       body: JSON.stringify(rpc),
       signal: AbortSignal.timeout(30_000),
     });
     if (!resp.ok) throw new Error(`MCP server unreachable: ${resp.status}`);
     const data = await resp.json() as Record<string, unknown>;
+    if (modern) validateModernMcpResponse(data, mcpServerName);
     if (data["error"]) throw new Error("MCP tool returned an error");
     return data["result"];
   }

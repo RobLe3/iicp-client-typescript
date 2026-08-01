@@ -139,6 +139,7 @@ describe("mcp-gateway round-trip", () => {
     const issuedToken = "gw-tok-ts-001";
 
     const registerCalls: unknown[] = [];
+    const mcpCalls: Array<{ headers: http.IncomingHttpHeaders; body: Record<string, unknown> }> = [];
 
     // Mock directory
     const dirServer = http.createServer((req, res) => {
@@ -163,10 +164,12 @@ describe("mcp-gateway round-trip", () => {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
+        mcpCalls.push({ headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown> });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
+          _meta: { protocolVersion: "2026-07-28", server: { name: "mock-tools" } },
           result: { content: [{ type: "text", text: "file-contents" }] },
         }));
       });
@@ -185,6 +188,9 @@ describe("mcp-gateway round-trip", () => {
       "--host", "127.0.0.1",
       "--public-endpoint", `http://127.0.0.1:${gwPort}`,
       "--region", "test",
+      "--mcp-revision", "2026-07-28",
+      "--mcp-server-name", "mock-tools",
+      "--mcp-extensions", "tasks",
     ]);
     await waitPort(gwPort);
 
@@ -210,6 +216,10 @@ describe("mcp-gateway round-trip", () => {
     assert.equal(taskResp["status"], "completed");
     assert.equal(taskResp["task_id"], "ts-task-001");
     assert.equal((taskResp["policy_receipt"] as Record<string, unknown>)["argument_content"], "excluded");
+    assert.equal(mcpCalls[0]?.headers["mcp-protocol-version"], "2026-07-28");
+    assert.equal(mcpCalls[0]?.headers["mcp-method"], "tools/call");
+    const mcpParams = mcpCalls[0]?.body["params"] as Record<string, unknown>;
+    assert.deepEqual((mcpParams["_meta"] as Record<string, unknown>)["extensions"], ["tasks"]);
 
     // Verify registration
     assert.equal(registerCalls.length, 1);
