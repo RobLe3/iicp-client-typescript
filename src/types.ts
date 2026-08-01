@@ -126,6 +126,7 @@ export interface ProfileNegotiation {
 export interface DiscoveryResult {
   nodes: Node[];
   profile_negotiation?: ProfileNegotiation;
+  diversity_evidence?: Record<string, unknown>;
 }
 
 export interface CxPublicKey {
@@ -184,6 +185,10 @@ export interface Node {
   route_evidence?: string;
   routing_hint?: string;
   browser_usable?: boolean;
+  latency_evidence?: Record<string, unknown>;
+  health_reasons?: Array<Record<string, unknown>>;
+  trust_progress?: Record<string, unknown>;
+  sdk_release?: Record<string, unknown>;
   /** Phase-1 compliance: public, self-attested node policy manifest. */
   node_policy_manifest?: NodePolicyManifest | null;
   dispatch_ticket_id_prefix?: string;
