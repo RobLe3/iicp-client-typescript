@@ -119,8 +119,18 @@ describe("provider auto-update loop", () => {
       });
     });
 
-    await ticked;
-    stop?.();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        ticked,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("auto-update tick timed out")), 1_000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      stop?.();
+    }
   });
 
   it("respects IICP_AUTO_UPDATE opt-out before scheduling ticks", async () => {
