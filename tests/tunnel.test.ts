@@ -128,7 +128,7 @@ describe("initiation", () => {
 
   it("detects Cloudflare Quick Tunnel rate limits and pauses follow-up creation", async () => {
     await assert.rejects(
-      () => openQuickTunnel(9484, 1_000, fakeBin({ rateLimited: true })),
+      () => openQuickTunnel(9484, 5_000, fakeBin({ rateLimited: true })),
       /rate limit detected/,
     );
     await assert.rejects(
@@ -139,7 +139,7 @@ describe("initiation", () => {
 
   it("persists rate-limit cooldown across supervised restarts", async () => {
     await assert.rejects(
-      () => openQuickTunnel(9484, 1_000, fakeBin({ rateLimited: true })),
+      () => openQuickTunnel(9484, 5_000, fakeBin({ rateLimited: true })),
       /rate limit detected/,
     );
 
