@@ -19,9 +19,10 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "test": "npm run repository-hygiene && tsx --test tests/*.test.ts",
+    "test": "npm run repository-hygiene && npm run dockerfile-security && tsx --test tests/*.test.ts",
     "repository-hygiene": "node scripts/check-repository-hygiene.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dockerfile-security": "node scripts/check-dockerfile-security.mjs"
   },
   "keywords": [
     "iicp",
