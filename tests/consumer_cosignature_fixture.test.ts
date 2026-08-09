@@ -29,10 +29,10 @@ function evaluate(value: Record<string, string>): Record<string, string> {
   if (value.nonce !== "fresh") return { action: "reject", reason: "dispatch_nonce_replayed", trust_weight: "0.0" };
   if (value.provider_signature !== "valid") return { action: "reject", reason: "provider_signature_invalid", trust_weight: "0.0" };
   if (value.consumer_signature !== "valid") {
-    if (value.consumer_signature === "missing" && value.mode === "optional") {
-      return { action: "accept_legacy", reason: "consumer_signature_missing_optional", trust_weight: "0.0" };
+    if (value.consumer_signature === "missing" && value.mode === "legacy") {
+      return { action: "accept_legacy", reason: "consumer_signature_missing_legacy", trust_weight: "0.0" };
     }
-    const reason = value.consumer_signature === "missing" ? "consumer_signature_required" : "consumer_signature_invalid";
+    const reason = value.consumer_signature === "missing" ? "consumer_signature_required" : value.consumer_signature === "wrong_signer" ? "consumer_signer_mismatch" : "consumer_signature_invalid";
     return { action: "reject", reason, trust_weight: "0.0" };
   }
   if (value.relationship === "same_node") return { action: "exclude", reason: "self_node", trust_weight: "0.0" };
