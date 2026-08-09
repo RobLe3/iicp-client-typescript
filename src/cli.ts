@@ -65,6 +65,8 @@ import {
   type NodeIdentity,
 } from "./identity.js";
 import { issueDelegation, signOperatorSelfService, signRename } from "./delegation.js";
+import { evaluateManagedOperator } from "./operator_profile.js";
+import { autoUpdateEnabled } from "./updater.js";
 import { McpToolPolicy, toolRiskLabel } from "./mcp_policy.js";
 import {
   LEGACY_MCP_REVISION,
@@ -819,21 +821,6 @@ async function runServe(opts: ServeOpts): Promise<number> {
     });
   }
 
-  // 2-C: co-host the compat proxy on loopback alongside the node, supervised so a
-  // proxy failure logs but never drops the network-facing node. Forced to 127.0.0.1.
-  if (opts.withProxy) {
-    const pport = envInt("IICP_PROXY_PORT", 9483);
-    const pclient = new IicpClient({
-      directory_url: opts.directoryUrl,
-      region: opts.region,
-    }) as unknown as TaskClient;
-    const pserver = createProxyServer(pclient);
-    pserver.on("error", (e) => process.stderr.write(`co-hosted proxy error (node continues): ${String(e)}\n`));
-    pserver.listen(pport, "127.0.0.1", () =>
-      process.stdout.write(`co-hosted proxy → http://127.0.0.1:${pport} (OpenAI/Ollama/Anthropic compat)\n`),
-    );
-  }
-
   // Phase 2 (#529/#55) — capture any cached node_token so the node can prove
   // ownership on re-registration (IICP-E050 token path).
   let savedNodeToken: string | undefined;
@@ -847,6 +834,35 @@ async function runServe(opts: ServeOpts): Promise<number> {
     }
     savedNodeToken = saved.node_token ?? undefined;
     opts = applySavedNode(opts, saved);
+  }
+
+  const _op = loadOperator();
+  const managedDecision = evaluateManagedOperator({
+    mode: (process.env.IICP_OPERATOR_PROFILE ?? "convenience").trim().toLowerCase(),
+    authentication_configured: !!_op && operatorIsKeyBacked(_op),
+    identity_storage_protected: !!_op && operatorIsKeyBacked(_op) && operatorIsEncrypted(_op),
+    auto_update_requested: autoUpdateEnabled(),
+    update_authenticated: envBool("IICP_MANAGED_UPDATE_AUTHENTICATED"),
+    rollback_verified: envBool("IICP_MANAGED_ROLLBACK_VERIFIED"),
+    upnp_requested: opts.autoDetectNat && !envBool("IICP_SKIP_UPNP"),
+    tunnel_requested: opts.tunnel !== false,
+    upnp_approved: envBool("IICP_MANAGED_UPNP_APPROVED"),
+    tunnel_approved: envBool("IICP_MANAGED_TUNNEL_APPROVED"),
+  });
+  if (!managedDecision.accepted) {
+    process.stderr.write(`ERROR: managed operator startup rejected: ${managedDecision.reason}\n`);
+    return 2;
+  }
+
+  // Start the optional co-hosted listener only after the operator profile passes.
+  if (opts.withProxy) {
+    const pport = envInt("IICP_PROXY_PORT", 9483);
+    const pclient = new IicpClient({ directory_url: opts.directoryUrl, region: opts.region }) as unknown as TaskClient;
+    const pserver = createProxyServer(pclient);
+    pserver.on("error", (e) => process.stderr.write(`co-hosted proxy error (node continues): ${String(e)}\n`));
+    pserver.listen(pport, "127.0.0.1", () =>
+      process.stdout.write(`co-hosted proxy → http://127.0.0.1:${pport} (OpenAI/Ollama/Anthropic compat)\n`),
+    );
   }
 
   // #410/#414 — built-in backend-url fallback applied LAST (after flag/env/saved-config),
@@ -1161,7 +1177,6 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // #463/#464 — bind the operator identity: issue a delegation FROM the (key-backed) operator
   // identity for this node and advertise the public display_name. The directory verifies the
   // delegation (operator_pub == operator_id) and records the operator. Never sends the secret/contact.
-  const _op = loadOperator();
   let _opDelegation: ReturnType<typeof issueDelegation> | undefined;
   let _opDisplayName: string | undefined;
   let _opCreatedAt: string | undefined;
