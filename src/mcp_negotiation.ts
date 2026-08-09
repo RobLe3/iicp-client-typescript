@@ -11,6 +11,18 @@ export class McpNegotiationError extends Error {
 }
 
 export function evaluateMcpEra(input: Record<string, unknown>): Record<string, unknown> {
+  const authorizationFailures: Array<[string, string]> = [
+    ["oauth_issuer_matches", "oauth_issuer_mismatch"],
+    ["oauth_audience_matches", "oauth_audience_mismatch"],
+    ["resource_indicator_present", "missing_resource_indicator"],
+    ["protected_resource_metadata_valid", "invalid_protected_resource_metadata"],
+    ["pkce_valid", "pkce_required"],
+    ["consent_granted", "consent_required"],
+    ["audit_output_redacted", "audit_redaction_required"],
+  ];
+  for (const [field, reason] of authorizationFailures) {
+    if (input[field] === false) return { accepted: false, reason };
+  }
   if (input["downstream_credential_source"] === "caller") return { accepted: false, reason: "credential_passthrough_prohibited" };
   if (input["server_identity_matches_selected_endpoint"] === false) return { accepted: false, reason: "server_identity_mismatch" };
   if (input["modern_request_failed"] && !input["legacy_authentication_available"]) return { accepted: false, reason: "unauthenticated_downgrade" };
