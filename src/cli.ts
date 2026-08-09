@@ -2939,21 +2939,108 @@ async function runMcpGateway(argv: string[]): Promise<number> {
   }
 
   let mcpRpcId = 0;
-  async function callMcp(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  let legacySessionId: string | undefined;
+  let legacyInitialization: Promise<void> | undefined;
+
+  class McpLegacySessionExpired extends Error {}
+
+  async function mcpResponseJson(response: Response): Promise<Record<string, unknown>> {
+    const raw = await response.text();
+    if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+      const events = raw.split(/\r?\n/).filter((line) => line.startsWith("data: ")).map((line) => line.slice(6));
+      if (!events.length) throw new Error("MCP server returned an empty event stream");
+      return JSON.parse(events.at(-1) ?? "") as Record<string, unknown>;
+    }
+    return JSON.parse(raw) as Record<string, unknown>;
+  }
+
+  async function initializeLegacySession(): Promise<void> {
+    if (legacyInitialization) return legacyInitialization;
+    legacyInitialization = (async () => {
+      const id = ++mcpRpcId;
+      const headers = {
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": LEGACY_MCP_REVISION,
+        "Accept": "application/json, text/event-stream",
+      };
+      const init = await fetch(`${mcpUrl}/mcp`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0", id, method: "initialize",
+          params: { protocolVersion: LEGACY_MCP_REVISION, capabilities: {}, clientInfo: { name: "iicp-mcp-gateway", version: "0.7" } },
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!init.ok) throw new Error(`MCP legacy initialization failed: ${init.status}`);
+      const initData = await mcpResponseJson(init);
+      if (initData["error"]) throw new Error("MCP server rejected legacy initialization");
+      const sessionId = init.headers.get("mcp-session-id");
+      if (!sessionId) throw new Error("MCP server did not return a legacy session identifier");
+      const initialized = await fetch(`${mcpUrl}/mcp`, {
+        method: "POST",
+        headers: { ...headers, "Mcp-Session-Id": sessionId },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!initialized.ok) throw new Error(`MCP legacy initialized notification failed: ${initialized.status}`);
+      legacySessionId = sessionId;
+    })();
+    try { await legacyInitialization; } finally { legacyInitialization = undefined; }
+  }
+
+  async function legacyToolCall(rpc: Record<string, unknown>, replaySafe: boolean): Promise<Record<string, unknown>> {
+    if (!legacySessionId) await initializeLegacySession();
+    const send = async (): Promise<Record<string, unknown>> => {
+      if (!legacySessionId) throw new Error("legacy MCP session identifier is unavailable");
+      const response = await fetch(`${mcpUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "MCP-Protocol-Version": LEGACY_MCP_REVISION,
+          "Mcp-Session-Id": legacySessionId,
+          "Accept": "application/json, text/event-stream",
+        },
+        body: JSON.stringify(rpc),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (response.status === 401 || response.status === 404) {
+        legacySessionId = undefined;
+        throw new McpLegacySessionExpired("MCP legacy session expired");
+      }
+      if (!response.ok) throw new Error(`MCP server unreachable: ${response.status}`);
+      return mcpResponseJson(response);
+    };
+    try { return await send(); }
+    catch (error) {
+      if (!(error instanceof McpLegacySessionExpired)) throw error;
+      if (!replaySafe) throw new McpLegacySessionExpired("MCP legacy session expired; caller retry required");
+      await initializeLegacySession();
+      try { return await send(); }
+      catch (retryError) {
+        if (retryError instanceof McpLegacySessionExpired) throw new Error("MCP legacy session expired after one reinitialization");
+        throw retryError;
+      }
+    }
+  }
+
+  async function callMcp(toolName: string, args: Record<string, unknown>, replaySafe = false): Promise<unknown> {
     mcpRpcId += 1;
     const params = { name: toolName, arguments: args };
     const modern = mcpRevision === MODERN_MCP_REVISION
       ? buildModernMcpRequest({ requestId: mcpRpcId, method: "tools/call", name: toolName, params, extensions: mcpExtensions })
       : null;
     const rpc = modern?.body ?? { jsonrpc: "2.0", id: mcpRpcId, method: "tools/call", params };
-    const resp = await fetch(`${mcpUrl}/mcp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...(modern?.headers ?? {}) },
-      body: JSON.stringify(rpc),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!resp.ok) throw new Error(`MCP server unreachable: ${resp.status}`);
-    const data = await resp.json() as Record<string, unknown>;
+    const data = modern
+      ? await (async () => {
+          const resp = await fetch(`${mcpUrl}/mcp`, {
+            method: "POST", headers: { "Content-Type": "application/json", ...modern.headers },
+            body: JSON.stringify(rpc), signal: AbortSignal.timeout(30_000),
+          });
+          if (!resp.ok) throw new Error(`MCP server unreachable: ${resp.status}`);
+          return resp.json() as Promise<Record<string, unknown>>;
+        })()
+      : await legacyToolCall(rpc, replaySafe);
     if (modern) validateModernMcpResponse(data, mcpServerName);
     if (data["error"]) throw new Error("MCP tool returned an error");
     return data["result"];
@@ -3019,14 +3106,14 @@ async function runMcpGateway(argv: string[]): Promise<number> {
       if (activeTools.length && !activeTools.includes(toolName)) { res.writeHead(404, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Tool not available" })); return; }
       const taskId = (body["task_id"] as string | undefined) ?? randomUUID();
       try {
-        const result = await callMcp(toolName, args);
+        const result = await callMcp(toolName, args, payload["mcp_replay_safe"] === true);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ task_id: taskId, status: "completed", result, policy_receipt: toolPolicy.receipt(toolName, "allowed", argumentCount) }));
       } catch (err) {
         const msg = (err as Error).message ?? "error";
-        const code = msg.includes("unreachable") ? 502 : 422;
+        const code = err instanceof McpLegacySessionExpired ? 409 : msg.includes("unreachable") ? 502 : 422;
         res.writeHead(code, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: msg }));
+        res.end(JSON.stringify(err instanceof McpLegacySessionExpired ? { error: "mcp_session_expired_retry_required", retryable: true } : { error: msg }));
       }
       return;
     }
