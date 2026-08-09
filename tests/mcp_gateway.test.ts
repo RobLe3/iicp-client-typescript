@@ -238,3 +238,96 @@ describe("mcp-gateway round-trip", () => {
     await gwPromise;
   });
 });
+
+describe("mcp-gateway legacy session expiry", () => {
+  it("replays only explicitly safe calls and reinitializes at most once", async () => {
+    const dirPort = await freePort();
+    const mcpPort = await freePort();
+    const gwPort = await freePort();
+    const issuedToken = "gw-tok-ts-expiry";
+    const state = { initializations: 0, toolCalls: 0, session: "" };
+
+    const dirServer = http.createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(req.url === "/register" ? { node_token: issuedToken } : {}));
+      });
+    });
+    await new Promise<void>((resolve) => dirServer.listen(dirPort, "127.0.0.1", resolve));
+
+    const mcpServer = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>;
+        const method = body["method"] as string;
+        if (method === "initialize") {
+          state.initializations += 1;
+          state.session = `private-mcp-session-${state.initializations}`;
+          res.writeHead(200, { "Content-Type": "application/json", "Mcp-Session-Id": state.session });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: body["id"], result: { protocolVersion: "2025-11-25" } }));
+          return;
+        }
+        assert.equal(req.headers["mcp-session-id"], state.session);
+        if (method === "notifications/initialized") {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+        state.toolCalls += 1;
+        if (state.toolCalls <= 2) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "expired" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jsonrpc: "2.0", id: body["id"], result: { content: [] } }));
+      });
+    });
+    await new Promise<void>((resolve) => mcpServer.listen(mcpPort, "127.0.0.1", resolve));
+
+    const { main } = await import("../src/cli.js");
+    const gwPromise = main([
+      "mcp-gateway",
+      "--tools", "format_json",
+      "--node-id", "gw-ts-expiry-001",
+      "--mcp-url", `http://127.0.0.1:${mcpPort}`,
+      "--directory-url", `http://127.0.0.1:${dirPort}`,
+      "--port", String(gwPort),
+      "--host", "127.0.0.1",
+      "--public-endpoint", `http://127.0.0.1:${gwPort}`,
+      "--region", "test",
+    ]);
+    await waitPort(gwPort);
+
+    const call = (taskId: string, replaySafe: boolean) => fetch(`http://127.0.0.1:${gwPort}/v1/task`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${issuedToken}` },
+      body: JSON.stringify({
+        task_id: taskId,
+        intent: "urn:iicp:intent:mcp:format_json:v1",
+        payload: { tool_name: "format_json", arguments: { value: "fixture" }, mcp_replay_safe: replaySafe },
+      }),
+    });
+
+    const refusedResponse = await call("ts-expiry-no-replay", false);
+    assert.equal(refusedResponse.status, 409);
+    assert.deepEqual(await refusedResponse.json(), { error: "mcp_session_expired_retry_required", retryable: true });
+    assert.equal(state.initializations, 1);
+    assert.equal(state.toolCalls, 1);
+
+    const completedResponse = await call("ts-expiry-safe", true);
+    assert.equal(completedResponse.status, 200);
+    const completed = await completedResponse.json() as Record<string, unknown>;
+    assert.equal(completed["status"], "completed");
+    assert.equal(JSON.stringify(completed).includes("private-mcp-session"), false);
+    assert.equal(state.initializations, 3);
+    assert.equal(state.toolCalls, 3);
+
+    dirServer.close();
+    mcpServer.close();
+    process.emit("SIGINT");
+    await gwPromise;
+  });
+});
