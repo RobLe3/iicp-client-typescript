@@ -4,7 +4,14 @@ Use this repository for **iicp-client-typescript** bugs, documentation fixes, te
 requests:
 
 - Issues: https://github.com/RobLe3/iicp-client-typescript/issues
-- Main website/control-plane/protocol tracker: https://github.com/RobLe3/iicp.network/issues
+- Protocol and cross-component proposals: https://github.com/RobLe3/IICP/issues/new?template=protocol-proposal.yml
+- Community discussion: https://iicp.network/forum/
+- Private vulnerability reports: https://github.com/RobLe3/iicp-client-typescript/security/advisories/new
+
+Do not include credentials, private topology, production records, task
+payloads or personal data in public issues. Participation does not confer
+protocol authority; public proposal decisions remain recorded in the owning
+issue or pull request under the current founder-led governance process.
 
 Please include the client version, operating mode (`serve`, `relay`, Docker,
 launchd/systemd, library use), relevant logs without secrets, and the command or
