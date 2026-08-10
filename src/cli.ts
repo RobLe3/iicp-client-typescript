@@ -35,6 +35,7 @@ import { execSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { IicpNode, deriveNativeEndpoint } from "./node.js";
+import { runtimeHealthPath } from "./runtime_health.js";
 import { IicpClient } from "./client.js";
 import { writeNodeEvent } from "./node_log.js";
 import { configureCipPolicy } from "./cip_policy.js";
@@ -252,6 +253,7 @@ function printHelp(): void {
       `  list                       List node configs saved under ~/.iicp/nodes/\n` +
       `  serve                      Register and serve a node\n` +
       `  doctor                     Check local health, directory presence, and recovery action\n` +
+      `  healthcheck                Check local runtime liveness/readiness snapshot\n` +
       `  query <prompt>             Discover mesh nodes and submit a chat task\n` +
       `  credits                    Show your operator wallet plus this node's credit ledger\n` +
       `  proxy                      Run the local OpenAI/Ollama/Anthropic-compat gateway (loopback; no registration)\n` +
@@ -2222,6 +2224,27 @@ async function runDoctor(argv: string[]): Promise<number> {
   return 0;
 }
 
+function runHealthcheck(argv: string[]): number {
+  const { values } = safeParseArgs({ args: argv, options: { node: { type: "string" }, json: { type: "boolean" }, ready: { type: "boolean" }, help: { type: "boolean", short: "h" } }, allowPositionals: false });
+  if (values.help) { process.stdout.write("usage: iicp-node healthcheck --node NAME [--json] [--ready]\n"); return 0; }
+  const node = (values.node as string | undefined) ?? process.env.IICP_NODE_NAME;
+  if (!node) { process.stderr.write("ERROR: healthcheck requires --node NAME\n"); return 2; }
+  let file: string;
+  try { file = runtimeHealthPath(node); } catch (error) { process.stderr.write(`ERROR: ${error instanceof Error ? error.message : String(error)}\n`); return 2; }
+  let snapshot: Record<string, unknown>;
+  try { snapshot = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>; }
+  catch (error) { process.stderr.write(`INDETERMINATE: runtime-health snapshot unavailable: ${error instanceof Error ? error.message : String(error)}\n`); return 2; }
+  const progress = snapshot.progress as { runtime?: { stale_after_ms?: number } } | undefined;
+  const staleAfter = Number(progress?.runtime?.stale_after_ms ?? 0);
+  const age = Date.now() - fs.statSync(file).mtimeMs;
+  if (age < 0 || !Number.isFinite(staleAfter) || staleAfter <= 0) { process.stderr.write("INDETERMINATE: snapshot freshness could not be established\n"); return 2; }
+  if (values.json) process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+  else process.stdout.write(`IICP node health — ${node}\n  liveness   ${String(snapshot.liveness ?? "indeterminate")}\n  readiness  ${String(snapshot.readiness ?? "not_ready")}\n  reasons    ${Array.isArray(snapshot.reason_codes) ? snapshot.reason_codes.join(", ") : ""}\n`);
+  if (age > staleAfter) return 1;
+  if (values.ready) return snapshot.readiness === "ready" ? 0 : 1;
+  return snapshot.liveness === "live" ? 0 : snapshot.liveness === "not_live" ? 1 : 2;
+}
+
 /**
  * Resolve a passphrase: $IICP_OPERATOR_PASSPHRASE if set (headless/CI), else an interactive
  * readline prompt (this command is operator-run, so a prompt is fine here — only `serve` must
@@ -3245,6 +3268,7 @@ async function dispatch(argv: string[]): Promise<number> {
   if (cmd === "query") return runQuery(argv.slice(1));
   if (cmd === "credits") return runCredits(argv.slice(1));
   if (cmd === "doctor") return runDoctor(argv.slice(1));
+  if (cmd === "healthcheck") return runHealthcheck(argv.slice(1));
   if (cmd === "operator") return runOperator(argv.slice(1));
   if (cmd === "proxy") return runProxyCmd(argv.slice(1));
   if (cmd === "mcp-gateway") return runMcpGateway(argv.slice(1));
