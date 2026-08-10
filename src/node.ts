@@ -26,6 +26,7 @@ import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTick
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
 import { autoUpdateStatusPayload } from "./updater.js";
 import { loadNode, saveNode } from "./identity.js";
+import { RuntimeHealth, runtimeHealthPath, writeRuntimeHealthSnapshot } from "./runtime_health.js";
 import {
   RECOVERY_EXIT_CODE,
   classifyRecovery,
@@ -381,6 +382,7 @@ export class IicpNode {
   private _tokensCounter: PromCounter | null = null;
   private _backendStability = new BackendStabilityObservation();
   private _savedNodeName: string | undefined;
+  private readonly _runtimeHealth = new RuntimeHealth();
   private _promLoaded = false;
   private readonly _cxPublicKey: CxPublicKey | undefined;
   private readonly _cxPrivateKeyBytes: Buffer | undefined;
@@ -874,8 +876,11 @@ export class IicpNode {
    * is unit-testable (the interval loop itself isn't).
    */
   async _heartbeatTick(token: string): Promise<string> {
+    this._runtimeHealth.advanceSupervisor();
     try {
       await this.heartbeat(token);
+      this._runtimeHealth.setExternal("directory", "healthy");
+      this._runtimeHealth.advanceSupervisor();
       // #494 — detect model list drift and re-register with the updated list.
       let nextToken = await this._maybeReregisterOnModelDrift(token);
       this._recoveryHeartbeatSeq += 1;
@@ -933,6 +938,8 @@ export class IicpNode {
       }
       return nextToken;
     } catch (err: unknown) {
+      this._runtimeHealth.setExternal("directory", "unavailable");
+      this._runtimeHealth.advanceSupervisor();
       const status = (err as { status?: number } | undefined)?.status;
       if (status === 401 || status === 404 || status === 410) {
         try {
@@ -1105,12 +1112,24 @@ export class IicpNode {
       });
       socket.on("error", () => undefined);
     });
-    mux.listen(port, host);
+    mux.listen(port, host, () => this._runtimeHealth.markRunning());
 
     let hbTimer: ReturnType<typeof setInterval> | undefined;
+    let healthTimer: ReturnType<typeof setInterval> | undefined;
+    if (this._savedNodeName) {
+      const healthPath = runtimeHealthPath(this._savedNodeName);
+      const publish = () => {
+        this._runtimeHealth.advanceRuntime();
+        try { writeRuntimeHealthSnapshot(healthPath, this._runtimeHealth.snapshot()); }
+        catch (error) { console.warn(`[iicp-node] runtime-health snapshot write failed: ${error instanceof Error ? error.message : String(error)}`); }
+      };
+      publish();
+      healthTimer = setInterval(publish, 5_000);
+    }
     // #404 — start the heartbeat loop when a token is present OR empty (register
     // failed → loop self-heals via re-register on 401). undefined = --skip-registration.
     if (nodeToken !== undefined) {
+      this._runtimeHealth.setSupervisorRequired(true);
       let currentToken = nodeToken;
       hbTimer = setInterval(() => {
         void this._heartbeatTick(currentToken).then((t) => {
@@ -1236,7 +1255,12 @@ export class IicpNode {
     }
 
     return () => {
+      this._runtimeHealth.markStopping();
+      if (this._savedNodeName) {
+        try { writeRuntimeHealthSnapshot(runtimeHealthPath(this._savedNodeName), this._runtimeHealth.snapshot()); } catch { /* best effort */ }
+      }
       if (hbTimer) clearInterval(hbTimer);
+      if (healthTimer) clearInterval(healthTimer);
       this._peerManager.stop();
       if (stopRelayWorker) stopRelayWorker();
       if (relayAcceptSrv) relayAcceptSrv.stop().catch(() => undefined);

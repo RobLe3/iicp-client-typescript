@@ -1,0 +1,5 @@
+import assert from "node:assert/strict";import * as fs from "node:fs";import * as os from "node:os";import * as path from "node:path";import test from "node:test";
+import {classifyRuntimeHealth,RuntimeHealth,writeRuntimeHealthSnapshot,type ClassificationInput} from "../src/runtime_health.js";
+const fixture=JSON.parse(fs.readFileSync(new URL("./fixtures/runtime-health-v1.json",import.meta.url),"utf8"));
+test("canonical runtime health scenarios match",()=>{assert.equal(fixture.scenarios.length,12);for(const s of fixture.scenarios)assert.deepEqual(classifyRuntimeHealth(s.input as ClassificationInput),s.expected,s.id)});
+test("snapshot is private and content-free",()=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),"iicp-health-")),file=path.join(dir,"health.json"),h=new RuntimeHealth();h.markRunning();h.advanceRuntime();writeRuntimeHealthSnapshot(file,h.snapshot());assert.equal(JSON.parse(fs.readFileSync(file,"utf8")).liveness,"live");if(process.platform!=="win32")assert.equal(fs.statSync(file).mode&0o777,0o600);fs.rmSync(dir,{recursive:true})});
