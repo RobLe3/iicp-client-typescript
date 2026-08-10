@@ -30,6 +30,7 @@ export type {
 export { BackendCancellationRegistry, BoundedObserverBuffer, LifecycleConflict, LifecycleResumeUnavailable, LifecycleStore, ObserverLagged, SERVICE_LIFECYCLE_PROFILE, TERMINAL_LIFECYCLE_STATES, UnknownLifecycleTask } from "./service_lifecycle.js";
 export type { BackendCancellationEvidence, BackendCancellationEvidenceLevel, BackendCancellationHandler, BackendCancellationOutcome, LifecycleEvent, LifecycleRecord, LifecycleSnapshot } from "./service_lifecycle.js";
 export { NativeResponseSequence, NativeResponseSequenceError } from "./native_response_sequence.js";
+export { NativeCallIdentityError, NativeCallIdentityRegistry } from "./native_call_identity.js";
 export type { NativeLifecycleEnvelope, NativeResponseFrame } from "./native_response_sequence.js";
 export { IicpError } from "./errors.js";
 export { IicpNode } from "./node.js";
