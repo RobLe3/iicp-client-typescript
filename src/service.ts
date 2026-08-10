@@ -19,6 +19,58 @@ export interface ServiceUnit {
   logHint: string;
 }
 
+export interface ManagerAction {
+  command: string;
+  args: string[];
+  tolerateFailure?: boolean;
+}
+
+/** Pure service-manager action plan; execution stays in the CLI. */
+export function managerActions(
+  unit: ServiceUnit,
+  operation: "install" | "status" | "restart" | "uninstall",
+  noStart = false,
+): ManagerAction[] {
+  if (unit.platform === "systemd") {
+    const service = `${unit.name}.service`;
+    if (operation === "install") {
+      return [
+        { command: "systemctl", args: ["--user", "daemon-reload"] },
+        { command: "systemctl", args: ["--user", "enable", service] },
+        ...(!noStart ? [{ command: "systemctl", args: ["--user", "start", service] }] : []),
+        {
+          command: "systemctl",
+          args: [
+            "--user", "show", service,
+            "--property=LoadState,ActiveState,SubState,UnitFileState,Restart,RestartUSec,Type,WatchdogUSec,NotifyAccess",
+          ],
+        },
+        { command: "loginctl", args: ["show-user", process.env.USER ?? "", "--property=Linger"], tolerateFailure: true },
+      ];
+    }
+    if (operation === "status") {
+      return [{ command: "systemctl", args: ["--user", "show", service, "--property=LoadState,ActiveState,SubState,UnitFileState,Restart,RestartUSec,Type,WatchdogUSec,NotifyAccess"] }];
+    }
+    if (operation === "restart") return [{ command: "systemctl", args: ["--user", "restart", service] }];
+    return [{ command: "systemctl", args: ["--user", "disable", "--now", service], tolerateFailure: true }];
+  }
+
+  const target = `gui/${process.getuid?.() ?? 0}`;
+  const domain = `${target}/${unit.name}`;
+  if (operation === "install") {
+    return [
+      { command: "launchctl", args: ["enable", domain] },
+      { command: "launchctl", args: ["bootout", target, unit.path], tolerateFailure: true },
+      { command: "launchctl", args: ["bootstrap", target, unit.path] },
+      ...(!noStart ? [{ command: "launchctl", args: ["kickstart", "-k", domain] }] : []),
+      { command: "launchctl", args: ["print", domain] },
+    ];
+  }
+  if (operation === "status") return [{ command: "launchctl", args: ["print", domain] }];
+  if (operation === "restart") return [{ command: "launchctl", args: ["kickstart", "-k", domain] }];
+  return [{ command: "launchctl", args: ["bootout", target, unit.path], tolerateFailure: true }];
+}
+
 const SAFE_RE = /[^A-Za-z0-9_.-]+/g;
 
 export function sanitizeServiceName(value: string): string {

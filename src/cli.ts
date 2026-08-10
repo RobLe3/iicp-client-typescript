@@ -31,7 +31,7 @@ import * as net from "node:net";
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import * as readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { IicpNode, deriveNativeEndpoint } from "./node.js";
@@ -3217,7 +3217,8 @@ async function runService(argv: string[]): Promise<number> {
         `  --node NAME        Saved node name to serve (required)\n` +
         `  --name NAME        Override service label/unit name\n` +
         `  --platform KIND    auto | launchd | systemd (default auto)\n` +
-        `  --dry-run          For install: print the generated unit without writing files\n`,
+        `  --no-start         Install and enable without starting the service\n` +
+        `  --dry-run          Print unit/actions without changing files or service state\n`,
     );
     return subcmd ? 0 : 2;
   }
@@ -3231,6 +3232,7 @@ async function runService(argv: string[]): Promise<number> {
       name: { type: "string" },
       platform: { type: "string" },
       "dry-run": { type: "boolean" },
+      "no-start": { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
     allowPositionals: false,
@@ -3238,26 +3240,57 @@ async function runService(argv: string[]): Promise<number> {
   if (values.help) return runService(["help"]);
   const node = values.node as string | undefined;
   if (!node) throw new CliError("service requires --node NAME");
-  const { renderServiceUnit } = await import("./service.js");
+  const { managerActions, renderServiceUnit } = await import("./service.js");
   const unit = renderServiceUnit(node, values.name as string | undefined, (values.platform as string | undefined) ?? "auto");
+  const dryRun = values["dry-run"] === true;
+  const noStart = values["no-start"] === true;
+  const printAction = (command: string, args: string[]) =>
+    process.stdout.write(`$ ${[command, ...args].map((part) => JSON.stringify(part)).join(" ")}\n`);
+  const execute = (operation: "install" | "status" | "restart" | "uninstall") => {
+    for (const action of managerActions(unit, operation, noStart)) {
+      if (dryRun) {
+        printAction(action.command, action.args);
+        continue;
+      }
+      const result = spawnSync(action.command, action.args, { stdio: "inherit" });
+      if (result.error && !action.tolerateFailure) throw new CliError(`${action.command} failed: ${result.error.message}`);
+      if ((result.status ?? (result.error ? 1 : 0)) !== 0 && !action.tolerateFailure) {
+        throw new CliError(`${action.command} exited with status ${result.status ?? "unknown"}`);
+      }
+    }
+  };
 
   if (subcmd === "install") {
-    if (values["dry-run"]) {
+    if (dryRun) {
       process.stdout.write(`# ${unit.platform} service: ${unit.name}\n# path: ${unit.path}\n${unit.content}`);
     } else {
       fs.mkdirSync(path.dirname(unit.path), { recursive: true });
-      fs.writeFileSync(unit.path, unit.content);
+      const temporary = `${unit.path}.tmp-${process.pid}`;
+      fs.writeFileSync(temporary, unit.content, { mode: 0o600 });
+      fs.renameSync(temporary, unit.path);
       process.stdout.write(`Installed ${unit.platform} service unit: ${unit.path}\n`);
     }
+    execute("install");
     process.stdout.write(`status:   ${unit.statusHint}\n`);
     process.stdout.write(`restart:  ${unit.restartHint}\n`);
     process.stdout.write(`logs:     ${unit.logHint}\n`);
     process.stdout.write("Note: no classic --daemon fork is used; the OS supervisor runs foreground `iicp-node serve`.\n");
     return 0;
   }
-  if (subcmd === "status") process.stdout.write(`${unit.statusHint}\n`);
-  if (subcmd === "restart") process.stdout.write(`${unit.restartHint}\n`);
-  if (subcmd === "uninstall") process.stdout.write(`${unit.uninstallHint}\n`);
+  if (subcmd === "status") execute("status");
+  if (subcmd === "restart") execute("restart");
+  if (subcmd === "uninstall") {
+    execute("uninstall");
+    if (dryRun) process.stdout.write(`$ ${JSON.stringify("rm")} ${JSON.stringify("-f")} ${JSON.stringify(unit.path)}\n`);
+    else fs.rmSync(unit.path, { force: true });
+    if (unit.platform === "systemd") {
+      if (dryRun) printAction("systemctl", ["--user", "daemon-reload"]);
+      else {
+        const result = spawnSync("systemctl", ["--user", "daemon-reload"], { stdio: "inherit" });
+        if (result.error || result.status !== 0) throw new CliError("systemctl --user daemon-reload failed after uninstall");
+      }
+    }
+  }
   return 0;
 }
 

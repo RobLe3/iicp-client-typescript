@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { renderLaunchd, renderSystemd } from "../src/service.js";
+import { managerActions, renderLaunchd, renderSystemd } from "../src/service.js";
 
 describe("service supervisor unit rendering", () => {
   it("launchd unit runs foreground serve with hourly auto-update defaults", () => {
@@ -42,6 +42,26 @@ describe("service supervisor unit rendering", () => {
   });
 });
 
+describe("service manager lifecycle planning", () => {
+  it("installs, enables, starts and verifies a systemd user service by default", () => {
+    const unit = renderSystemd("mynode");
+    const actions = managerActions(unit, "install");
+    assert.deepEqual(actions.slice(0, 3).map(({ command, args }) => [command, ...args]), [
+      ["systemctl", "--user", "daemon-reload"],
+      ["systemctl", "--user", "enable", "network.iicp.node.mynode.service"],
+      ["systemctl", "--user", "start", "network.iicp.node.mynode.service"],
+    ]);
+    assert.ok(actions.some(({ command, args }) => command === "systemctl" && args.includes("--property=LoadState,ActiveState,SubState,UnitFileState,Restart,RestartUSec,Type,WatchdogUSec,NotifyAccess")));
+    assert.ok(actions.some(({ command }) => command === "loginctl"));
+  });
+
+  it("supports install without activation and preserves a launchd verification step", () => {
+    const actions = managerActions(renderLaunchd("mynode"), "install", true);
+    assert.equal(actions.some(({ args }) => args.includes("kickstart")), false);
+    assert.equal(actions.at(-1)?.args[0], "print");
+  });
+});
+
 describe("iicp-node service CLI", () => {
   it("install --dry-run prints unit, hints and no daemon note without writing", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-service-"));
@@ -64,6 +84,8 @@ describe("iicp-node service CLI", () => {
       assert.ok(out.includes("restart:"));
       assert.ok(out.includes("logs:"));
       assert.ok(out.includes("no classic --daemon fork"));
+      assert.ok(out.includes('"systemctl" "--user" "daemon-reload"'));
+      assert.ok(out.includes('"systemctl" "--user" "start"'));
       assert.equal(fs.existsSync(path.join(tmp, ".config", "systemd", "user", "network.iicp.node.mynode.service")), false);
     } finally {
       process.stdout.write = orig;
