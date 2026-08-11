@@ -9,6 +9,13 @@ in the main repo).
 
 ## [Unreleased]
 
+### Added — local runtime health and service lifecycle
+- Added versioned, content-free local liveness/readiness snapshots plus `iicp-node healthcheck`; shared scenarios keep external connectivity separate from local runtime progress.
+- `iicp-node service install`, `status`, `restart`, and `uninstall` now execute the selected launchd or systemd user-service lifecycle unless dry-run mode is explicit.
+
+### Hardened — protocol and managed-operation boundaries
+- Added fail-closed native RESPONSE sequence validation, aligned consumer co-signature transition fixtures, bounded MCP session replay, and a managed-operator startup profile without changing the released buffered call contract.
+
 ## [0.7.101] — 2026-08-01
 
 ### Added — MCP revision compatibility
