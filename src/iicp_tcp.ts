@@ -172,6 +172,34 @@ export async function encodeResponse(args: {
   return encodeCbor(m);
 }
 
+export async function encodeLifecycleResponse(args: {
+  sessionId: string;
+  callId: string;
+  taskId: string;
+  sequence: number;
+  status: "partial" | "success" | "error" | "timeout";
+  result?: unknown;
+  errorCode?: string;
+  errorMessage?: string;
+  tokensUsed?: number;
+  event?: string;
+}): Promise<Buffer> {
+  const isFinal = args.status !== "partial";
+  const event = args.event ?? {
+    partial: "partial", success: "completed", error: "failed", timeout: "timed_out",
+  }[args.status];
+  const m = new Map<number, unknown>([
+    [1, FRAMING_VERSION], [2, args.sessionId], [3, args.callId], [4, args.status],
+    [12, isFinal], [13, new Map<number, unknown>([[1, args.taskId], [2, args.sequence], [3, event], [4, isFinal]])],
+  ]);
+  if (args.result !== undefined) m.set(5, args.result);
+  if (args.errorCode !== undefined || args.errorMessage !== undefined) {
+    m.set(6, new Map<number, unknown>([[1, args.errorCode ?? "stream_error"], [2, args.errorMessage ?? "stream failed"]]));
+  }
+  if (args.tokensUsed !== undefined) m.set(7, args.tokensUsed);
+  return encodeCbor(m);
+}
+
 export async function encodeDiscoverResponse(
   sessionId: string,
   intent: string,
@@ -192,6 +220,20 @@ export type TcpTaskHandler = (task: {
   payload: Record<string, unknown>;
 }) => Promise<Record<string, unknown>>;
 
+export type TcpStreamingHandler = (task: {
+  task_id: string;
+  call_id: string;
+  intent: string;
+  payload: Record<string, unknown>;
+}) => AsyncIterable<{
+  status: "partial" | "success" | "error" | "timeout";
+  result?: unknown;
+  error_code?: string;
+  error_message?: string;
+  tokens_used?: number;
+  event?: string;
+}>;
+
 export type DiscoverLookup = (intent: string) => Promise<Record<string, unknown>[]>;
 
 export interface IicpTcpServerOptions {
@@ -199,6 +241,7 @@ export interface IicpTcpServerOptions {
   port?: number;
   nodeId?: string;
   handler?: TcpTaskHandler;
+  streamingHandler?: TcpStreamingHandler;
   discoverLookup?: DiscoverLookup;
   /** Optional ConcurrencyGate. When set, every CALL acquires a slot first;
    * CapacityExceededError → RESPONSE error_code=429 (IICP-E021). */
@@ -211,6 +254,7 @@ export class IicpTcpServer {
   private readonly _port: number;
   private readonly _nodeId: string | undefined;
   private readonly _handler: TcpTaskHandler | undefined;
+  private readonly _streamingHandler: TcpStreamingHandler | undefined;
   private readonly _discoverLookup: DiscoverLookup | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly _gate: any | undefined;
@@ -221,6 +265,7 @@ export class IicpTcpServer {
     this._port = opts.port ?? 9484;
     this._nodeId = opts.nodeId;
     this._handler = opts.handler;
+    this._streamingHandler = opts.streamingHandler;
     this._discoverLookup = opts.discoverLookup;
     this._gate = opts.concurrencyGate;
   }
@@ -453,6 +498,7 @@ export class IicpTcpServer {
     let sessionId = "unknown";
     let callId: string | undefined;
     let intent = "";
+    let taskId: string | undefined;
     let payloadObj: Record<string, unknown> = {};
 
     try {
@@ -462,6 +508,7 @@ export class IicpTcpServer {
         sessionId = String(b[2] ?? "unknown");
         intent = String(b[3] ?? "");
         if (typeof b[15] === "string") callId = b[15] as string;
+        if (typeof b[24] === "string") taskId = b[24] as string;
 
         const raw5 = b[5];
         if (raw5 && typeof raw5 === "object" && !Buffer.isBuffer(raw5) && !(raw5 instanceof Uint8Array)) {
@@ -483,6 +530,10 @@ export class IicpTcpServer {
       }
     } catch {
       // ignore
+    }
+
+    if (taskId && this._streamingHandler) {
+      return this._onStreamCall(socket, { sessionId, callId: callId ?? "", taskId, intent, payload: payloadObj });
     }
 
     let result: Buffer | undefined;
@@ -535,6 +586,50 @@ export class IicpTcpServer {
 
     const resp = await encodeResponse({ sessionId, callId, result, errorCode, errorMessage });
     socket.write(encodeFrame(MsgType.RESPONSE, resp));
+    return true;
+  }
+
+  private async _onStreamCall(
+    socket: net.Socket,
+    args: { sessionId: string; callId: string; taskId: string; intent: string; payload: Record<string, unknown> },
+  ): Promise<boolean> {
+    const handler = this._streamingHandler!;
+    let sequence = 0;
+    let terminalSent = false;
+    const emit = async (item: {
+      status: "partial" | "success" | "error" | "timeout"; result?: unknown;
+      error_code?: string; error_message?: string; tokens_used?: number; event?: string;
+    }): Promise<void> => {
+      if (terminalSent) throw new Error("response_after_terminal");
+      const payload = await encodeLifecycleResponse({
+        sessionId: args.sessionId, callId: args.callId, taskId: args.taskId, sequence,
+        status: item.status, result: item.result, errorCode: item.error_code,
+        errorMessage: item.error_message, tokensUsed: item.tokens_used, event: item.event,
+      });
+      socket.write(encodeFrame(MsgType.RESPONSE, payload));
+      sequence += 1;
+      terminalSent = item.status !== "partial";
+    };
+    const run = async (): Promise<void> => {
+      for await (const item of handler({
+        task_id: args.taskId, call_id: args.callId, intent: args.intent, payload: args.payload,
+      })) await emit(item);
+      if (!terminalSent) await emit({
+        status: "error", error_code: "stream_incomplete",
+        error_message: "stream ended without a terminal response",
+      });
+    };
+    try {
+      if (this._gate && typeof this._gate.acquire === "function") {
+        this._gate.acquire();
+        try { await run(); } finally { this._gate.release(); }
+      } else await run();
+    } catch {
+      if (!terminalSent) await emit({
+        status: "error", error_code: "backend_error",
+        error_message: "streaming handler raised exception",
+      });
+    }
     return true;
   }
 }
