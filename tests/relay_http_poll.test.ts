@@ -58,6 +58,27 @@ function freePort(): Promise<number> {
 // ── HttpPollWorkerSession unit behavior ──────────────────────────────────────
 
 describe("HttpPollWorkerSession", () => {
+  it("preserves a validated partial and terminal relay sequence", async () => {
+    const sess = new HttpPollWorkerSession("w-stream");
+    const stream = sess.forwardStream({ task_id: "task-stream", session_id: "session-stream" }, 1_000);
+    const firstPending = stream.next();
+    const call = await sess.nextCall(1_000);
+    assert.ok(call);
+    const callId = call.call_id;
+    sess.onStreamResponse(callId, {
+      session_id: "session-stream", call_id: callId, status: "partial", result: Buffer.from("hel"), is_final: false,
+      lifecycle: { task_id: "task-stream", sequence: 0, event: "partial", is_final: false },
+    });
+    assert.equal((await firstPending).value?.status, "partial");
+    const terminalPending = stream.next();
+    sess.onStreamResponse(callId, {
+      session_id: "session-stream", call_id: callId, status: "success", result: Buffer.from("lo"), is_final: true,
+      lifecycle: { task_id: "task-stream", sequence: 1, event: "completed", is_final: true },
+    });
+    assert.equal((await terminalPending).value?.status, "success");
+    assert.equal((await stream.next()).done, true);
+  });
+
   it("forward → pull → result roundtrip", async () => {
     const sess = new HttpPollWorkerSession("w-browser", { models: ["tinyllama"] });
     const forward = sess.forwardTask({ payload: { q: 1 } }, 5_000);
