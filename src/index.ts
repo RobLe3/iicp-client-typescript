@@ -75,7 +75,7 @@ export type {
   Ipv6Qualification,
   ExposureQualification,
 } from "./qualify.js";
-export { openaiCompatHandler } from "./backends/openai_compat.js";
+export { openaiCompatHandler, openaiCompatStreamingHandler } from "./backends/openai_compat.js";
 export type {
   OpenAiCompatOptions,
   TaskHandlerInput,
