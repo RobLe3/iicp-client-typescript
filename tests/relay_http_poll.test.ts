@@ -79,6 +79,59 @@ describe("HttpPollWorkerSession", () => {
     assert.equal((await stream.next()).done, true);
   });
 
+  it("fails closed on sequence drift and removes pending state", async () => {
+    const sess = new HttpPollWorkerSession("w-drift");
+    const stream = sess.forwardStream({ task_id: "task-drift", session_id: "session-drift" }, 1_000);
+    const pending = stream.next();
+    const call = await sess.nextCall(1_000);
+    assert.ok(call);
+    sess.onStreamResponse(call.call_id, {
+      session_id: "session-drift", call_id: call.call_id, status: "partial", result: "bad", is_final: false,
+      lifecycle: { task_id: "task-drift", sequence: 1, event: "partial", is_final: false },
+    });
+    await assert.rejects(pending, /sequence_drift/);
+    assert.equal((sess as unknown as { _streamPending: Map<string, unknown> })._streamPending.has(call.call_id), false);
+  });
+
+  it("bounds a slow consumer and cleans up cancellation", async () => {
+    const sess = new HttpPollWorkerSession("w-bound");
+    const stream = sess.forwardStream({ task_id: "task-bound", session_id: "session-bound" }, 1_000);
+    const firstPending = stream.next();
+    const call = await sess.nextCall(1_000);
+    assert.ok(call);
+    const event = (sequence: number) => ({
+      session_id: "session-bound", call_id: call.call_id, status: "partial", result: "x", is_final: false,
+      lifecycle: { task_id: "task-bound", sequence, event: "partial", is_final: false },
+    });
+    sess.onStreamResponse(call.call_id, event(0));
+    assert.equal((await firstPending).value?.status, "partial");
+    for (let sequence = 1; sequence < 34; sequence += 1) sess.onStreamResponse(call.call_id, event(sequence));
+    await assert.rejects(stream.next(), /relay_backpressure_exceeded/);
+    assert.equal((sess as unknown as { _streamPending: Map<string, unknown> })._streamPending.has(call.call_id), false);
+
+    const cancelled = sess.forwardStream({ task_id: "task-cancel", session_id: "session-cancel" }, 1_000);
+    const wait = cancelled.next();
+    const cancelCall = await sess.nextCall(1_000);
+    assert.ok(cancelCall);
+    sess.onStreamResponse(cancelCall.call_id, {
+      session_id: "session-cancel", call_id: cancelCall.call_id, status: "partial", result: "x", is_final: false,
+      lifecycle: { task_id: "task-cancel", sequence: 0, event: "partial", is_final: false },
+    });
+    assert.equal((await wait).value?.status, "partial");
+    await cancelled.return();
+    assert.equal((sess as unknown as { _streamPending: Map<string, unknown> })._streamPending.has(cancelCall.call_id), false);
+  });
+
+  it("times out when a worker never sends a terminal response", async () => {
+    const sess = new HttpPollWorkerSession("w-incomplete");
+    const stream = sess.forwardStream({ task_id: "task-incomplete", session_id: "session-incomplete" }, 10);
+    const pending = stream.next();
+    const call = await sess.nextCall(1_000);
+    assert.ok(call);
+    await assert.rejects(pending, /relay_stream_timeout/);
+    assert.equal((sess as unknown as { _streamPending: Map<string, unknown> })._streamPending.has(call.call_id), false);
+  });
+
   it("forward → pull → result roundtrip", async () => {
     const sess = new HttpPollWorkerSession("w-browser", { models: ["tinyllama"] });
     const forward = sess.forwardTask({ payload: { q: 1 } }, 5_000);
