@@ -531,4 +531,65 @@ describe("IicpTcpClient", () => {
       }
     }, /sequence_drift/);
   });
+
+  it("round-trips negotiated streaming through the server", async () => {
+    const streamPort = await freePort();
+    const streamServer = new IicpTcpServer({
+      host: HOST,
+      port: streamPort,
+      nodeId: "stream-node",
+      streamingHandler: async function* (task) {
+        assert.equal(task.task_id, "task-live");
+        yield { status: "partial", result: Buffer.from("hel"), tokens_used: 1 } as const;
+        yield { status: "success", result: Buffer.from("lo"), tokens_used: 2 } as const;
+      },
+    });
+    await streamServer.start();
+    const client = new IicpTcpClient({ host: HOST, port: streamPort });
+    try {
+      await client.connect();
+      await client.handshake();
+      const events = [];
+      for await (const event of client.streamCall("urn:iicp:intent:test:v1", {}, {
+        taskId: "task-live", sessionId: "session-live", callId: "call-live",
+      })) events.push(event);
+      assert.deepEqual(events.map((event) => event.status), ["partial", "success"]);
+      assert.deepEqual(events.map((event) => event.lifecycle.sequence), [0, 1]);
+      assert.equal(Buffer.concat(events.map((event) => Buffer.from(event.result as Uint8Array))).toString(), "hello");
+      assert.equal(events.at(-1)?.tokens_used, 2);
+    } finally {
+      await client.disconnect();
+      await streamServer.stop();
+    }
+  });
+
+  it("converts an exception after partial output into a terminal error", async () => {
+    const streamPort = await freePort();
+    const streamServer = new IicpTcpServer({
+      host: HOST,
+      port: streamPort,
+      streamingHandler: async function* () {
+        yield { status: "partial", result: Buffer.from("some") } as const;
+        throw new Error("sensitive backend detail");
+      },
+    });
+    await streamServer.start();
+    const client = new IicpTcpClient({ host: HOST, port: streamPort });
+    try {
+      await client.connect();
+      await client.handshake();
+      const events = [];
+      for await (const event of client.streamCall("urn:iicp:intent:test:v1", {}, {
+        taskId: "task-error", sessionId: "session-error", callId: "call-error",
+      })) events.push(event);
+      assert.deepEqual(events.map((event) => event.status), ["partial", "error"]);
+      assert.deepEqual(events.at(-1)?.error, {
+        code: "backend_error", message: "streaming handler raised exception",
+      });
+      assert.equal(events.at(-1)?.is_final, true);
+    } finally {
+      await client.disconnect();
+      await streamServer.stop();
+    }
+  });
 });
