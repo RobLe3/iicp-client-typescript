@@ -129,3 +129,57 @@ describe("candidate-ranker shared parity fixture", () => {
     assert.deepEqual(ranker.observed.map((candidate) => candidate.models), [["model-a"], ["model-b"]]);
   });
 });
+
+const replayFixture = JSON.parse(
+  readFileSync(new URL("./fixtures/candidate-ranker-benchmark-replay-v1.json", import.meta.url), "utf8"),
+) as {
+  policy_id: string;
+  mode: "normal";
+  nodes: Array<{ node_id: string; candidate_ref: string; models: string[] }>;
+  cases: Array<{
+    task_id: string;
+    eligible_node_ids: string[];
+    selected_node_id: string;
+    selected_candidate_ref: string;
+    expected_primary_receipt: string;
+    expected_fallback_receipt: string;
+  }>;
+};
+
+describe("IICP heterogeneous-routing benchmark replay", () => {
+  for (const replay of replayFixture.cases) {
+    it(replay.task_id, async () => {
+      const definitions = new Map(replayFixture.nodes.map((node) => [node.node_id, node]));
+      const eligible: Node[] = replay.eligible_node_ids.map((nodeId, index) => ({
+        node_id: nodeId,
+        endpoint: `https://${index}.invalid`,
+        score: 1,
+        load: 0,
+        models: definitions.get(nodeId)!.models,
+        available: true,
+        region: "test",
+      }));
+      const replayRanker: CandidateRanker = {
+        rank: (_context, candidates) => {
+          assert.ok(candidates.some((candidate) => candidate.candidate_ref === replay.selected_candidate_ref));
+          return {
+            candidate_ref: replay.selected_candidate_ref,
+            policy_id: replayFixture.policy_id,
+            mode: replayFixture.mode,
+          };
+        },
+      };
+      const applied = await applyCandidateRanker(
+        replayRanker,
+        { intent: "urn:iicp:intent:llm:chat:v1", payload: { task: replay.task_id } },
+        replay.task_id,
+        eligible,
+        [...eligible],
+        eligible.length,
+      );
+      assert.equal(applied.candidates[0].node_id, replay.selected_node_id);
+      assert.equal(rankerReceiptProfile(applied.decision!, 0), replay.expected_primary_receipt);
+      assert.equal(rankerReceiptProfile(applied.decision!, 1), replay.expected_fallback_receipt);
+    });
+  }
+});
