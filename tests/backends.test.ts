@@ -7,7 +7,7 @@
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { openaiCompatHandler } from "../src/backends/openai_compat.js";
+import { openaiCompatHandler, openaiCompatStreamingHandler } from "../src/backends/openai_compat.js";
 import { vllmHandler } from "../src/backends/vllm.js";
 import { llamacppHandler } from "../src/backends/llamacpp.js";
 import { meshllmHandler } from "../src/backends/meshllm.js";
@@ -298,6 +298,44 @@ describe("openaiCompatHandler", () => {
       payload: { messages: [] },
     });
     assert.equal(lastRequest!.url, "http://localhost:11434/v1/chat/completions");
+  });
+});
+
+describe("openaiCompatStreamingHandler", () => {
+  it("emits incremental SSE chunks and terminal usage", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody: Record<string, unknown> = {};
+    globalThis.fetch = (async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n' +
+        'data: {"choices":[{"delta":{"content":"lo"}}]}\n\n' +
+        'data: {"choices":[],"usage":{"total_tokens":7}}\n\n' +
+        'data: [DONE]\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }) as typeof fetch;
+    try {
+      const handler = openaiCompatStreamingHandler({ model: "qwen" });
+      const events = [];
+      for await (const event of handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } })) events.push(event);
+      assert.equal(requestBody.stream, true);
+      assert.deepEqual(requestBody.stream_options, { include_usage: true });
+      assert.deepEqual(events.map((event) => event.status), ["partial", "partial", "success"]);
+      assert.equal(events.map((event) => event.result ?? "").join(""), "hello");
+      assert.equal(events.at(-1)?.tokens_used, 7);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it("fails closed on malformed SSE JSON", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("data: not-json\n\n", { status: 200 })) as typeof fetch;
+    try {
+      const handler = openaiCompatStreamingHandler({ model: "qwen" });
+      const events = [];
+      for await (const event of handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:completion:v1", payload: { prompt: "hi" } })) events.push(event);
+      assert.deepEqual(events, [{ status: "error", error_code: "invalid_backend_stream", error_message: "openai_compat: upstream emitted invalid SSE JSON" }]);
+    } finally { globalThis.fetch = originalFetch; }
   });
 });
 

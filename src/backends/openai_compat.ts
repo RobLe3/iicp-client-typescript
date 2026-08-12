@@ -26,6 +26,7 @@ import {
   type TaskHandlerInput,
   type TaskHandlerOutput,
 } from "./base.js";
+import type { TcpStreamingHandler } from "../iicp_tcp.js";
 
 export interface OpenAiCompatOptions {
   /** Provider HTTP root (no trailing slash needed). Default: Ollama `http://localhost:11434/v1`. */
@@ -48,4 +49,80 @@ export function openaiCompatHandler(opts: OpenAiCompatOptions = {}): BackendHand
     opts.apiKey ?? "",
     opts.timeoutMs ?? 30000
   );
+}
+
+/** Genuine opt-in SSE streaming for OpenAI-compatible chat/completion backends. */
+export function openaiCompatStreamingHandler(opts: OpenAiCompatOptions = {}): TcpStreamingHandler {
+  const base = (opts.baseUrl ?? "http://localhost:11434/v1").replace(/\/$/, "");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
+  return async function* (task) {
+    const path = task.intent === "urn:iicp:intent:llm:chat:v1" ? "/chat/completions"
+      : task.intent === "urn:iicp:intent:llm:completion:v1" ? "/completions" : null;
+    if (!path) {
+      yield { status: "error", error_code: "unsupported_streaming_intent", error_message: "openai_compat: streaming is limited to chat and completion intents" };
+      return;
+    }
+    const body = { ...task.payload, model: task.payload.model ?? opts.model, stream: true,
+      stream_options: task.payload.stream_options ?? { include_usage: true } };
+    if (!body.model) {
+      yield { status: "error", error_code: "missing_model", error_message: "openai_compat: no model configured" };
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 30_000);
+    let tokensUsed: number | undefined;
+    try {
+      const response = await fetch(`${base}${path}`, {
+        method: "POST", headers, body: JSON.stringify(body), signal: controller.signal,
+      });
+      if (!response.ok) {
+        yield { status: "error", error_code: `upstream_${response.status}`,
+          error_message: `openai_compat: upstream ${response.status}: ${(await response.text()).slice(0, 512)}` };
+        return;
+      }
+      if (!response.body) {
+        yield { status: "error", error_code: "invalid_backend_stream", error_message: "openai_compat: upstream returned no stream body" };
+        return;
+      }
+      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += value ?? "";
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") {
+            yield { status: "success", result: "", ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+            return;
+          }
+          if (!data) continue;
+          let chunk: Record<string, unknown>;
+          try { chunk = JSON.parse(data) as Record<string, unknown>; }
+          catch {
+            yield { status: "error", error_code: "invalid_backend_stream", error_message: "openai_compat: upstream emitted invalid SSE JSON" };
+            return;
+          }
+          const usage = chunk.usage as Record<string, unknown> | undefined;
+          if (typeof usage?.total_tokens === "number") tokensUsed = usage.total_tokens;
+          const first = Array.isArray(chunk.choices) ? chunk.choices[0] as Record<string, unknown> | undefined : undefined;
+          const delta = first?.delta as Record<string, unknown> | undefined;
+          const text = task.intent.endsWith(":chat:v1") ? delta?.content : first?.text;
+          if (typeof text === "string" && text) {
+            yield { status: "partial", result: text, ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+          }
+        }
+        if (done) return;
+      }
+    } catch (error) {
+      yield error instanceof DOMException && error.name === "AbortError"
+        ? { status: "timeout", error_code: "backend_timeout", error_message: "openai_compat: backend timed out" }
+        : { status: "error", error_code: "backend_transport_error", error_message: "openai_compat: backend transport failed" };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
