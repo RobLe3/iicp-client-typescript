@@ -14,6 +14,7 @@ export type NativeResponseFrame = {
   lifecycle: NativeLifecycleEnvelope;
   result?: unknown;
   error?: unknown;
+  tokens_used?: number;
 };
 
 export class NativeResponseSequenceError extends Error {

@@ -957,6 +957,8 @@ function decodeLifecycleResponse(value: unknown): NativeResponseFrame {
       is_final: numericField(lifecycle, 4) === true,
     },
     result: numericField(value, 5),
+    tokens_used:
+      numericField(value, 7) === undefined ? undefined : Number(numericField(value, 7)),
     error:
       error && typeof error === "object"
         ? { code: numericField(error, 1), message: numericField(error, 2) }
