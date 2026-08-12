@@ -321,7 +321,7 @@ describe("openaiCompatStreamingHandler", () => {
       for await (const event of handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } })) events.push(event);
       assert.equal(requestBody.stream, true);
       assert.deepEqual(requestBody.stream_options, { include_usage: true });
-      assert.deepEqual(events.map((event) => event.status), ["partial", "partial", "success"]);
+      assert.deepEqual(events.map((event) => event.status), ["partial", "success"]);
       assert.equal(events.map((event) => event.result ?? "").join(""), "hello");
       assert.equal(events.at(-1)?.tokens_used, 7);
     } finally { globalThis.fetch = originalFetch; }
@@ -336,6 +336,58 @@ describe("openaiCompatStreamingHandler", () => {
       for await (const event of handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:completion:v1", payload: { prompt: "hi" } })) events.push(event);
       assert.deepEqual(events, [{ status: "error", error_code: "invalid_backend_stream", error_message: "openai_compat: upstream emitted invalid SSE JSON" }]);
     } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it("flushes at the 256-byte UTF-8 bound", async () => {
+    const text = "é".repeat(128);
+    globalThis.fetch = (async () => new Response(
+      `data: {"choices":[{"delta":{"content":"${text}"}}]}\n\ndata: [DONE]\n\n`,
+      { status: 200 },
+    )) as typeof fetch;
+    const handler = openaiCompatStreamingHandler({ model: "qwen" });
+    const events = [];
+    for await (const event of handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } })) events.push(event);
+    assert.deepEqual(events, [
+      { status: "partial", result: text },
+      { status: "success", result: "" },
+    ]);
+  });
+
+  it("flushes a small chunk after 25 ms", async () => {
+    const encoder = new TextEncoder();
+    let delayed: ReturnType<typeof setTimeout> | undefined;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"timed"}}]}\n\n'));
+        delayed = setTimeout(() => {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        }, 100);
+      },
+      cancel() { if (delayed) clearTimeout(delayed); },
+    }), { status: 200 })) as typeof fetch;
+    const handler = openaiCompatStreamingHandler({ model: "qwen" });
+    const events = handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } });
+    const first = await Promise.race([
+      events.next(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed flush not observed")), 75)),
+    ]);
+    assert.deepEqual(first.value, { status: "partial", result: "timed" });
+    await events.return?.();
+  });
+
+  it("emits terminal error on premature upstream close", async () => {
+    globalThis.fetch = (async () => new Response(
+      'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+      { status: 200 },
+    )) as typeof fetch;
+    const handler = openaiCompatStreamingHandler({ model: "qwen" });
+    const events = [];
+    for await (const event of handler({ task_id: "t", call_id: "c", intent: "urn:iicp:intent:llm:chat:v1", payload: { messages: [] } })) events.push(event);
+    assert.deepEqual(events, [
+      { status: "partial", result: "partial" },
+      { status: "error", error_code: "stream_incomplete", error_message: "openai_compat: upstream closed before [DONE]" },
+    ]);
   });
 });
 
