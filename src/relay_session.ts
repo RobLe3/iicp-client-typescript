@@ -11,6 +11,8 @@
 import * as net from "node:net";
 import { randomUUID } from "node:crypto";
 import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTicket } from "./relay_ticket.js";
+import { decodeLifecycleResponse } from "./iicp_tcp.js";
+import { NativeResponseSequence, type NativeResponseFrame } from "./native_response_sequence.js";
 
 const IICP_MAGIC = Buffer.from("IICP");
 const FRAMING_VERSION = 0x01;
@@ -26,6 +28,57 @@ const MT_PING = 0x09;
 const MT_PONG = 0x0a;
 const MT_RELAY_BIND = 0x0b;
 const MT_RELAY_ACK = 0x0c;
+const MAX_RELAY_STREAM_EVENTS = 32;
+
+class PendingRelayStream {
+  readonly sequence: NativeResponseSequence;
+  readonly events: NativeResponseFrame[] = [];
+  readonly waiters: Array<{ resolve: (event: NativeResponseFrame) => void; reject: (error: Error) => void }> = [];
+  error: Error | null = null;
+
+  constructor(sessionId: string, callId: string, taskId: string) {
+    this.sequence = new NativeResponseSequence(sessionId, callId, taskId);
+  }
+
+  push(event: NativeResponseFrame): void {
+    if (this.error) return;
+    try { this.sequence.accept(event); }
+    catch (error) { this.fail(error instanceof Error ? error : new Error(String(error))); return; }
+    const waiter = this.waiters.shift();
+    if (waiter) waiter.resolve(event);
+    else if (this.events.length >= MAX_RELAY_STREAM_EVENTS) this.fail(new Error("relay_backpressure_exceeded"));
+    else this.events.push(event);
+  }
+
+  fail(error: Error): void {
+    this.error = error;
+    this.events.length = 0;
+    while (this.waiters.length) this.waiters.shift()!.reject(error);
+  }
+
+  next(timeoutMs: number): Promise<NativeResponseFrame> {
+    if (this.error) return Promise.reject(this.error);
+    const event = this.events.shift();
+    if (event) return Promise.resolve(event);
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve: (value: NativeResponseFrame) => { clearTimeout(timer); resolve(value); }, reject: (error: Error) => { clearTimeout(timer); reject(error); } };
+      const timer = setTimeout(() => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(new Error("relay_stream_timeout"));
+      }, timeoutMs);
+      this.waiters.push(waiter);
+    });
+  }
+}
+
+type RelayQueuedCall = {
+  call_id: string;
+  task: unknown;
+  task_id?: string;
+  session_id?: string;
+  stream?: boolean;
+};
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const _cborx = require("cbor-x") as {
@@ -63,6 +116,7 @@ export class RelayWorkerSession {
   readonly workerId: string;
   private readonly _socket: net.Socket;
   private readonly _pending = new Map<string, (result: Record<string, unknown>) => void>();
+  private readonly _streamPending = new Map<string, PendingRelayStream>();
   private _writeLocked = false;
 
   constructor(workerId: string, socket: net.Socket) {
@@ -116,6 +170,28 @@ export class RelayWorkerSession {
       cb(result);
     }
   }
+
+  async *forwardStream(task: Record<string, unknown>, timeoutMs = 120_000): AsyncIterableIterator<NativeResponseFrame> {
+    const callId = randomUUID();
+    const taskId = String(task.task_id ?? callId);
+    const sessionId = String(task.session_id ?? callId);
+    const pending = new PendingRelayStream(sessionId, callId, taskId);
+    this._streamPending.set(callId, pending);
+    try {
+      this._socket.write(makeFrame(MT_CALL, _enc(new Map<number, unknown>([
+        [2, sessionId], [15, callId], [24, taskId], [5, Buffer.from(JSON.stringify(task))],
+      ]))));
+      while (true) {
+        const event = await pending.next(timeoutMs);
+        yield event;
+        if (event.is_final) return;
+      }
+    } finally { this._streamPending.delete(callId); }
+  }
+
+  onStreamResponse(callId: string, event: NativeResponseFrame): void {
+    this._streamPending.get(callId)?.push(event);
+  }
 }
 
 // ── HttpPollWorkerSession (#450 browser workers) ─────────────────────────────
@@ -141,9 +217,10 @@ export class HttpPollWorkerSession {
   readonly intent: string;
   readonly models: string[];
   readonly sessionToken: string;
-  private readonly _queue: Array<{ call_id: string; task: unknown }> = [];
-  private readonly _waiters: Array<(call: { call_id: string; task: unknown } | null) => void> = [];
+  private readonly _queue: RelayQueuedCall[] = [];
+  private readonly _waiters: Array<(call: RelayQueuedCall | null) => void> = [];
   private readonly _pending = new Map<string, (result: Record<string, unknown>) => void>();
+  private readonly _streamPending = new Map<string, PendingRelayStream>();
   private _lastPull = Date.now();
   private readonly _livenessWindowMs: number;
   private _closed = false;
@@ -176,12 +253,12 @@ export class HttpPollWorkerSession {
   }
 
   /** Long-poll: next queued CALL, or null when the window elapses. */
-  nextCall(timeoutMs = 25_000): Promise<{ call_id: string; task: unknown } | null> {
+  nextCall(timeoutMs = 25_000): Promise<RelayQueuedCall | null> {
     this._lastPull = Date.now();
     const queued = this._queue.shift();
     if (queued) return Promise.resolve(queued);
     return new Promise((resolve) => {
-      const waiter = (call: { call_id: string; task: unknown } | null) => {
+      const waiter = (call: RelayQueuedCall | null) => {
         clearTimeout(timer);
         this._lastPull = Date.now();
         resolve(call);
@@ -206,6 +283,29 @@ export class HttpPollWorkerSession {
       this._pending.delete(callId);
       cb(result);
     }
+  }
+
+  async *forwardStream(task: Record<string, unknown>, timeoutMs = 120_000): AsyncIterableIterator<NativeResponseFrame> {
+    const callId = randomUUID();
+    const taskId = String(task.task_id ?? callId);
+    const sessionId = String(task.session_id ?? callId);
+    const pending = new PendingRelayStream(sessionId, callId, taskId);
+    this._streamPending.set(callId, pending);
+    const call = { call_id: callId, task_id: taskId, session_id: sessionId, stream: true, task };
+    const waiter = this._waiters.shift();
+    if (waiter) waiter(call);
+    else this._queue.push(call);
+    try {
+      while (true) {
+        const event = await pending.next(timeoutMs);
+        yield event;
+        if (event.is_final) return;
+      }
+    } finally { this._streamPending.delete(callId); }
+  }
+
+  onStreamResponse(callId: string, event: NativeResponseFrame): void {
+    this._streamPending.get(callId)?.push(event);
   }
 
   close(): void {
@@ -494,7 +594,16 @@ export class RelayAcceptServer {
           socket.write(makeFrame(MT_PONG, _enc(new Map<number, unknown>([[1, echo]])) as Buffer));
         } else if (ft === MT_RESPONSE) {
           try {
-            const rb = _dec(fp) as Record<number, unknown>;
+            const decoded = _dec(fp);
+            const hasLifecycle = decoded instanceof Map
+              ? decoded.has(13)
+              : Boolean(decoded && typeof decoded === "object" && 13 in decoded);
+            if (hasLifecycle) {
+              const lifecycleEvent = decodeLifecycleResponse(decoded);
+              session.onStreamResponse(lifecycleEvent.call_id, lifecycleEvent);
+              continue;
+            }
+            const rb = decoded as Record<number, unknown>;
             const callId = String(rb[15] ?? "");
             const raw5 = rb[5];
             let result: Record<string, unknown> = {};

@@ -941,7 +941,7 @@ function numericField(value: unknown, key: number): unknown {
   return undefined;
 }
 
-function decodeLifecycleResponse(value: unknown): NativeResponseFrame {
+export function decodeLifecycleResponse(value: unknown): NativeResponseFrame {
   const lifecycle = numericField(value, 13);
   if (!lifecycle || typeof lifecycle !== "object") throw new IicpTcpClientError("missing_lifecycle");
   const error = numericField(value, 6);

@@ -1491,7 +1491,7 @@ export class IicpNode {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      let payload: { call_id?: string; result?: unknown };
+      let payload: { call_id?: string; result?: unknown; event?: unknown };
       try {
         payload = JSON.parse(Buffer.concat(chunks).toString() || "{}");
       } catch {
@@ -1500,11 +1500,16 @@ export class IicpNode {
       }
       const callId = payload.call_id ?? "";
       const result = payload.result;
-      if (!callId || typeof result !== "object" || result === null) {
+      const event = payload.event;
+      if (!callId || ((typeof result !== "object" || result === null) && (typeof event !== "object" || event === null))) {
         this._relayJson(res, 422, { error: { code: "IICP-E001", message: "call_id and result are required" } });
         return;
       }
-      session.onResponse(callId, result as Record<string, unknown>);
+      if (typeof event === "object" && event !== null) {
+        session.onStreamResponse(callId, event as import("./native_response_sequence.js").NativeResponseFrame);
+      } else {
+        session.onResponse(callId, result as Record<string, unknown>);
+      }
       res.writeHead(204, { ...RELAY_CORS_HEADERS });
       res.end();
     });
