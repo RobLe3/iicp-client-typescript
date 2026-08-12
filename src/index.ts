@@ -1,5 +1,6 @@
 export { IicpClient } from "./client.js";
-export { weightedV1Order } from "./selection.js";
+export { CANDIDATE_EVIDENCE_SCHEMA_V0, weightedV1Order } from "./selection.js";
+export type { CandidateEvidenceV0, CandidateRanker, RankerDecision, RankerMode, RankerRequest } from "./selection.js";
 export { canonicalizeJcs, JCS_MAX_SAFE_INTEGER } from "./jcs.js";
 export { evaluatePreNormativeProfile } from "./profile_compatibility.js";
 export type { ProfileCompatibilityDecision } from "./profile_compatibility.js";

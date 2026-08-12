@@ -168,6 +168,7 @@ export interface Node {
   endpoint: string;
   score: number;
   load?: number;
+  models?: string[];
   available: boolean;
   region: string;
   latency_estimate_ms?: number;
