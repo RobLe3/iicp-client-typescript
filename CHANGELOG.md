@@ -9,12 +9,20 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.102] — 2026-08-12
+
+### Added — negotiated service lifecycle streaming
+- Added an explicit opt-in native streaming client/server path with ordered task, call, session and sequence validation.
+- Genuine OpenAI-compatible streaming can pass through direct TCP and authenticated relay paths with bounded aggregation, backpressure, cancellation cleanup and terminal-state enforcement.
+- Capability-level `supportedProfiles` advertisement remains disabled unless the operator enables it; buffered `call()` and terminal-only backends retain their existing behavior.
+
 ### Added — local runtime health and service lifecycle
 - Added versioned, content-free local liveness/readiness snapshots plus `iicp-node healthcheck`; shared scenarios keep external connectivity separate from local runtime progress.
 - `iicp-node service install`, `status`, `restart`, and `uninstall` now execute the selected launchd or systemd user-service lifecycle unless dry-run mode is explicit.
 
-### Hardened — protocol and managed-operation boundaries
-- Added fail-closed native RESPONSE sequence validation, aligned consumer co-signature transition fixtures, bounded MCP session replay, and a managed-operator startup profile without changing the released buffered call contract.
+### Hardened — protocol, supply-chain and managed-operation boundaries
+- Added fail-closed native RESPONSE sequence and lifecycle-identity validation, aligned consumer co-signature transition fixtures, bounded MCP session replay, and a managed-operator startup profile.
+- Refreshed the 0.7.102 lockfile and selected patched `esbuild` 0.28.2 within the existing development dependency range.
 
 ## [0.7.101] — 2026-08-01
 
