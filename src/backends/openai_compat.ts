@@ -72,6 +72,7 @@ export function openaiCompatStreamingHandler(opts: OpenAiCompatOptions = {}): Tc
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? 30_000);
     let tokensUsed: number | undefined;
+    let reader: ReadableStreamDefaultReader<string> | undefined;
     try {
       const response = await fetch(`${base}${path}`, {
         method: "POST", headers, body: JSON.stringify(body), signal: controller.signal,
@@ -85,10 +86,32 @@ export function openaiCompatStreamingHandler(opts: OpenAiCompatOptions = {}): Tc
         yield { status: "error", error_code: "invalid_backend_stream", error_message: "openai_compat: upstream returned no stream body" };
         return;
       }
-      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+      reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
       let buffer = "";
+      let output = "";
+      let flushDeadline = 0;
+      let pendingRead = reader.read();
       while (true) {
-        const { value, done } = await reader.read();
+        const read = output
+          ? await new Promise<{ kind: "read"; value: { done: boolean; value?: string } } | { kind: "flush" }>((resolve, reject) => {
+              const timer = setTimeout(
+                () => resolve({ kind: "flush" }),
+                Math.max(0, flushDeadline - performance.now()),
+              );
+              pendingRead.then(
+                (value) => { clearTimeout(timer); resolve({ kind: "read", value }); },
+                (error: unknown) => { clearTimeout(timer); reject(error); },
+              );
+            })
+          : { kind: "read" as const, value: await pendingRead };
+        if (read.kind === "flush") {
+          yield { status: "partial", result: output, ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+          output = "";
+          flushDeadline = 0;
+          continue;
+        }
+        const { value, done } = read.value;
+        if (!done) pendingRead = reader.read();
         buffer += value ?? "";
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() ?? "";
@@ -96,6 +119,9 @@ export function openaiCompatStreamingHandler(opts: OpenAiCompatOptions = {}): Tc
           if (!line.startsWith("data:")) continue;
           const data = line.slice(5).trim();
           if (data === "[DONE]") {
+            if (output) {
+              yield { status: "partial", result: output, ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+            }
             yield { status: "success", result: "", ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
             return;
           }
@@ -112,10 +138,22 @@ export function openaiCompatStreamingHandler(opts: OpenAiCompatOptions = {}): Tc
           const delta = first?.delta as Record<string, unknown> | undefined;
           const text = task.intent.endsWith(":chat:v1") ? delta?.content : first?.text;
           if (typeof text === "string" && text) {
-            yield { status: "partial", result: text, ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+            if (!output) flushDeadline = performance.now() + 25;
+            output += text;
+            if (Buffer.byteLength(output, "utf8") >= 256) {
+              yield { status: "partial", result: output, ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+              output = "";
+              flushDeadline = 0;
+            }
           }
         }
-        if (done) return;
+        if (done) {
+          if (output) {
+            yield { status: "partial", result: output, ...(tokensUsed === undefined ? {} : { tokens_used: tokensUsed }) };
+          }
+          yield { status: "error", error_code: "stream_incomplete", error_message: "openai_compat: upstream closed before [DONE]" };
+          return;
+        }
       }
     } catch (error) {
       yield error instanceof DOMException && error.name === "AbortError"
@@ -123,6 +161,7 @@ export function openaiCompatStreamingHandler(opts: OpenAiCompatOptions = {}): Tc
         : { status: "error", error_code: "backend_transport_error", error_message: "openai_compat: backend transport failed" };
     } finally {
       clearTimeout(timer);
+      await reader?.cancel().catch(() => undefined);
     }
   };
 }
