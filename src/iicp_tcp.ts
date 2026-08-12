@@ -18,6 +18,11 @@
  */
 
 import * as net from "node:net";
+import { randomUUID } from "node:crypto";
+import {
+  NativeResponseSequence,
+  type NativeResponseFrame,
+} from "./native_response_sequence.js";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -698,6 +703,67 @@ export class IicpTcpClient {
     return { value: resultBytes };
   }
 
+  /** Yield validated events from the opt-in service-lifecycle profile. */
+  async *streamCall(
+    intent: string,
+    payload: Record<string, unknown>,
+    opts: {
+      taskId: string;
+      sessionId?: string;
+      callId?: string;
+      idempotencyKey?: string;
+      timeoutMs?: number;
+    },
+  ): AsyncIterableIterator<NativeResponseFrame> {
+    if (!this._socket) throw new IicpTcpClientError("not connected");
+    if (!opts.taskId) throw new IicpTcpClientError("taskId is required for lifecycle streaming");
+    const sessionId = opts.sessionId ?? "call-1";
+    const callId = opts.callId ?? randomUUID();
+    const body = new Map<number, unknown>([
+      [2, sessionId],
+      [3, intent],
+      [5, Buffer.from(JSON.stringify(payload))],
+      [15, callId],
+      [24, opts.taskId],
+    ]);
+    if (opts.idempotencyKey !== undefined) body.set(16, opts.idempotencyKey);
+    this._socket.write(encodeFrame(MsgType.CALL, await encodeCbor(body)));
+
+    const sequence = new NativeResponseSequence(sessionId, callId, opts.taskId);
+    let terminal = false;
+    try {
+      while (!terminal) {
+        let wire: { msgType: number; payload: Buffer };
+        try {
+          wire = await this._readFrame(opts.timeoutMs);
+        } catch (error) {
+          try {
+            sequence.finish();
+          } catch (lifecycleError) {
+            throw new IicpTcpClientError(
+              lifecycleError instanceof Error ? lifecycleError.message : String(lifecycleError),
+            );
+          }
+          throw error;
+        }
+        if (wire.msgType !== MsgType.RESPONSE) {
+          throw new IicpTcpClientError(`expected RESPONSE (0x06), got 0x${wire.msgType.toString(16)}`);
+        }
+        const frame = decodeLifecycleResponse(await decodeCbor(wire.payload));
+        try {
+          sequence.accept(frame);
+        } catch (error) {
+          throw new IicpTcpClientError(error instanceof Error ? error.message : String(error));
+        }
+        terminal = frame.is_final;
+        yield frame;
+      }
+      sequence.finish();
+    } finally {
+      if (!terminal && this._socket && !this._socket.destroyed) this._socket.destroy();
+    }
+  }
+
   /** Send CLOSE (graceful teardown). Server hangs up; caller should disconnect. */
   async close(): Promise<void> {
     if (!this._socket || this._socket.destroyed) return;
@@ -772,4 +838,33 @@ export class IicpTcpClient {
       this._waiters.push(resolver);
     });
   }
+}
+
+function numericField(value: unknown, key: number): unknown {
+  if (value instanceof Map) return value.get(key);
+  if (value && typeof value === "object") return (value as Record<number, unknown>)[key];
+  return undefined;
+}
+
+function decodeLifecycleResponse(value: unknown): NativeResponseFrame {
+  const lifecycle = numericField(value, 13);
+  if (!lifecycle || typeof lifecycle !== "object") throw new IicpTcpClientError("missing_lifecycle");
+  const error = numericField(value, 6);
+  return {
+    session_id: String(numericField(value, 2) ?? ""),
+    call_id: String(numericField(value, 3) ?? ""),
+    status: String(numericField(value, 4) ?? ""),
+    is_final: numericField(value, 12) === true,
+    lifecycle: {
+      task_id: String(numericField(lifecycle, 1) ?? ""),
+      sequence: Number(numericField(lifecycle, 2)),
+      event: String(numericField(lifecycle, 3) ?? ""),
+      is_final: numericField(lifecycle, 4) === true,
+    },
+    result: numericField(value, 5),
+    error:
+      error && typeof error === "object"
+        ? { code: numericField(error, 1), message: numericField(error, 2) }
+        : undefined,
+  };
 }

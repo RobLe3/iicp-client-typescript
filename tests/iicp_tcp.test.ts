@@ -468,4 +468,67 @@ describe("IicpTcpClient", () => {
       await client.disconnect();
     }
   });
+
+  it("yields validated lifecycle partial and terminal events", async () => {
+    const client = new IicpTcpClient({ host: HOST });
+    const writes: Buffer[] = [];
+    const socket = {
+      destroyed: false,
+      write: (data: Buffer) => {
+        writes.push(data);
+        return true;
+      },
+      destroy: () => {
+        socket.destroyed = true;
+      },
+    };
+    const responses = [
+      new Map<number, unknown>([
+        [2, "s"], [3, "c"], [4, "partial"], [5, Buffer.from("hel")], [12, false],
+        [13, new Map([[1, "t"], [2, 0], [3, "partial"], [4, false]])],
+      ]),
+      new Map<number, unknown>([
+        [2, "s"], [3, "c"], [4, "success"], [5, Buffer.from("lo")], [12, true],
+        [13, new Map([[1, "t"], [2, 1], [3, "completed"], [4, true]])],
+      ]),
+    ];
+    const internals = client as unknown as {
+      _socket: typeof socket;
+      _readFrame: () => Promise<{ msgType: number; payload: Buffer }>;
+    };
+    internals._socket = socket;
+    internals._readFrame = async () => ({ msgType: MsgType.RESPONSE, payload: Buffer.from(cborEncode(responses.shift())) });
+
+    const events = [];
+    for await (const event of client.streamCall("urn:iicp:intent:test:v1", {}, { taskId: "t", sessionId: "s", callId: "c" })) {
+      events.push(event);
+    }
+    assert.deepEqual(events.map((event) => event.status), ["partial", "success"]);
+    assert.equal(Buffer.concat(events.map((event) => Buffer.from(event.result as Uint8Array))).toString(), "hello");
+    const request = cborDecode(writes[0].subarray(FRAME_HEADER_LEN)) as Record<number, unknown>;
+    assert.equal(request[15], "c");
+    assert.equal(request[24], "t");
+  });
+
+  it("rejects lifecycle sequence drift", async () => {
+    const client = new IicpTcpClient({ host: HOST });
+    const socket = { destroyed: false, write: () => true, destroy: () => { socket.destroyed = true; } };
+    const internals = client as unknown as {
+      _socket: typeof socket;
+      _readFrame: () => Promise<{ msgType: number; payload: Buffer }>;
+    };
+    internals._socket = socket;
+    internals._readFrame = async () => ({
+      msgType: MsgType.RESPONSE,
+      payload: Buffer.from(cborEncode(new Map<number, unknown>([
+        [2, "s"], [3, "c"], [4, "success"], [12, true],
+        [13, new Map([[1, "t"], [2, 1], [3, "completed"], [4, true]])],
+      ]))),
+    });
+    await assert.rejects(async () => {
+      for await (const _event of client.streamCall("urn:iicp:intent:test:v1", {}, { taskId: "t", sessionId: "s", callId: "c" })) {
+        // no-op
+      }
+    }, /sequence_drift/);
+  });
 });
