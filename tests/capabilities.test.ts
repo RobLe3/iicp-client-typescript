@@ -35,6 +35,15 @@ describe("#409 buildCapabilities", () => {
     assert.deepEqual(caps, [{ intent: CHAT, models: [], max_tokens: 1024, input_modalities: ["text"] }]);
   });
 
+  it("advertises supported profiles only after explicit opt-in", () => {
+    const profile = "urn:iicp:profile:service-lifecycle:v1";
+    assert.equal(buildCapabilities(["qwen"], CHAT, 4096)[0]?.supported_profiles, undefined);
+    assert.deepEqual(
+      buildCapabilities(["qwen"], CHAT, 4096, [profile, profile])[0]?.supported_profiles,
+      [profile],
+    );
+  });
+
   it("#408 vision model → image-modality chat capability, distinct from text chat", () => {
     const caps = buildCapabilities(["qwen2.5-coder-14b", "qwen/qwen3-vl-8b"], CHAT, 4096);
     assert.equal(caps.length, 2);

@@ -168,9 +168,17 @@ export function buildCapabilities(
   models: string[],
   defaultIntent: string,
   maxTokens: number,
-): Array<{ intent: string; models: string[]; max_tokens: number; input_modalities: string[] }> {
+  supportedProfiles: string[] = [],
+): Array<{ intent: string; models: string[]; max_tokens: number; input_modalities: string[]; supported_profiles?: string[] }> {
+  const profiles = [...new Set(supportedProfiles)];
   if (models.length === 0) {
-    return [{ intent: defaultIntent, models: [], max_tokens: maxTokens, input_modalities: ["text"] }];
+    return [{
+      intent: defaultIntent,
+      models: [],
+      max_tokens: maxTokens,
+      input_modalities: ["text"],
+      ...(profiles.length > 0 ? { supported_profiles: profiles } : {}),
+    }];
   }
   const order: string[] = [];
   const groups = new Map<string, { intent: string; models: string[]; input_modalities: string[] }>();
@@ -187,7 +195,13 @@ export function buildCapabilities(
   }
   return order.map((key) => {
     const g = groups.get(key)!;
-    return { intent: g.intent, models: g.models, max_tokens: maxTokens, input_modalities: g.input_modalities };
+    return {
+      intent: g.intent,
+      models: g.models,
+      max_tokens: maxTokens,
+      input_modalities: g.input_modalities,
+      ...(profiles.length > 0 ? { supported_profiles: [...profiles] } : {}),
+    };
   });
 }
 
@@ -210,6 +224,8 @@ export interface NodeConfig {
   excludedModels?: string[];
   /** Pre-normative receipt profiles explicitly enabled by the operator. */
   supportedReceiptProfiles?: string[];
+  /** Explicit opt-in capability profiles. Empty means no profile claim. */
+  supportedProfiles?: string[];
   region?: string;
   capabilities?: string[];
   directoryUrl?: string;
@@ -394,6 +410,7 @@ export class IicpNode {
       backend: config.backend,
       excludedModels: config.excludedModels ?? [],
       supportedReceiptProfiles: config.supportedReceiptProfiles ?? [],
+      supportedProfiles: config.supportedProfiles ?? [],
       endpoint: config.endpoint,
       intent: config.intent,
       model: config.model,
@@ -625,7 +642,7 @@ export class IicpNode {
       region: this._cfg.region ?? "eu-central",
       // #409 — one capability object per intent the backend can serve (e.g.
       // chat + embedding), classified from the detected model set.
-      capabilities: buildCapabilities(models, this._cfg.intent, this._cfg.maxTokens),
+      capabilities: buildCapabilities(models, this._cfg.intent, this._cfg.maxTokens, this._cfg.supportedProfiles),
       limits: {
         max_concurrent: this._cfg.maxConcurrent,
         tokens_per_min: this._cfg.tokensPerMin,
