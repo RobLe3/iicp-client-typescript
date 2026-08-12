@@ -123,6 +123,23 @@ not silently fall back to anonymous dispatch if consumer-token acquisition
 fails. The default remains `"optional"`; `"disabled"` skips token
 acquisition.
 
+### Experimental local candidate rankers
+
+Library users may attach a `CandidateRanker` to test a learned or
+application-specific ordering policy. The client invokes it only after normal
+endpoint, availability, confidentiality and routing-policy checks. It receives
+a redacted `CandidateEvidenceV0` array and may select one listed reference or
+decline. Decline preserves the configured built-in strategy; a rejection or
+unknown reference fails before provider dispatch.
+
+```ts
+const client = new IicpClient(config).withCandidateRanker(myRanker);
+```
+
+TypeScript, Python and Rust test the same experimental behavior fixture. This
+is not a wire profile or default. The SDK never sends request content to an
+external evaluator automatically.
+
 ## Migrate from existing AI tools
 
 Direct call:

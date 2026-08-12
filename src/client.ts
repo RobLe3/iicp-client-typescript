@@ -10,7 +10,8 @@ import { policyManifestBindingMatches, verifyDispatchRouteTicket } from "./dispa
 import { postJsonPinned } from "./endpoint_security.js";
 import { IicpError } from "./errors.js";
 import { ensureIntentAllowed } from "./policy.js";
-import { weightedV1Order } from "./selection.js";
+import { applyCandidateRanker, rankerReceiptProfile, weightedV1Order } from "./selection.js";
+import type { CandidateRanker, RankerDecision } from "./selection.js";
 import { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
 import {
   ROUTING_POLICY_REFUSAL_CODE,
@@ -120,6 +121,7 @@ const CONSUMER_TOKEN_EXPIRY_BUFFER_S = 30;
 
 export class IicpClient {
   private readonly cfg: ClientConfig;
+  private candidateRanker?: CandidateRanker;
   /** Cache: `${nodeToken}|${targetNodeId}|${intent}` → [token, expUnix] */
   private readonly _ctCache = new Map<string, [string, number]>();
 
@@ -176,6 +178,12 @@ export class IicpClient {
     this.cfg = merged;
   }
 
+  /** Attach an optional ranker for candidates that already passed eligibility. */
+  withCandidateRanker(ranker: CandidateRanker): this {
+    this.candidateRanker = ranker;
+    return this;
+  }
+
 
   private _selectCandidates(nodes: Node[], maxRetries: number): Node[] {
     const strategy = this.cfg.routing_strategy ?? "epsilon";
@@ -220,6 +228,7 @@ export class IicpClient {
       endpoint,
       score: Number(raw.score ?? 0),
       load: Number(raw.load ?? 0),
+      models: Array.isArray(raw.models) ? raw.models.filter((model): model is string => typeof model === "string") : undefined,
       available: Boolean(raw.available ?? true),
       region: String(raw.region ?? ""),
       latency_estimate_ms: raw.latency_estimate_ms as number | undefined,
@@ -446,7 +455,29 @@ export class IicpClient {
         { component: "sdk" },
       );
     }
-    const candidates = this._selectCandidates(decision.eligible, MAX_RETRIES);
+    const builtInCandidates = this._selectCandidates(decision.eligible, MAX_RETRIES);
+    let candidates = builtInCandidates;
+    let rankerDecision: RankerDecision | undefined;
+    if (this.candidateRanker) {
+      try {
+        const applied = await applyCandidateRanker(
+          this.candidateRanker,
+          req,
+          taskId,
+          decision.eligible,
+          builtInCandidates,
+          MAX_RETRIES,
+        );
+        candidates = applied.candidates;
+        rankerDecision = applied.decision;
+      } catch (err) {
+        throw new IicpError(
+          err instanceof Error && err.message ? err.message : "candidate ranker failed",
+          "IICP-CANDIDATE-RANKER-REFUSED",
+          { component: "sdk", cause: err },
+        );
+      }
+    }
 
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (req.auth?.token) {
@@ -456,7 +487,7 @@ export class IicpClient {
     }
 
     let lastErr: IicpError | undefined;
-    for (const node of candidates) {
+    for (const [candidateIndex, node] of candidates.entries()) {
       // Phase 2 (#496): acquire directory-issued consumer token when caller has directory identity.
       const nodeHeaders = { ...headers };
       const ct = this.cfg.consumer_auth_mode === "disabled"
@@ -534,7 +565,11 @@ export class IicpClient {
             dispatch_ticket_id_prefix: node.dispatch_ticket_id_prefix,
             routing_receipt: {
               receipt_version: "iicp-routing-receipt-v1",
-              selection_profile: profileNegotiation ? (this.cfg.routing_strategy ?? "epsilon") : "directory_ticket_v1",
+              selection_profile: rankerDecision
+                ? rankerReceiptProfile(rankerDecision, candidateIndex)
+                : profileNegotiation
+                  ? (this.cfg.routing_strategy ?? "epsilon")
+                  : "directory_ticket_v1",
               eligible_candidate_count: decision.eligible.length,
               selected_node_id_prefix: _nodeShortId(node.node_id),
               profile_negotiation: profileNegotiation,

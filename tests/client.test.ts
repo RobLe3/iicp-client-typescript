@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { IicpClient } from "../src/client.js";
 import { IicpError } from "../src/errors.js";
 import { IicpNode } from "../src/node.js";
+import type { CandidateEvidenceV0, CandidateRanker, RankerRequest } from "../src/selection.js";
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -492,6 +493,108 @@ describe("submit", () => {
       routing_policy: { profile: "eu_restricted" } satisfies RoutingPolicy,
     });
     assert.match(called, /5\.6\.7\.8/);
+    restore();
+  });
+
+  it("candidate ranker runs after policy eligibility and records exploration", async () => {
+    class EuRanker implements CandidateRanker {
+      observed: readonly CandidateEvidenceV0[] = [];
+
+      rank(request: RankerRequest, candidates: readonly CandidateEvidenceV0[]) {
+        assert.deepEqual(request.request.payload, { prompt: "hello" });
+        this.observed = candidates;
+        return {
+          candidate_ref: candidates[0].candidate_ref,
+          policy_id: "typescript-parity-v0",
+          mode: "exploration" as const,
+        };
+      }
+    }
+
+    let called = "";
+    const restore = mockFetch((url) => {
+      const u = url.toString();
+      if (u.includes("discover")) {
+        return jsonResponse({
+          nodes: [
+            {
+              node_id: "us-node",
+              endpoint: "https://1.2.3.4:8080",
+              score: 0.99,
+              models: ["model-us"],
+              available: true,
+              region: "us-east",
+              cx_public_key: fixtureCxKey("cx-us"),
+            },
+            {
+              node_id: "eu-node",
+              endpoint: "https://5.6.7.8:8080",
+              score: 0.50,
+              models: ["model-eu"],
+              available: true,
+              region: "eu-central",
+              cx_public_key: fixtureCxKey("cx-eu"),
+            },
+          ],
+        });
+      }
+      called = u;
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const ranker = new EuRanker();
+    const client = new IicpClient({ directory_url: "https://fake-dir.test", routing_epsilon: 0.0 })
+      .withCandidateRanker(ranker);
+    const response = await client.submit({
+      intent: "urn:iicp:intent:llm:chat:v1",
+      payload: { prompt: "hello" },
+      routing_policy: { profile: "eu_restricted" } satisfies RoutingPolicy,
+    });
+
+    assert.match(called, /5\.6\.7\.8/);
+    assert.equal(ranker.observed.length, 1);
+    assert.deepEqual(ranker.observed[0].models, ["model-eu"]);
+    assert.equal(response.routing_receipt?.selection_profile, "external_ranker/typescript-parity-v0/exploration");
+    restore();
+  });
+
+  it("candidate ranker unknown reference fails before provider dispatch", async () => {
+    let taskCalls = 0;
+    const restore = mockFetch((url) => {
+      if (url.toString().includes("discover")) {
+        return jsonResponse({
+          nodes: [{
+            node_id: "eligible-node",
+            endpoint: "https://1.2.3.4:8080",
+            score: 1,
+            available: true,
+            region: "eu",
+            cx_public_key: fixtureCxKey("cx-ranker"),
+          }],
+        });
+      }
+      taskCalls += 1;
+      return jsonResponse({ task_id: "t1", result: {}, status: "ok" });
+    });
+    const client = new IicpClient({ directory_url: "https://fake-dir.test" }).withCandidateRanker({
+      rank: () => ({
+        candidate_ref: "outside-eligible-set",
+        policy_id: "typescript-parity-v0",
+        mode: "normal",
+      }),
+    });
+
+    await assert.rejects(
+      () => client.submit({
+        intent: "urn:iicp:intent:llm:chat:v1",
+        payload: { prompt: "do not send" },
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof IicpError);
+        assert.equal(err.code, "IICP-CANDIDATE-RANKER-REFUSED");
+        return true;
+      },
+    );
+    assert.equal(taskCalls, 0);
     restore();
   });
 
