@@ -9,6 +9,15 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.103] — 2026-08-13
+
+### Added — eligibility-bounded candidate ranking
+- Added an opt-in `CandidateRanker` seam over policy-filtered candidate evidence. Unknown selections, declines, timeouts, malformed output, and stale candidates fall back to the established selector before IICP revalidates and dispatches.
+- The interface is local and experimental; it does not add wire fields or give an external ranker authority over discovery, policy, confidentiality, transport, or dispatch.
+
+### Hardened — provider credential continuity
+- Added deterministic IICP-E050 credential-lifecycle replay coverage so providers recover after directory credential rotation without silently accepting stale credentials.
+
 ## [0.7.102] — 2026-08-12
 
 ### Added — negotiated service lifecycle streaming
