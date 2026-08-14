@@ -3,12 +3,25 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildCapabilities } from "../src/node.js";
+import { advertisedCapabilities, buildCapabilities } from "../src/node.js";
 
 const CHAT = "urn:iicp:intent:llm:chat:v1";
 const EMBED = "urn:iicp:intent:llm:embedding:v1";
 
 describe("#409 buildCapabilities", () => {
+  it("explicit effective variants replace model-name heuristic output", () => {
+    const explicit = [{
+      intent: CHAT,
+      variant_id: "explicit-vision",
+      models: ["custom-model"],
+      input_modalities: ["text", "image"],
+      claim_provenance: { source: "runtime_introspection" as const },
+    }];
+    assert.deepEqual(
+      advertisedCapabilities(explicit, ["qwen-vl-heuristic-name"], CHAT, 4096),
+      explicit,
+    );
+  });
   it("chat + embedding models advertise two intents (LM Studio case)", () => {
     const caps = buildCapabilities(
       ["qwen2.5-coder-14b-instruct", "text-embedding-nomic-embed-text-v1.5"],

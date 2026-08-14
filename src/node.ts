@@ -24,6 +24,7 @@ import type { CxPublicKey } from "./types.js";
 import { decryptPayloadWithContext, encryptResponse, loadOrCreateNodeCxKey } from "./confidentiality.js";
 import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTicket } from "./relay_ticket.js";
 import { BackendStabilityObservation, observeBackendStability } from "./backend_stability.js";
+import type { EffectiveCapability } from "./effective_capability.js";
 import { autoUpdateStatusPayload } from "./updater.js";
 import { loadNode, saveNode } from "./identity.js";
 import { RuntimeHealth, runtimeHealthPath, writeRuntimeHealthSnapshot } from "./runtime_health.js";
@@ -205,6 +206,18 @@ export function buildCapabilities(
   });
 }
 
+export function advertisedCapabilities(
+  explicit: readonly EffectiveCapability[],
+  models: string[],
+  defaultIntent: string,
+  maxTokens: number,
+  supportedProfiles: string[] = [],
+): EffectiveCapability[] {
+  return explicit.length > 0
+    ? explicit.map((capability) => ({ ...capability }))
+    : buildCapabilities(models, defaultIntent, maxTokens, supportedProfiles);
+}
+
 // Use `any` for prom-client types — it's an optional peer dep and may not be installed.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type PromLib = any;
@@ -228,6 +241,9 @@ export interface NodeConfig {
   supportedProfiles?: string[];
   region?: string;
   capabilities?: string[];
+  /** Complete explicit service-path variants. When present they replace the
+   * legacy model-name heuristic advertisement without field union. */
+  effectiveCapabilities?: EffectiveCapability[];
   directoryUrl?: string;
   timeoutMs?: number;
   /** Maximum concurrent tasks; excess → 429 IICP-E021. Default: 4. */
@@ -324,7 +340,7 @@ export class IicpNode {
   private readonly _cfg: Required<
     Omit<
       NodeConfig,
-      "model" | "backend" | "excludedModels" | "region" | "capabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint" | "operatorDelegation" | "operatorDisplayName" | "operatorCreatedAt" | "operatorIntegrityHash" | "policyManifest" | "backendUrl" | "backendApiKey"
+      "model" | "backend" | "excludedModels" | "region" | "capabilities" | "effectiveCapabilities" | "transportEndpoint" | "transportMethod" | "natType" | "transportMetadata" | "exposureMode" | "cipPolicy" | "pricing" | "nodeHmacKey" | "availabilityWindows" | "enableIdempotency" | "enableMesh" | "relayCapable" | "relayWorkerEndpoint" | "operatorDelegation" | "operatorDisplayName" | "operatorCreatedAt" | "operatorIntegrityHash" | "policyManifest" | "backendUrl" | "backendApiKey"
     >
   > & {
     model: string | undefined;
@@ -332,6 +348,7 @@ export class IicpNode {
     excludedModels: string[];
     region: string | undefined;
     capabilities: string[];
+    effectiveCapabilities: EffectiveCapability[];
     transportEndpoint: string | undefined;
     transportMethod: NodeConfig["transportMethod"];
     natType: NodeConfig["natType"];
@@ -416,6 +433,7 @@ export class IicpNode {
       model: config.model,
       region: config.region,
       capabilities: config.capabilities ?? [],
+      effectiveCapabilities: config.effectiveCapabilities ?? [],
       directoryUrl: config.directoryUrl ?? DEFAULT_DIRECTORY,
       timeoutMs: config.timeoutMs ?? 5_000,
       maxConcurrent: config.maxConcurrent ?? 4,
@@ -642,7 +660,13 @@ export class IicpNode {
       region: this._cfg.region ?? "eu-central",
       // #409 — one capability object per intent the backend can serve (e.g.
       // chat + embedding), classified from the detected model set.
-      capabilities: buildCapabilities(models, this._cfg.intent, this._cfg.maxTokens, this._cfg.supportedProfiles),
+      capabilities: advertisedCapabilities(
+        this._cfg.effectiveCapabilities,
+        models,
+        this._cfg.intent,
+        this._cfg.maxTokens,
+        this._cfg.supportedProfiles,
+      ),
       limits: {
         max_concurrent: this._cfg.maxConcurrent,
         tokens_per_min: this._cfg.tokensPerMin,
