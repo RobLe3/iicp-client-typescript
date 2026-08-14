@@ -13,6 +13,7 @@ import { ensureIntentAllowed } from "./policy.js";
 import { applyCandidateRanker, rankerReceiptProfile, weightedV1Order } from "./selection.js";
 import type { CandidateRanker, RankerDecision } from "./selection.js";
 import { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
+import { composeRuntimeIdentity } from "./runtime_identity.js";
 import {
   ROUTING_POLICY_REFUSAL_CODE,
   filterNodesForRoutingPolicy,
@@ -601,6 +602,7 @@ export class IicpClient {
   async chat(messages: ChatMessage[], opts?: ChatOptions): Promise<ChatResponse> {
     const o = opts ?? {};
     const intent = o.intent ?? "urn:iicp:intent:llm:chat:v1";
+    messages = composeRuntimeIdentity(messages, intent, o.runtime_identity);
 
     const resp = await this.submit({
       intent,

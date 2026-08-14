@@ -1,5 +1,7 @@
 /** IICP TypeScript SDK — type definitions (ADR-016 §1) */
 
+import type { RuntimeIdentityOptions } from "./runtime_identity.js";
+
 export interface ClientConfig {
   /** Directory URL base (with /api suffix). Default: https://iicp.network/api */
   directory_url: string;
@@ -196,7 +198,7 @@ export interface Node {
 }
 
 export interface ChatMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "developer";
   content: string;
 }
 
@@ -233,6 +235,7 @@ export interface ChatOptions {
   browser_usable_only?: boolean;
   profile_request?: ProfileRequest;
   route_constraints?: RouteConstraints;
+  runtime_identity?: RuntimeIdentityOptions;
 }
 
 export type RoutingProfile =
