@@ -1,5 +1,19 @@
 export { IicpClient } from "./client.js";
 export {
+  RUNTIME_IDENTITY_CHAT_INTENT,
+  RUNTIME_IDENTITY_MARKER,
+  RUNTIME_IDENTITY_MAX_BYTES,
+  RUNTIME_IDENTITY_PROFILE_ID,
+  RuntimeIdentityContextUnsupported,
+  composeRuntimeIdentity,
+  renderRuntimeIdentity,
+} from "./runtime_identity.js";
+export type {
+  RuntimeIdentityInstructionChannel,
+  RuntimeIdentityMode,
+  RuntimeIdentityOptions,
+} from "./runtime_identity.js";
+export {
   EFFECTIVE_CAPABILITY_PROFILE_ID,
   EFFECTIVE_CAPABILITY_REFUSAL,
   EFFECTIVE_CAPABILITY_SCHEMA_VERSION,
