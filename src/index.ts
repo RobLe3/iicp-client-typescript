@@ -1,4 +1,23 @@
 export { IicpClient } from "./client.js";
+export {
+  EFFECTIVE_CAPABILITY_PROFILE_ID,
+  EFFECTIVE_CAPABILITY_REFUSAL,
+  EFFECTIVE_CAPABILITY_SCHEMA_VERSION,
+  matchEffectiveCapabilities,
+  parseEffectiveCapability,
+  parseEffectiveCapabilityAdvertisement,
+  resolveEffectiveCapabilities,
+} from "./effective_capability.js";
+export type {
+  CapabilityClaimProvenance,
+  CapabilityExtension,
+  CapabilityLimit,
+  CapabilityLimitRequirement,
+  CapabilityRequirement,
+  CapabilityRequirements,
+  EffectiveCapability,
+  EffectiveCapabilityMatch,
+} from "./effective_capability.js";
 export { CANDIDATE_EVIDENCE_SCHEMA_V0, weightedV1Order } from "./selection.js";
 export type { CandidateEvidenceV0, CandidateRanker, RankerDecision, RankerMode, RankerRequest } from "./selection.js";
 export { canonicalizeJcs, JCS_MAX_SAFE_INTEGER } from "./jcs.js";
