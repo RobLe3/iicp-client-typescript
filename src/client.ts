@@ -4,7 +4,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-
 import { decryptResponse, encryptPayloadWithContext } from "./confidentiality.js";
 import { policyManifestBindingMatches, verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { postJsonPinned } from "./endpoint_security.js";
@@ -13,7 +12,8 @@ import { ensureIntentAllowed } from "./policy.js";
 import { applyCandidateRanker, rankerReceiptProfile, weightedV1Order } from "./selection.js";
 import type { CandidateRanker, RankerDecision } from "./selection.js";
 import { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
-import { composeRuntimeIdentity } from "./runtime_identity.js";
+import { composeRuntimeIdentity, withRuntimeFacts } from "./runtime_identity.js";
+import type { RuntimeIdentityOptions } from "./runtime_identity.js";
 import {
   ROUTING_POLICY_REFUSAL_CODE,
   filterNodesForRoutingPolicy,
@@ -37,6 +37,8 @@ const INTENT_RE = /^urn:iicp:intent:[a-z0-9_:/-]+$/;
 const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 3;
+const SDK_VERSION = (require("../package.json") as { version: string }).version;
+
 const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
 class LegacyDiscoveryRequired extends Error {}
@@ -399,6 +401,13 @@ export class IicpClient {
    * Retries up to MAX_RETRIES on transient errors (SDK-01).
    */
   async submit(req: TaskRequest): Promise<TaskResponse> {
+    return this.submitInternal(req);
+  }
+
+  private async submitInternal(
+    req: TaskRequest,
+    runtimeIdentity?: { messages: ChatMessage[]; options?: RuntimeIdentityOptions },
+  ): Promise<TaskResponse> {
     this._validateIntent(req.intent);
     const tp = _traceparent(); // SDK-06: shared trace across discover + submit
     const discoverOpts = projectRouteOptions(req, this.cfg);
@@ -489,6 +498,27 @@ export class IicpClient {
 
     let lastErr: IicpError | undefined;
     for (const [candidateIndex, node] of candidates.entries()) {
+      let candidatePayload = req.payload;
+      if (runtimeIdentity) {
+        const requestedModel = req.constraints?.model;
+        const selectedModel = requestedModel && node.models?.includes(requestedModel)
+          ? requestedModel
+          : node.models?.length === 1 ? node.models[0] : undefined;
+        const candidateOptions = withRuntimeFacts(runtimeIdentity.options, {
+          client_name: "@iicp/client",
+          client_version: SDK_VERSION,
+          connection_mode: "routed",
+          selected_model: selectedModel,
+          effective_capabilities: [],
+          selection_reason: candidateIndex === 0
+            ? "matched_intent_and_constraints"
+            : "fallback_after_unavailable_candidate",
+        });
+        candidatePayload = {
+          ...req.payload,
+          messages: composeRuntimeIdentity(runtimeIdentity.messages, req.intent, candidateOptions),
+        };
+      }
       // Phase 2 (#496): acquire directory-issued consumer token when caller has directory identity.
       const nodeHeaders = { ...headers };
       const ct = this.cfg.consumer_auth_mode === "disabled"
@@ -516,7 +546,7 @@ export class IicpClient {
       let cxSharedSecret: Buffer | undefined;
       let requireEncryptedResponse = false;
       if (node.cx_public_key) {
-        const encrypted = encryptPayloadWithContext(req.payload, node.cx_public_key, taskId, req.intent);
+        const encrypted = encryptPayloadWithContext(candidatePayload, node.cx_public_key, taskId, req.intent);
         body["iicp_conf"] = encrypted.envelope;
         cxSharedSecret = encrypted.sharedSecret;
         requireEncryptedResponse = node.cx_public_key.features?.includes("response_encryption_v1") === true;
@@ -526,7 +556,7 @@ export class IicpClient {
           `IICP-CX: node ${node.node_id} advertises no encryption key — sending UNENCRYPTED ` +
             "only because IICP_CX_ALLOW_PLAINTEXT=1 is set.",
         );
-        body["payload"] = req.payload;
+        body["payload"] = candidatePayload;
       }
       // #488 — forward requester identity for self-query neutrality at the directory.
       if (req.source_node_id) body["source_node_id"] = req.source_node_id;
@@ -602,12 +632,12 @@ export class IicpClient {
   async chat(messages: ChatMessage[], opts?: ChatOptions): Promise<ChatResponse> {
     const o = opts ?? {};
     const intent = o.intent ?? "urn:iicp:intent:llm:chat:v1";
-    messages = composeRuntimeIdentity(messages, intent, o.runtime_identity);
+    const originalMessages = [...messages];
 
-    const resp = await this.submit({
+    const resp = await this.submitInternal({
       intent,
       payload: {
-        messages,
+        messages: originalMessages,
         ...(o.model ? { model: o.model } : {}),
         ...(o.max_tokens !== undefined ? { max_tokens: o.max_tokens } : {}),
         ...(o.temperature !== undefined ? { temperature: o.temperature } : {}),
@@ -628,7 +658,7 @@ export class IicpClient {
         profile_request: o.profile_request,
       },
       routing_policy: o.routing_policy,
-    });
+    }, { messages: originalMessages, options: o.runtime_identity });
 
     const result = (resp.result ?? {}) as Record<string, unknown>;
     const rawChoices = (result.choices as unknown[]) ?? [];

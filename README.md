@@ -44,7 +44,7 @@ What good looks like:
 ```bash
 iicp-node --help       # shows query, serve, proxy, mcp-gateway, credits, ...
 which iicp-node        # points to your Node/npm environment
-iicp-node --version    # prints iicp-node 0.7.104 or newer
+iicp-node --version    # prints iicp-node 0.7.105 or newer
 ```
 
 The query command contacts the public directory, discovers a matching live node,
@@ -76,6 +76,24 @@ const reply = await new IicpClient().chat([
 ]);
 
 console.log(reply.choices[0].message.content);
+```
+
+## Runtime self-description
+
+Compatible `chat()` calls now add a small system context by default. It tells
+the selected service that the request arrived through IICP, names the active
+intent and client version, and distinguishes the service from IICP itself.
+Candidate-specific model facts are included only when the active route supplies
+them. The context is rebuilt on fallback, never includes endpoints, tokens,
+node identities, candidate sets or scores, and is not a prompt-injection
+security boundary.
+
+Raw `submit()` calls and non-chat intents are unchanged. Disable or require the
+chat context explicitly:
+
+```typescript
+await client.chat(messages, { runtime_identity: { mode: "disabled" } });
+await client.chat(messages, { runtime_identity: { mode: "required" } });
 ```
 
 ## Do I need to run a node?
@@ -170,7 +188,7 @@ base URL. Full guide: <https://iicp.network/docs/proxy>
 
 ## Keep provider nodes current
 
-The current public release line is **0.7.104**. Upgrade through your package
+The current public release line is **0.7.105**. Upgrade through your package
 manager before troubleshooting an older installation. Routing profiles can
 refuse remote dispatch before a prompt leaves the client; use `sensitive` for
 local-only work, `eu-restricted` for EU/EEA routing, or `strict-policy` when a

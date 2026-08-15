@@ -19,14 +19,15 @@ const fixture = JSON.parse(fixtureBytes.toString("utf8")) as {
 
 describe("runtime identity shared parity contract", () => {
   it("pins the exact shared fixture", () => {
-    assert.equal(createHash("sha256").update(fixtureBytes).digest("hex"), "91514f8ad7a6a02ba75d834741096a605d22390e6e21210e6369254cf12cd897");
+    assert.equal(createHash("sha256").update(fixtureBytes).digest("hex"), "a31064ca630ab5409fb2f57edd1ef29a5c79532b8960927f6a0d2b52d7d71c81");
     assert.equal(fixture.context_marker, RUNTIME_IDENTITY_MARKER);
     assert.equal(fixture.composition.eligible_intent, RUNTIME_IDENTITY_CHAT_INTENT);
   });
 
   it("leaves disabled and non-chat messages unchanged", () => {
     const messages: ChatMessage[] = [{ role: "user", content: "hello" }];
-    assert.deepEqual(composeRuntimeIdentity(messages, RUNTIME_IDENTITY_CHAT_INTENT), messages);
+    assert.notDeepEqual(composeRuntimeIdentity(messages, RUNTIME_IDENTITY_CHAT_INTENT), messages);
+    assert.deepEqual(composeRuntimeIdentity(messages, RUNTIME_IDENTITY_CHAT_INTENT, { mode: "disabled" }), messages);
     assert.deepEqual(composeRuntimeIdentity(messages, "urn:iicp:intent:llm:embedding:v1", { mode: "explicit" }), messages);
   });
 
@@ -60,6 +61,9 @@ describe("runtime identity shared parity contract", () => {
         selected_model: "model-a",
         effective_capabilities: ["input_modality:image"],
         selection_reason: "matched_intent_and_constraints",
+        client_name: "@iicp/client",
+        client_version: "0.7.105",
+        connection_mode: "routed",
       },
     );
     const content = result[0]!.content;
@@ -78,6 +82,47 @@ describe("runtime identity shared parity contract", () => {
     assert.throws(
       () => composeRuntimeIdentity(messages, RUNTIME_IDENTITY_CHAT_INTENT, { mode: "required", instruction_channel: "unsupported" }),
       RuntimeIdentityContextUnsupported,
+    );
+  });
+
+  it("renders default client identity and rejects control-character facts", () => {
+    const content = composeRuntimeIdentity(
+      [{ role: "user", content: "What is this?" }],
+      RUNTIME_IDENTITY_CHAT_INTENT,
+      { client_name: "@iicp/client", client_version: "0.7.105" },
+    )[0]!.content;
+    assert.match(content, /client: @iicp\/client 0\.7\.105/);
+    assert.throws(
+      () => composeRuntimeIdentity(
+        [{ role: "user", content: "hello" }],
+        RUNTIME_IDENTITY_CHAT_INTENT,
+        { selected_model: "model\ninjected" },
+      ),
+      /control characters/,
+    );
+  });
+
+  it("fails closed on malformed runtime context options", () => {
+    const messages: ChatMessage[] = [{ role: "user", content: "hello" }];
+    assert.throws(
+      () => composeRuntimeIdentity(messages, RUNTIME_IDENTITY_CHAT_INTENT, { mode: "surprise" } as never),
+      /mode is unsupported/,
+    );
+    assert.throws(
+      () => composeRuntimeIdentity(
+        messages,
+        RUNTIME_IDENTITY_CHAT_INTENT,
+        { instruction_channel: "surprise" } as never,
+      ),
+      /instruction channel is unsupported/,
+    );
+    assert.throws(
+      () => composeRuntimeIdentity(
+        messages,
+        RUNTIME_IDENTITY_CHAT_INTENT,
+        { selection_reason: "surprise" } as never,
+      ),
+      /selection reason is unsupported/,
     );
   });
 });
