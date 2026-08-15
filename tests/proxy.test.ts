@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Proxy gateway conformance (ADR-050) — runs the shared golden fixtures against
 // the in-process gateway with a mocked IICP client. Mirrors the Python proxy
-// behaviour per project/proxy-unification-contract.md. The 4 CIP fixtures
+// behaviour per the public IICP proxy semantics. The 4 CIP fixtures
 // (402/503) need the CIP-dispatch port (#482) and are skipped in v1.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";

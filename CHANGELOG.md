@@ -4,7 +4,7 @@ All notable changes to the IICP TypeScript SDK (`@iicp/client`).
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/iicp.network/blob/main/project/VERSIONING.md)
+within the scope of the IICP Software axis (see [`VERSIONING.md`](https://github.com/RobLe3/IICP/blob/main/VERSIONING.md)
 in the main repo).
 
 ## [Unreleased]
@@ -676,5 +676,5 @@ No source-code changes are required; the fix is transparent to callers.
 See git log — the Tier 1 ports (transport_endpoint, IICP TCP, UPnP NAT
 detection, openai_compat backend, NAT observability) and Tier 2 items
 (CIP policy, pricing, conformance, ConcurrencyGate) shipped across
-iter-1409..1440 of the main repo's FORGE loop and were unit-tested
+in the coordinated 0.5.x implementation series and were unit-tested
 per-SDK but not yet cross-SDK validated until 0.5.3.
