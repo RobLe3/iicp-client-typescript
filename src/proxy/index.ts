@@ -5,7 +5,7 @@
  * A loopback HTTP server that translates external chat-API requests into IICP mesh
  * calls via {@link IicpClient} and translates responses back. It does NOT register
  * with the directory (consumer gateway). Mirrors the Python `iicp_client.proxy`
- * behaviour per project/proxy-unification-contract.md; verified against
+ * behaviour per the public IICP proxy semantics; verified against
  * tests/conformance/proxy_fixtures.json.
  *
  * v1 covers the non-CIP fixtures (success / upstream-502 / no-nodes-502 / 500 /
