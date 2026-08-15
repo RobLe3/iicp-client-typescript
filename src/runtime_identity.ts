@@ -4,18 +4,30 @@ export const RUNTIME_IDENTITY_PROFILE_ID = "urn:iicp:profile:runtime-identity-co
 export const RUNTIME_IDENTITY_MARKER = "IICP-RUNTIME-CONTEXT/1";
 export const RUNTIME_IDENTITY_CHAT_INTENT = "urn:iicp:intent:llm:chat:v1";
 export const RUNTIME_IDENTITY_MAX_BYTES = 2048;
+const MAX_FACT_BYTES = 160;
+const MAX_CAPABILITIES = 32;
 
 const BASE_CAPSULE = "This request reached you through IICP, the Intent-based Inter-agent Communication Protocol. IICP discovers eligible services and routes requests. You are the selected model or service, not IICP. When asked about this connection, use only supplied runtime facts; do not guess missing facts.";
 
-export type RuntimeIdentityMode = "disabled" | "explicit" | "required";
+export type RuntimeIdentityMode = "auto" | "disabled" | "explicit" | "required";
 export type RuntimeIdentityInstructionChannel = "system" | "unsupported";
+export type RuntimeIdentityConnectionMode = "routed" | "local_browser";
+export type RuntimeIdentitySelectionReason =
+  | "matched_intent_and_constraints"
+  | "explicit_model_match"
+  | "fallback_after_unavailable_candidate"
+  | "intentional_exploration"
+  | "local_browser_execution";
 
 export interface RuntimeIdentityOptions {
   mode?: RuntimeIdentityMode;
   instruction_channel?: RuntimeIdentityInstructionChannel;
   selected_model?: string;
   effective_capabilities?: string[];
-  selection_reason?: "matched_intent_and_constraints";
+  selection_reason?: RuntimeIdentitySelectionReason;
+  client_name?: string;
+  client_version?: string;
+  connection_mode?: RuntimeIdentityConnectionMode;
 }
 
 export class RuntimeIdentityContextUnsupported extends Error {
@@ -25,14 +37,61 @@ export class RuntimeIdentityContextUnsupported extends Error {
   }
 }
 
-export function renderRuntimeIdentity(intent: string, options: RuntimeIdentityOptions): string {
-  const lines = [`[${RUNTIME_IDENTITY_MARKER}]`, BASE_CAPSULE, "Runtime facts:", `- intent: ${intent}`];
-  if (options.selected_model) lines.push(`- selected model (provider assertion): ${options.selected_model}`);
-  if (options.effective_capabilities?.length) {
-    lines.push(`- effective capabilities: ${options.effective_capabilities.join(", ")}`);
+const selectionText: Record<RuntimeIdentitySelectionReason, string> = {
+  matched_intent_and_constraints: "This service matched the requested intent and constraints.",
+  explicit_model_match: "This service matched the requested model and constraints.",
+  fallback_after_unavailable_candidate: "This service was selected after an earlier candidate was unavailable.",
+  intentional_exploration: "This service was selected for an intentional routing exploration.",
+  local_browser_execution: "This model is running locally in the browser.",
+};
+
+export function withRuntimeFacts(
+  options: RuntimeIdentityOptions | undefined,
+  facts: Required<Pick<RuntimeIdentityOptions, "client_name" | "client_version" | "connection_mode" | "selection_reason">>
+    & Pick<RuntimeIdentityOptions, "selected_model" | "effective_capabilities">,
+): RuntimeIdentityOptions {
+  return {
+    ...(options ?? {}),
+    ...facts,
+    selected_model: facts.selected_model,
+    effective_capabilities: [...(facts.effective_capabilities ?? [])],
+  };
+}
+
+function boundedFact(value: string, name: string): string {
+  if (!value || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new Error(`runtime identity ${name} contains control characters`);
   }
-  if (options.selection_reason === "matched_intent_and_constraints") {
-    lines.push("- selection: This service matched the requested intent and constraints.");
+  if (new TextEncoder().encode(value).byteLength > MAX_FACT_BYTES) {
+    throw new Error(`runtime identity ${name} exceeds the bounded fact limit`);
+  }
+  return value;
+}
+
+export function renderRuntimeIdentity(intent: string, options: RuntimeIdentityOptions): string {
+  const lines = [`[${RUNTIME_IDENTITY_MARKER}]`, BASE_CAPSULE, "Runtime facts:", `- intent: ${boundedFact(intent, "intent")}`];
+  if (options.client_name || options.client_version) {
+    if (!options.client_name || !options.client_version) throw new Error("runtime identity client name and version must be supplied together");
+    lines.push(`- client: ${boundedFact(options.client_name, "client name")} ${boundedFact(options.client_version, "client version")}`);
+  }
+  if (options.connection_mode === "routed") {
+    lines.push("- connection: routed through IICP to an eligible provider.");
+  } else if (options.connection_mode === "local_browser") {
+    lines.push("- connection: This model is running locally in the browser; no remote IICP provider was selected.");
+  } else if (options.connection_mode !== undefined) {
+    throw new Error("runtime identity connection mode is unsupported");
+  }
+  if (options.selected_model) lines.push(`- selected model: ${boundedFact(options.selected_model, "selected model")}`);
+  if ((options.effective_capabilities?.length ?? 0) > MAX_CAPABILITIES) {
+    throw new Error("runtime identity effective capabilities exceed the bounded count");
+  }
+  if (options.effective_capabilities?.length) {
+    lines.push(`- effective capabilities: ${options.effective_capabilities.map((value) => boundedFact(value, "effective capability")).join(", ")}`);
+  }
+  if (options.selection_reason) {
+    const selection = selectionText[options.selection_reason];
+    if (!selection) throw new Error("runtime identity selection reason is unsupported");
+    lines.push(`- selection: ${selection}`);
   }
   const rendered = lines.join("\n");
   if (new TextEncoder().encode(rendered).byteLength > RUNTIME_IDENTITY_MAX_BYTES) {
@@ -47,9 +106,18 @@ export function composeRuntimeIdentity(
   options?: RuntimeIdentityOptions,
 ): ChatMessage[] {
   const original = [...messages];
-  const mode = options?.mode ?? "disabled";
-  if (mode === "disabled" || intent !== RUNTIME_IDENTITY_CHAT_INTENT) return original;
-  if (options?.instruction_channel === "unsupported") {
+  const resolved = options ?? {};
+  const mode = resolved.mode ?? "auto";
+  if (intent !== RUNTIME_IDENTITY_CHAT_INTENT) return original;
+  if (!["auto", "disabled", "explicit", "required"].includes(mode)) {
+    throw new Error("runtime identity mode is unsupported");
+  }
+  if (mode === "disabled") return original;
+  if (resolved.instruction_channel !== undefined
+    && !["system", "unsupported"].includes(resolved.instruction_channel)) {
+    throw new Error("runtime identity instruction channel is unsupported");
+  }
+  if (resolved.instruction_channel === "unsupported") {
     if (mode === "required") throw new RuntimeIdentityContextUnsupported();
     return original;
   }
@@ -62,7 +130,7 @@ export function composeRuntimeIdentity(
   while (insertion < original.length && ["system", "developer"].includes(original[insertion]!.role)) insertion += 1;
   return [
     ...original.slice(0, insertion),
-    { role: "system", content: renderRuntimeIdentity(intent, options ?? {}) },
+    { role: "system", content: renderRuntimeIdentity(intent, resolved) },
     ...original.slice(insertion),
   ];
 }
