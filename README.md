@@ -17,6 +17,11 @@ Works in **Node.js ≥ 18**, Deno, Bun, and modern browsers with the native Fetc
 urn:iicp:intent:llm:chat:v1  →  discover  →  select  →  submit
 ```
 
+IICP supplies intent resolution and provider eligibility/selection. MCP, A2A,
+HTTP or another negotiated binding may then execute the selected task. See the
+public [protocol positioning](https://github.com/RobLe3/IICP/blob/main/standards/IICP_PROTOCOL_POSITIONING.md)
+and [adjacent-protocol comparison](https://github.com/RobLe3/IICP/blob/main/standards/PROTOCOL_COMPARISON_2026-08-15.md).
+
 ---
 
 ## Install
