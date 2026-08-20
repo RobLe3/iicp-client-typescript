@@ -365,6 +365,39 @@ describe("heartbeat self-heal (#404)", () => {
     }
   });
 
+  it("retries an unacknowledged metric batch with the same identifier", async () => {
+    const captured: Record<string, unknown>[] = [];
+    let attempts = 0;
+    const dir = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c) => chunks.push(c as Buffer));
+      req.on("end", () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString() || "{}") as Record<string, unknown>;
+        captured.push(body);
+        attempts += 1;
+        if (attempts === 1) {
+          res.writeHead(503).end();
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true, metrics_batch_accepted: body.metrics_batch_id }));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((r) => dir.listen(port, "127.0.0.1", () => r()));
+    try {
+      const node = new IicpNode({ ...cfg(), directoryUrl: `http://127.0.0.1:${port}` } as NodeConfig);
+      (node as unknown as { _tasksSuccessPending: number })._tasksSuccessPending = 2;
+      (node as unknown as { _tasksLatencyTotalMsPending: number })._tasksLatencyTotalMsPending = 14000;
+      await assert.rejects(() => node.heartbeat("tok"), /Heartbeat failed: 503/);
+      await node.heartbeat("tok");
+      assert.equal(captured[0].metrics_batch_id, captured[1].metrics_batch_id);
+      assert.equal((captured[1].metrics as Record<string, number>).tasks_success, 2);
+    } finally {
+      await new Promise<void>((r) => dir.close(() => r()));
+    }
+  });
+
   it("sends available:true in the heartbeat body", async () => {
     let captured: Record<string, unknown> | null = null;
     const dir = http.createServer((req, res) => {

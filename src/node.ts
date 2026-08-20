@@ -11,7 +11,7 @@
 
 import * as http from "node:http";
 import * as net from "node:net"; // #457 — single-port HTTP + native transport multiplexer
-import { createHmac } from "node:crypto"; // #411 — heartbeat challenge-response HMAC
+import { createHmac, randomUUID } from "node:crypto"; // #411 — heartbeat challenge-response HMAC
 import { IicpTcpServer, IICP_MAGIC, type TcpTaskHandler } from "./iicp_tcp.js"; // #457
 import { isQueueEligible, QUEUE_WAIT_MS } from "./scheduler.js";
 import { AvailabilityEvaluator, type Window } from "./availability.js";
@@ -405,6 +405,7 @@ export class IicpNode {
   private _tasksSuccessPending = 0;
   private _tasksFailedPending = 0;
   private _tasksLatencyTotalMsPending = 0;
+  private _pendingMetricsBatch: { id: string; ok: number; fail: number; latencyTotalMs: number } | null = null;
   /** #494 — model set registered at last register(); compared each heartbeat for drift. */
   private _registeredModels = new Set<string>();
   private _recoveryHeartbeatSeq = 0;
@@ -771,13 +772,21 @@ export class IicpNode {
   }
 
   async heartbeat(nodeToken: string): Promise<void> {
-    // Drain incremental task counters for directory reputation reporting.
-    const ok = this._tasksSuccessPending;
-    const fail = this._tasksFailedPending;
-    const latencyTotalMs = this._tasksLatencyTotalMsPending;
-    this._tasksSuccessPending = 0;
-    this._tasksFailedPending = 0;
-    this._tasksLatencyTotalMsPending = 0;
+    // Keep one batch outstanding until acknowledged. Counters accumulated while
+    // it is in flight become the next batch rather than being discarded.
+    if (this._pendingMetricsBatch === null && (this._tasksSuccessPending > 0 || this._tasksFailedPending > 0)) {
+      this._pendingMetricsBatch = {
+        id: randomUUID(),
+        ok: this._tasksSuccessPending,
+        fail: this._tasksFailedPending,
+        latencyTotalMs: this._tasksLatencyTotalMsPending,
+      };
+      this._tasksSuccessPending = 0;
+      this._tasksFailedPending = 0;
+      this._tasksLatencyTotalMsPending = 0;
+    }
+    const pending = this._pendingMetricsBatch;
+    const { ok, fail, latencyTotalMs } = pending ?? { ok: 0, fail: 0, latencyTotalMs: 0 };
 
     const publicAvailable = this._runtimeAvailable;
     const payload: Record<string, unknown> = {
@@ -801,6 +810,7 @@ export class IicpNode {
         metrics.avg_latency_ms = Math.round((latencyTotalMs / total) * 100) / 100;
       }
       payload.metrics = metrics;
+      payload.metrics_batch_id = pending?.id;
     }
     // ADR-047 Part A (#411) — answer the directory's liveness challenge from the
     // previous beat: HMAC the nonce with node_hmac_key, proving key control with
@@ -845,10 +855,14 @@ export class IicpNode {
     }
     // Capture the fresh nonce to answer on the next beat (ADR-047 Part A).
     try {
-      const data = (await resp.json()) as { challenge?: string };
+      const data = (await resp.json()) as { challenge?: string; metrics_batch_accepted?: string };
       if (data.challenge) this._livenessChallenge = data.challenge;
+      if (pending && (data.metrics_batch_accepted === undefined || data.metrics_batch_accepted === pending.id)) {
+        if (this._pendingMetricsBatch?.id === pending.id) this._pendingMetricsBatch = null;
+      }
     } catch {
       // older directory without a challenge → leave as-is
+      if (pending && this._pendingMetricsBatch?.id === pending.id) this._pendingMetricsBatch = null;
     }
   }
 
