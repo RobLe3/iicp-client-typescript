@@ -37,6 +37,8 @@ export type { CandidateEvidenceV0, CandidateRanker, RankerDecision, RankerMode, 
 export { canonicalizeJcs, JCS_MAX_SAFE_INTEGER } from "./jcs.js";
 export { verifyMembership, verifyGossip, MembershipRefusal, MEMBERSHIP_SCHEMA, RESTRICTED_PROFILE } from "./restricted_membership.js";
 export type { MembershipPolicy } from "./restricted_membership.js";
+export { RESTRICTED_DIRECTORY_PROFILE_ID, validateRestrictedDecision } from "./restricted_directory.js";
+export type { RestrictedDirectoryContext, RestrictedEligibility, SecretRef } from "./types.js";
 export { evaluatePreNormativeProfile } from "./profile_compatibility.js";
 export type { ProfileCompatibilityDecision } from "./profile_compatibility.js";
 export type { DiscoveryResult, ProfileNegotiation, ProfileRequest, RouteConstraints } from "./types.js";

@@ -2,6 +2,26 @@
 
 import type { RuntimeIdentityOptions } from "./runtime_identity.js";
 
+export type SecretRef =
+  | { kind: "environment"; name: string }
+  | { kind: "provider"; resolve: () => string };
+
+export interface RestrictedDirectoryContext {
+  domain_id: string;
+  authority_id: string;
+  subject_id: string;
+  subject_kind: "node" | "client" | "directory";
+  minimum_membership_generation: number;
+  membership_credential: SecretRef;
+}
+
+export interface RestrictedEligibility {
+  domain_id: string;
+  authority_id: string;
+  membership_generation: number;
+  membership_expires_at: number;
+}
+
 export interface ClientConfig {
   /** Directory URL base (with /api suffix). Default: https://iicp.network/api */
   directory_url: string;
@@ -33,6 +53,8 @@ export interface ClientConfig {
   route_discovery_mode?: "auto" | "ticketed" | "legacy";
   /** Optional profile request used by legacy discovery before task dispatch. */
   profile_request?: ProfileRequest;
+  /** Required authenticated directory boundary for private operation. */
+  restricted_directory?: RestrictedDirectoryContext;
 }
 
 export interface TaskConstraints {
