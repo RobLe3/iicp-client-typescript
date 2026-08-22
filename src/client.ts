@@ -13,6 +13,7 @@ import { applyCandidateRanker, rankerReceiptProfile, weightedV1Order } from "./s
 import type { CandidateRanker, RankerDecision } from "./selection.js";
 import { projectExecutionConstraints, projectRouteOptions } from "./request_projection.js";
 import { composeRuntimeIdentity, withRuntimeFacts } from "./runtime_identity.js";
+import { restrictedHeaders, validateRestrictedContext, validateRestrictedDecision } from "./restricted_directory.js";
 import type { RuntimeIdentityOptions } from "./runtime_identity.js";
 import {
   ROUTING_POLICY_REFUSAL_CODE,
@@ -127,6 +128,7 @@ export class IicpClient {
   private candidateRanker?: CandidateRanker;
   /** Cache: `${nodeToken}|${targetNodeId}|${intent}` → [token, expUnix] */
   private readonly _ctCache = new Map<string, [string, number]>();
+  private readonly restrictedEligibility = new WeakMap<Node, import("./types.js").RestrictedEligibility>();
 
   constructor(config?: Partial<ClientConfig>) {
     const merged: ClientConfig = { ...DEFAULT_CONFIG, ...config };
@@ -178,6 +180,12 @@ export class IicpClient {
       merged.route_discovery_mode = envRouteMode;
     }
     if (!merged.route_discovery_mode) merged.route_discovery_mode = "auto";
+    if (merged.restricted_directory) {
+      validateRestrictedContext(merged.restricted_directory);
+      if (merged.route_discovery_mode === "legacy") {
+        throw new IicpError("restricted directory mode cannot use legacy route discovery", "restricted_directory_fallback_refused");
+      }
+    }
     this.cfg = merged;
   }
 
@@ -288,11 +296,13 @@ export class IicpClient {
       const timer = setTimeout(() => controller.abort(), 5_000);
       let response: Response;
       try {
+        const restricted = this.cfg.restricted_directory;
         response = await fetch(url, {
           method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json", traceparent },
+          headers: { "Content-Type": "application/json", Accept: "application/json", traceparent, ...(restricted ? restrictedHeaders(restricted) : {}) },
           body: JSON.stringify({ ...base, exclude_node_id_prefixes: excluded }),
           signal: controller.signal,
+          redirect: restricted ? "manual" : "follow",
         });
       } catch (cause) {
         throw new IicpError("Ticketed dispatch network error", "IICP-DISPATCH-TICKET-NETWORK", { component: "directory", cause });
@@ -303,6 +313,9 @@ export class IicpClient {
       const error = data.error as Record<string, unknown> | undefined;
       const errorCode = typeof error?.code === "string" ? error.code : undefined;
       if (response.status === 201) {
+        const eligibility = this.cfg.restricted_directory
+          ? validateRestrictedDecision(data, this.cfg.restricted_directory, "dispatch_ticket")
+          : undefined;
         if (!this.dispatchTicketKey) {
           const keyResponse = await fetch(`${this.cfg.directory_url.replace(/\/$/, "")}/v1/directory-key`, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(5_000) });
           const keyData = await keyResponse.json().catch(() => ({})) as Record<string, unknown>;
@@ -323,11 +336,15 @@ export class IicpClient {
         const node = route ? this._nodeFromRoute({ ...route, node_id: data.node_id ?? route.node_id }, String(data.ticket_id_prefix ?? "")) : undefined;
         if (!node) throw new IicpError("Directory returned malformed ticketed route material", "IICP-DISPATCH-TICKET-MALFORMED", { component: "directory" });
         candidates.push(node);
+        if (eligibility) this.restrictedEligibility.set(node, eligibility);
         excluded.push(node.node_id.slice(0, 8));
         continue;
       }
       if (response.status === 404 && errorCode === "no_route_available") break;
       if ([404, 405, 501].includes(response.status) || (response.status === 503 && errorCode === "not_configured")) {
+        if (this.cfg.restricted_directory) {
+          throw new IicpError("restricted mode cannot fall back to legacy discovery", "restricted_directory_fallback_refused", { component: "directory" });
+        }
         throw new LegacyDiscoveryRequired();
       }
       throw new IicpError(
@@ -364,6 +381,9 @@ export class IicpClient {
       traceparent,
     );
     const response = data as { nodes?: unknown[]; profile_negotiation?: ProfileNegotiation; diversity_evidence?: Record<string, unknown> };
+    const eligibility = this.cfg.restricted_directory
+      ? validateRestrictedDecision(response as unknown as Record<string, unknown>, this.cfg.restricted_directory, "discovery")
+      : undefined;
     const negotiation = response.profile_negotiation;
     if (o.profile_request?.required && (!negotiation || negotiation.status !== "compatible" || negotiation.dispatch_allowed !== true)) {
       throw new IicpError(
@@ -387,6 +407,7 @@ export class IicpClient {
         continue;
       }
       nodes.push(node);
+      if (eligibility) this.restrictedEligibility.set(node, eligibility);
     }
     return { nodes, profile_negotiation: negotiation, diversity_evidence: response.diversity_evidence };
   }
@@ -718,17 +739,21 @@ export class IicpClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const restricted = this.cfg.restricted_directory;
       const res = await fetch(url, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${nodeToken}`,
+          ...(restricted ? restrictedHeaders(restricted) : {}),
         },
         body: JSON.stringify({ target_node_id: targetNodeId, intent }),
         signal: controller.signal,
+        redirect: restricted ? "manual" : "follow",
       });
       if (res.status === 201) {
         const data = (await res.json()) as Record<string, unknown>;
+        if (restricted) validateRestrictedDecision(data, restricted, "consumer_token");
         const token = String(data.token ?? "");
         const exp = Number(data.expires_at ?? 0);
         if (token) {
@@ -736,7 +761,8 @@ export class IicpClient {
           return token;
         }
       }
-    } catch {
+    } catch (error) {
+      if (this.cfg.restricted_directory) throw error;
       // best-effort; caller proceeds without consumer token
     } finally {
       clearTimeout(timer);
@@ -763,8 +789,9 @@ export class IicpClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, {
-        headers: { Accept: "application/json", traceparent: traceparent ?? _traceparent() },
+        headers: { Accept: "application/json", traceparent: traceparent ?? _traceparent(), ...(this.cfg.restricted_directory ? restrictedHeaders(this.cfg.restricted_directory) : {}) },
         signal: controller.signal,
+        redirect: this.cfg.restricted_directory ? "manual" : "follow",
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");

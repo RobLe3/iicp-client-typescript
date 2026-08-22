@@ -158,6 +158,17 @@ not silently fall back to anonymous dispatch if consumer-token acquisition
 fails. The default remains `"optional"`; `"disabled"` skips token
 acquisition.
 
+### Restricted trust-domain directories
+
+Restricted operation is opt-in and fail closed. Supply a
+`restricted_directory` context with membership material resolved from an
+environment variable or a caller-owned provider function. The SDK does not
+persist that material in browser storage. It sends the credential only to the
+configured directory, refuses redirects and legacy discovery fallback, and
+accepts candidates or tokens only after a matching, current operation decision.
+Public behavior is unchanged when the context is absent. Peer-gossip and CIP
+worker participation are not part of this SDK surface.
+
 ### Experimental local candidate rankers
 
 Library users may attach a `CandidateRanker` to test a learned or
