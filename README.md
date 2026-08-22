@@ -88,6 +88,18 @@ them. The context is rebuilt on fallback, never includes endpoints, tokens,
 node identities, candidate sets or scores, and is not a prompt-injection
 security boundary.
 
+## Restricted trust-domain verification foundation
+
+The package exports strict, fixture-backed verifiers for the pre-normative
+restricted trust-domain membership and authenticated-gossip envelopes. They
+validate bounded Ed25519/JCS assertions and fail closed on malformed,
+expired, revoked-generation, wrong-domain or replayed evidence.
+
+This is a verification foundation, not a claim that the TypeScript runtime
+already provides complete private/CUG operation. Peer admission, credential
+lifecycle, private discovery, no-public-fallback behavior and supervised
+restart evidence remain separate integration work.
+
 Raw `submit()` calls and non-chat intents are unchanged. Disable or require the
 chat context explicitly:
 
