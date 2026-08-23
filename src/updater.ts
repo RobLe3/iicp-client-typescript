@@ -80,6 +80,82 @@ export function checkUpdate(current: string, latest: string | null): UpdateVerdi
 // IICP_AUTO_UPDATE=0. Loop-safe (post-upgrade running version == latest) and failure-isolated.
 
 import { spawn } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+
+interface PersistedUpdateState {
+  sdk_update_last_attempted_version: string | null;
+  sdk_update_last_result: "success" | "failed" | null;
+  sdk_update_consecutive_failures: number;
+  sdk_update_next_retry_at: string | null;
+}
+
+let persistedState: PersistedUpdateState = {
+  sdk_update_last_attempted_version: null,
+  sdk_update_last_result: null,
+  sdk_update_consecutive_failures: 0,
+  sdk_update_next_retry_at: null,
+};
+
+function updateStatePath(): string {
+  return process.env.IICP_UPDATE_STATE_FILE
+    ?? join(process.env.IICP_HOME ?? join(homedir(), ".iicp"), "state", "update-status.json");
+}
+
+function loadUpdateState(): void {
+  try {
+    const value = JSON.parse(readFileSync(updateStatePath(), "utf8")) as Partial<PersistedUpdateState>;
+    persistedState = {
+      sdk_update_last_attempted_version: typeof value.sdk_update_last_attempted_version === "string" ? value.sdk_update_last_attempted_version : null,
+      sdk_update_last_result: value.sdk_update_last_result === "success" || value.sdk_update_last_result === "failed" ? value.sdk_update_last_result : null,
+      sdk_update_consecutive_failures: Number.isInteger(value.sdk_update_consecutive_failures) && Number(value.sdk_update_consecutive_failures) >= 0 ? Number(value.sdk_update_consecutive_failures) : 0,
+      sdk_update_next_retry_at: typeof value.sdk_update_next_retry_at === "string" ? value.sdk_update_next_retry_at : null,
+    };
+  } catch {
+    // Missing or malformed local state must not prevent a fresh update check.
+  }
+}
+
+function persistUpdateState(): boolean {
+  const path = updateStatePath();
+  const temporary = `${path}.tmp-${process.pid}`;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(temporary, `${JSON.stringify(persistedState)}\n`, { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+    return true;
+  } catch {
+    try { unlinkSync(temporary); } catch { /* no partial state to preserve */ }
+    return false;
+  }
+}
+
+function retryDelayMs(failures: number): number {
+  return Math.min(86_400_000, autoUpdateIntervalMs() * (2 ** Math.min(Math.max(failures - 1, 0), 5)));
+}
+
+export function candidateRetryBlocked(version: string, now = Date.now()): boolean {
+  loadUpdateState();
+  if (persistedState.sdk_update_last_attempted_version !== version || persistedState.sdk_update_last_result !== "failed") return false;
+  const retryAt = Date.parse(persistedState.sdk_update_next_retry_at ?? "");
+  return Number.isFinite(retryAt) && retryAt > now;
+}
+
+export function recordUpdateResult(version: string, success: boolean, errorClass: string | null = null): void {
+  loadUpdateState();
+  const sameCandidate = persistedState.sdk_update_last_attempted_version === version;
+  const failures = success ? 0 : (sameCandidate ? persistedState.sdk_update_consecutive_failures + 1 : 1);
+  persistedState = {
+    sdk_update_last_attempted_version: version,
+    sdk_update_last_result: success ? "success" : "failed",
+    sdk_update_consecutive_failures: failures,
+    sdk_update_next_retry_at: success ? null : new Date(Date.now() + retryDelayMs(failures)).toISOString(),
+  };
+  sdkUpdateErrorClass = errorClass;
+  if (!persistUpdateState()) sdkUpdateErrorClass = "update_state_write_failed";
+}
 
 export function npmInstallArgs(version: string): string[] | null {
   if (parseVersion(version) === null) return null;
@@ -163,20 +239,23 @@ export async function autoUpdateTick(
   upgradeFn: (version: string) => Promise<boolean>,
   reexecFn: () => void,
   logFn: (m: string) => void,
-): Promise<"disabled" | "unknown" | "current" | "upgraded" | "upgrade-failed"> {
+): Promise<"disabled" | "unknown" | "current" | "backoff" | "upgraded" | "upgrade-failed"> {
   sdkLatestSeen = latest;
   sdkUpdateLastCheckedAt = new Date().toISOString();
   sdkUpdateErrorClass = latest === null ? "latest_unknown" : null;
   if (!enabled) return "disabled";
   if (latest === null) return "unknown";
   if (!isOutdated(current, latest)) return "current";
+  if (candidateRetryBlocked(latest)) return "backoff";
   logFn(`auto-update: newer release ${latest} available (running ${current}) — upgrading…`);
   if (await upgradeFn(latest)) {
+    recordUpdateResult(latest, true);
     logFn(`auto-update: upgraded to ${latest}; restarting to apply…`);
     reexecFn();
     return "upgraded";
   }
-  logFn("auto-update: upgrade failed; staying on current version, will retry next check");
+  recordUpdateResult(latest, false, "package_install_failed");
+  logFn("auto-update: upgrade failed; staying on current version with bounded retry backoff");
   return "upgrade-failed";
 }
 
@@ -187,11 +266,13 @@ export function recordUpdateCheck(latest: string | null, errorClass: string | nu
 }
 
 export function autoUpdateStatusPayload(): Record<string, string | number | boolean | null> {
+  loadUpdateState();
   return {
     auto_update_enabled: autoUpdateEnabled(),
     auto_update_interval_s: Math.round(autoUpdateIntervalMs() / 1000),
     sdk_latest_seen: sdkLatestSeen,
     sdk_update_last_checked_at: sdkUpdateLastCheckedAt,
     sdk_update_error_class: sdkUpdateErrorClass,
+    ...persistedState,
   };
 }

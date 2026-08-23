@@ -1,7 +1,16 @@
 // ADR-016: IICP client SDK conformance — #521 self-updater P1 (TS parity)
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { after, beforeEach, describe, it } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { checkUpdate, isOutdated, npmInstallArgs, parseVersion } from "../src/updater.js";
+
+const updaterTempDir = mkdtempSync(join(tmpdir(), "iicp-updater-test-"));
+const updaterStateFile = join(updaterTempDir, "update-status.json");
+process.env.IICP_UPDATE_STATE_FILE = updaterStateFile;
+beforeEach(() => rmSync(updaterStateFile, { force: true }));
+after(() => rmSync(updaterTempDir, { recursive: true, force: true }));
 
 describe("version compare", () => {
   it("isOutdated is numeric, not lexicographic", () => {
@@ -43,7 +52,7 @@ describe("npm update command", () => {
 });
 
 // ── P2 auto-updater (#521) ──────────────────────────────────────────────────────
-import { autoUpdateEnabled, autoUpdateInitialDelayMs, autoUpdateIntervalMs, autoUpdateStatusPayload, autoUpdateTick, recordUpdateCheck } from "../src/updater.js";
+import { autoUpdateEnabled, autoUpdateInitialDelayMs, autoUpdateIntervalMs, autoUpdateStatusPayload, autoUpdateTick, candidateRetryBlocked, recordUpdateCheck, recordUpdateResult } from "../src/updater.js";
 
 describe("autoUpdateTick (#521 P2)", () => {
   it("upgrades and re-execs when a newer release exists", async () => {
@@ -71,6 +80,24 @@ describe("autoUpdateTick (#521 P2)", () => {
       async (_version) => false, () => { reexeced += 1; }, () => {});
     assert.equal(r, "upgrade-failed");
     assert.equal(reexeced, 0);
+    assert.equal(candidateRetryBlocked("0.7.60"), true);
+  });
+  it("backs off the same failed candidate but permits a new candidate", async () => {
+    recordUpdateResult("0.7.60", false, "package_install_failed");
+    let attempts = 0;
+    const r = await autoUpdateTick("0.7.59", "0.7.60", true,
+      async () => { attempts += 1; return true; }, () => {}, () => {});
+    assert.equal(r, "backoff");
+    assert.equal(attempts, 0);
+    assert.equal(candidateRetryBlocked("0.7.61"), false);
+  });
+  it("clears failure state after success", () => {
+    recordUpdateResult("0.7.60", false, "package_install_failed");
+    recordUpdateResult("0.7.60", true);
+    const payload = autoUpdateStatusPayload();
+    assert.equal(payload.sdk_update_last_result, "success");
+    assert.equal(payload.sdk_update_consecutive_failures, 0);
+    assert.equal(payload.sdk_update_next_retry_at, null);
   });
 });
 
