@@ -9,6 +9,16 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.108] — 2026-08-23
+
+### Fixed — accurate IICP explanations
+
+- Strengthen the bounded runtime-identity context so small or unfamiliar models identify IICP as the Intent-based Inter-agent Communication Protocol rather than expanding the acronym incorrectly.
+
+### Security — deterministic unattended updates
+
+- Install only the already selected stable version, retain retry state with bounded backoff, and suppress npm lifecycle scripts during the guarded package-install check.
+
 ## [0.7.107] — 2026-08-23
 
 ### Release coordination
