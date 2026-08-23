@@ -35,7 +35,7 @@ npm install @iicp/client@latest
 ## One-line test
 
 ```bash
-npm install -g @iicp/client@latest
+npm install -g @iicp/client@0.7.107 --registry=https://registry.npmjs.org
 iicp-node query "Hello, mesh."
 ```
 
@@ -201,7 +201,7 @@ const reply = await new IicpClient().chat([
 Existing OpenAI-compatible tools:
 
 ```bash
-npm install -g @iicp/client@latest
+npm install -g @iicp/client@0.7.107 --registry=https://registry.npmjs.org
 iicp-node proxy
 export OPENAI_BASE_URL=http://127.0.0.1:9483/v1
 ```
@@ -220,7 +220,7 @@ no-retention policy manifest is required.
 Provider nodes run an hourly official-registry check by default
 (`IICP_AUTO_UPDATE=1`, `IICP_AUTO_UPDATE_INTERVAL_S=3600`; minimum 300s).
 When npm publishes a newer stable release, `serve` runs
-`npm install -g @iicp/client@latest` and re-execs the node so identity and cached
+`npm install -g @iicp/client@X.Y.Z --registry=https://registry.npmjs.org` and re-execs the node so identity and cached
 node tokens are preserved.
 
 If an older supervised node does not update itself, perform one manual upgrade

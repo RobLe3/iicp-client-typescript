@@ -111,7 +111,7 @@ export function startProviderAutoUpdate(options: ProviderAutoUpdateOptions = {})
             current,
             await u.latestNpmVersion(),
             true,
-            () => u.performSelfUpdate(),
+            (version) => u.performSelfUpdate(version),
             () => u.reexecCli(),
             logFn,
           );

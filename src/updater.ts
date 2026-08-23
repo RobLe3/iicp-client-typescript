@@ -5,7 +5,7 @@
  * `iicp-node update` still supports the safe read-only version check, but
  * normal long-running `iicp-node serve` processes now also run a default-on
  * background loop: check npm hourly (first check within five minutes), install
- * `@iicp/client@latest` when a newer stable release exists, and restart onto
+ * that exact stable release from the official registry, and restart onto
  * the upgraded package in covered service paths. The loop is
  * failure-isolated and opt-out via `IICP_AUTO_UPDATE=0`.
  */
@@ -18,20 +18,17 @@ let sdkUpdateErrorClass: string | null = null;
 
 /** Parse a dotted version into a comparable tuple; truncate at the first
  * non-numeric segment ('1.2.3-rc1' → [1,2,3]). */
-export function parseVersion(v: string): number[] {
-  const out: number[] = [];
-  for (const part of v.trim().replace(/^[vV]/, "").split(".")) {
-    const m = /^\d+/.exec(part);
-    if (!m) break;
-    out.push(parseInt(m[0], 10));
-  }
-  return out;
+export function parseVersion(v: string): [number, number, number] | null {
+  const parts = v.trim().split(".");
+  if (parts.length !== 3 || parts.some((part) => !/^(0|[1-9]\d*)$/.test(part))) return null;
+  return [Number(parts[0]), Number(parts[1]), Number(parts[2])];
 }
 
 /** True when `latest` is strictly newer than `current` (numeric, not lex). */
 export function isOutdated(current: string, latest: string): boolean {
   const a = parseVersion(current);
   const b = parseVersion(latest);
+  if (a === null || b === null) return false;
   const n = Math.max(a.length, b.length);
   for (let i = 0; i < n; i++) {
     const x = a[i] ?? 0;
@@ -61,7 +58,7 @@ export interface UpdateVerdict {
   current: string;
   latest: string | null;
   outdated: boolean;
-  command: string;
+  command: string | null;
 }
 
 export function checkUpdate(current: string, latest: string | null): UpdateVerdict {
@@ -69,7 +66,9 @@ export function checkUpdate(current: string, latest: string | null): UpdateVerdi
     current,
     latest,
     outdated: latest !== null && isOutdated(current, latest),
-    command: "npm install -g @iicp/client@latest",
+    command: latest !== null && isOutdated(current, latest)
+      ? `npm install -g @iicp/client@${latest} --registry=https://registry.npmjs.org`
+      : null,
   };
 }
 
@@ -82,12 +81,23 @@ export function checkUpdate(current: string, latest: string | null): UpdateVerdi
 
 import { spawn } from "node:child_process";
 
-/** `npm install -g @iicp/client@latest` in a subprocess. Resolves true on success. */
+export function npmInstallArgs(version: string): string[] | null {
+  if (parseVersion(version) === null) return null;
+  return [
+    "install", "-g", `@iicp/client@${version}`,
+    "--registry=https://registry.npmjs.org",
+    "--ignore-scripts",
+  ];
+}
+
+/** Install the exact validated stable candidate from the official npm registry. */
 export async function performSelfUpdate(
-  spec = "@iicp/client@latest",
+  version: string,
   npmBin = "npm",
   timeoutMs = 600_000,
 ): Promise<boolean> {
+  const args = npmInstallArgs(version);
+  if (args === null) return false;
   return new Promise<boolean>((resolve) => {
     let done = false;
     const finish = (ok: boolean) => {
@@ -97,7 +107,7 @@ export async function performSelfUpdate(
       }
     };
     try {
-      const child = spawn(npmBin, ["install", "-g", spec], { stdio: "ignore" });
+      const child = spawn(npmBin, args, { stdio: "ignore" });
       const timer = setTimeout(() => {
         child.kill("SIGKILL");
         finish(false);
@@ -150,7 +160,7 @@ export async function autoUpdateTick(
   current: string,
   latest: string | null,
   enabled: boolean,
-  upgradeFn: () => Promise<boolean>,
+  upgradeFn: (version: string) => Promise<boolean>,
   reexecFn: () => void,
   logFn: (m: string) => void,
 ): Promise<"disabled" | "unknown" | "current" | "upgraded" | "upgrade-failed"> {
@@ -161,7 +171,7 @@ export async function autoUpdateTick(
   if (latest === null) return "unknown";
   if (!isOutdated(current, latest)) return "current";
   logFn(`auto-update: newer release ${latest} available (running ${current}) — upgrading…`);
-  if (await upgradeFn()) {
+  if (await upgradeFn(latest)) {
     logFn(`auto-update: upgraded to ${latest}; restarting to apply…`);
     reexecFn();
     return "upgraded";
