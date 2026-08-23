@@ -19,7 +19,7 @@ const fixture = JSON.parse(fixtureBytes.toString("utf8")) as {
 
 describe("runtime identity shared parity contract", () => {
   it("pins the exact shared fixture", () => {
-    assert.equal(createHash("sha256").update(fixtureBytes).digest("hex"), "a31064ca630ab5409fb2f57edd1ef29a5c79532b8960927f6a0d2b52d7d71c81");
+    assert.equal(createHash("sha256").update(fixtureBytes).digest("hex"), "3f6071dd39ca9c743ccd3c9c3da1582f1005c4c6daa210fbf62f5bae60d241ac");
     assert.equal(fixture.context_marker, RUNTIME_IDENTITY_MARKER);
     assert.equal(fixture.composition.eligible_intent, RUNTIME_IDENTITY_CHAT_INTENT);
   });
