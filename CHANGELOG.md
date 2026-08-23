@@ -9,6 +9,13 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.107] — 2026-08-23
+
+### Release coordination
+
+- Published the coordinated TypeScript SDK line alongside Python and Rust.
+- No TypeScript runtime behavior or wire semantics changed from 0.7.106.
+
 ## [0.7.106] — 2026-08-20
 
 ### Fixed — retry-safe outcome metrics
