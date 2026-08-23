@@ -52,8 +52,8 @@ jobs:
           tgz=$(npm pack --silent --pack-destination release-artifact | tail -1)
           cd /tmp/iicp-release-smoke
           npm init -y >/dev/null
-          npm install "$GITHUB_WORKSPACE/release-artifact/$tgz" >/dev/null
-          node -e 'import("@iicp/client").then(() => console.log("import ok"))'
+          npm install --ignore-scripts "$GITHUB_WORKSPACE/release-artifact/$tgz" >/dev/null
+          node -e 'require("@iicp/client"); console.log("package load ok")'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: typescript-dist-${{ inputs.version }}
