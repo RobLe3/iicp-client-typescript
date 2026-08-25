@@ -9,6 +9,12 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.109] — 2026-08-25
+
+### Added — shell completion
+
+- Add side-effect-free Bash, Zsh, Fish, and PowerShell completion generated from a static command catalog.
+
 ## [0.7.108] — 2026-08-23
 
 ### Fixed — accurate IICP explanations
