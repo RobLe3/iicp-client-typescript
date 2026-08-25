@@ -43,14 +43,21 @@ export function verifyPolicyDetailConsumerToken(
 }
 
 /**
- * `consumer_auth` must be supplied by a cryptographic trust adapter. It is not
- * a request-body claim and this helper intentionally does not parse raw tokens.
+ * `consumer_auth` and `dispatch_ticket` must be supplied by a cryptographic
+ * trust adapter. They are not request-body claims and this helper does not parse
+ * raw tokens or tickets.
  */
 export function evaluatePolicyDetailDisclosure(context: Record<string, unknown>): PolicyDetailDisclosureDecision {
   const auth = context.consumer_auth;
   if (auth === "missing") return { status: 401, reason: "consumer_auth_required" };
-  if (auth !== "valid" && auth !== "expired") return { status: 401, reason: "consumer_auth_invalid" };
+  if (auth !== "valid" && auth !== "expired" && auth !== "revoked") return { status: 401, reason: "consumer_auth_invalid" };
   if (auth === "expired") return { status: 401, reason: "consumer_auth_expired" };
+  if (auth === "revoked") return { status: 401, reason: "consumer_auth_revoked" };
+
+  const ticket = context.dispatch_ticket;
+  if (ticket === "expired") return { status: 401, reason: "dispatch_ticket_expired" };
+  if (ticket === "revoked") return { status: 401, reason: "dispatch_ticket_revoked" };
+  if (ticket !== undefined && ticket !== "valid") return { status: 401, reason: "dispatch_ticket_invalid" };
   if (context.disclosure_allowed !== true) return { status: 403, reason: "disclosure_forbidden" };
 
   const binding = typeof context.provider_node_id === "string" && context.provider_node_id.length > 0
