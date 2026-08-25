@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { completionCandidates, completionScript } from "./completion.js";
 // SPDX-License-Identifier: Apache-2.0
 /**
  * iicp-node — turn @iicp/client into a runnable provider node.
@@ -249,6 +250,7 @@ function printHelp(): void {
   process.stdout.write(
     `usage: iicp-node <command> [options]\n\n` +
       `Commands:\n` +
+      `  completion <shell>         Print a shell completion script\n` +
       `  init                       Interactive wizard — set up operator + first node config\n` +
       `  list                       List node configs saved under ~/.iicp/nodes/\n` +
       `  serve                      Register and serve a node\n` +
@@ -3296,6 +3298,12 @@ async function runService(argv: string[]): Promise<number> {
 
 async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
+  if (cmd === "__complete") { process.stdout.write(completionCandidates(argv.slice(1)).map((v) => `${v}\n`).join("")); return 0; }
+  if (cmd === "completion") {
+    const shell = argv[1];
+    if (!shell || !["bash", "zsh", "fish", "powershell", "pwsh"].includes(shell) || argv.length !== 2) throw new CliError("usage: iicp-node completion <bash|zsh|fish|powershell>");
+    process.stdout.write(completionScript(shell)); return 0;
+  }
   if (cmd === "init") return runInit();
   if (cmd === "list") return runList(argv.slice(1));
   if (cmd === "query") return runQuery(argv.slice(1));
