@@ -4,12 +4,17 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { POLICY_DETAIL_FIELDS, evaluatePolicyDetailDisclosure, verifyPolicyDetailConsumerToken } from "../src/policy_detail_disclosure.js";
 
-const fixture = JSON.parse(fs.readFileSync(path.resolve("parity/policy-detail-disclosure-v0.json"), "utf8"));
+const fixtures = [
+  "policy-detail-disclosure-v0.json",
+  "policy-detail-disclosure-authority-v0.json",
+].map((name) => JSON.parse(fs.readFileSync(path.resolve("parity", name), "utf8")));
+const fixture = fixtures[0];
 
 describe("policy detail disclosure fixture", () => {
   it("applies portable authorization and redaction", () => {
-    assert.deepEqual(fixture.allowed_detail_fields, POLICY_DETAIL_FIELDS);
-    for (const testCase of fixture.cases) {
+    for (const candidate of fixtures) {
+      assert.deepEqual(candidate.allowed_detail_fields, POLICY_DETAIL_FIELDS);
+      for (const testCase of candidate.cases) {
       const decision = evaluatePolicyDetailDisclosure(testCase.context);
       assert.equal(decision.status, testCase.expected.status, testCase.id);
       assert.equal(decision.reason, testCase.expected.reason, testCase.id);
@@ -18,6 +23,7 @@ describe("policy detail disclosure fixture", () => {
         const encoded = JSON.stringify(decision.body);
         for (const forbidden of ["must-not-leak", "private.example", "backend_topology", "natural_person_contact"])
           assert.ok(!encoded.includes(forbidden));
+      }
       }
     }
   });
