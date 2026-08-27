@@ -1,0 +1,188 @@
+{
+  "component": "client-typescript",
+  "evidence_policy": "digest-only",
+  "network_policy": "isolated-fixtures-only",
+  "non_authorizing": true,
+  "scenario_commands": {
+    "ciphertext-tamper": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/confidentiality.test.ts"
+    ],
+    "confidentiality-downgrade": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/confidentiality.test.ts"
+    ],
+    "confidentiality-key-missing": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/confidentiality.test.ts"
+    ],
+    "config-malformed": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/cli_ux.test.ts"
+    ],
+    "config-missing": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/cli_ux.test.ts"
+    ],
+    "config-permission-denied": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/operator_identity.test.ts"
+    ],
+    "credential-expired": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/dispatch_ticket_trust_runtime.test.ts"
+    ],
+    "credential-missing": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/current_node_token.test.ts"
+    ],
+    "credential-replayed": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/dispatch_ticket_trust_store.test.ts"
+    ],
+    "credential-rotated": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/dispatch_ticket_trust_store.test.ts"
+    ],
+    "cross-flavor-equivalence": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/conformance.test.ts"
+    ],
+    "directory-unavailable": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/restricted_directory.test.ts"
+    ],
+    "dns-failure": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/endpoint_security.test.ts"
+    ],
+    "duplicate-registration": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/register_operator_wiring.test.ts"
+    ],
+    "minimum-version": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/cli_ux.test.ts"
+    ],
+    "offline-locked-install": [
+      "@npm",
+      "run",
+      "build"
+    ],
+    "package-version-self-report": [
+      "@npm",
+      "run",
+      "build"
+    ],
+    "partial-response": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/conformance.test.ts"
+    ],
+    "process-crash-restart": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/service_lifecycle_identity.test.ts"
+    ],
+    "rate-limit": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/relay_session.test.ts"
+    ],
+    "request-timeout": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/client.test.ts"
+    ],
+    "rollback-last-supported": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/updater.test.ts"
+    ],
+    "signature-mismatch": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/dispatch_ticket_trust_crypto.test.ts"
+    ],
+    "tls-failure": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/endpoint_security.test.ts"
+    ],
+    "unsupported-version": [
+      "@npx",
+      "--no-install",
+      "tsx",
+      "--test",
+      "tests/updater.test.ts"
+    ]
+  },
+  "schema": "iicp.pre1-component-case-map.v1",
+  "support_command": [
+    "@npx",
+    "--no-install",
+    "tsx",
+    "--test",
+    "tests/client.test.ts",
+    "tests/conformance.test.ts"
+  ]
+}
