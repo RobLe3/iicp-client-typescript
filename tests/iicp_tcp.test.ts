@@ -20,6 +20,7 @@ import {
   IICP_MAGIC,
   FRAMING_VERSION,
   FRAME_HEADER_LEN,
+  MAX_FRAME_PAYLOAD,
   MsgType,
   encodeFrame,
 } from "../src/iicp_tcp.js";
@@ -317,6 +318,43 @@ describe("IicpTcpServer", () => {
     assert.ok(sock.destroyed || sock.readableEnded);
   });
 
+  it("rejects an application frame before INIT", async () => {
+    const sock = await connectAndCollect(HOST, port);
+    sock.write(encodeFrame(MsgType.PING));
+    await new Promise<void>((resolve) => sock.once("close", () => resolve()));
+    assert.ok(sock.destroyed || sock.readableEnded);
+  });
+
+  it("rejects a duplicate INIT", async () => {
+    const sock = await connectAndCollect(HOST, port);
+    const init = encodeFrame(MsgType.INIT, Buffer.from(cborEncode({ 1: FRAMING_VERSION })));
+    sock.write(init);
+    await readFrame(sock);
+    sock.write(init);
+    await new Promise<void>((resolve) => sock.once("close", () => resolve()));
+    assert.ok(sock.destroyed || sock.readableEnded);
+  });
+
+  it("rejects INIT with an unsupported negotiated version", async () => {
+    const sock = await connectAndCollect(HOST, port);
+    const init = encodeFrame(MsgType.INIT, Buffer.from(cborEncode(new Map([[1, 2]]))));
+    sock.write(init);
+    await new Promise<void>((resolve) => sock.once("close", () => resolve()));
+    assert.ok(sock.destroyed || sock.readableEnded);
+  });
+
+  it("rejects an oversized length before waiting for its body", async () => {
+    const sock = await connectAndCollect(HOST, port);
+    const header = Buffer.alloc(FRAME_HEADER_LEN);
+    IICP_MAGIC.copy(header);
+    header.writeUInt8(FRAMING_VERSION, 4);
+    header.writeUInt8(MsgType.INIT, 5);
+    header.writeUInt32BE(MAX_FRAME_PAYLOAD + 1, 8);
+    sock.write(header);
+    await new Promise<void>((resolve) => sock.once("close", () => resolve()));
+    assert.ok(sock.destroyed || sock.readableEnded);
+  });
+
   it("REGRESSION (iter-1410): payload-bearing frames don't close the session", async () => {
     // Send INIT + PING back-to-back as one write — pre-fix the session loop
     // closed after INIT because decode would error on missing payload bytes.
@@ -366,6 +404,57 @@ describe("IicpTcpClient", () => {
       assert.equal(client.peerNodeId, "client-test-node");
     } finally {
       await client.disconnect();
+    }
+  });
+
+  it("requires the handshake before application frames", async () => {
+    const client = new IicpTcpClient({ host: HOST, port });
+    await client.connect();
+    try {
+      await assert.rejects(() => client.ping(), /handshake is not complete/);
+    } finally {
+      await client.disconnect();
+    }
+  });
+
+  it("rejects an oversized response header before waiting for its body", async () => {
+    const fake = net.createServer((socket) => {
+      socket.once("data", () => {
+        const header = Buffer.alloc(FRAME_HEADER_LEN);
+        IICP_MAGIC.copy(header);
+        header.writeUInt8(FRAMING_VERSION, 4);
+        header.writeUInt8(MsgType.ACK, 5);
+        header.writeUInt32BE(MAX_FRAME_PAYLOAD + 1, 8);
+        socket.write(header);
+      });
+    });
+    await new Promise<void>((resolve) => fake.listen(0, HOST, resolve));
+    const fakePort = (fake.address() as net.AddressInfo).port;
+    const client = new IicpTcpClient({ host: HOST, port: fakePort });
+    try {
+      await client.connect();
+      await assert.rejects(() => client.handshake(), /response frame payload too large/);
+    } finally {
+      await client.disconnect();
+      await new Promise<void>((resolve) => fake.close(() => resolve()));
+    }
+  });
+
+  it("rejects an ACK with the wrong negotiated version", async () => {
+    const fake = net.createServer((socket) => {
+      socket.once("data", () => {
+        socket.write(encodeFrame(MsgType.ACK, Buffer.from(cborEncode({ 1: 2 }))));
+      });
+    });
+    await new Promise<void>((resolve) => fake.listen(0, HOST, resolve));
+    const fakePort = (fake.address() as net.AddressInfo).port;
+    const client = new IicpTcpClient({ host: HOST, port: fakePort });
+    try {
+      await client.connect();
+      await assert.rejects(() => client.handshake(), /ACK negotiated unsupported/);
+    } finally {
+      await client.disconnect();
+      await new Promise<void>((resolve) => fake.close(() => resolve()));
     }
   });
 
@@ -471,6 +560,7 @@ describe("IicpTcpClient", () => {
 
   it("yields validated lifecycle partial and terminal events", async () => {
     const client = new IicpTcpClient({ host: HOST });
+    client.framingVersion = FRAMING_VERSION;
     const writes: Buffer[] = [];
     const socket = {
       destroyed: false,
@@ -512,6 +602,7 @@ describe("IicpTcpClient", () => {
 
   it("rejects lifecycle sequence drift", async () => {
     const client = new IicpTcpClient({ host: HOST });
+    client.framingVersion = FRAMING_VERSION;
     const socket = { destroyed: false, write: () => true, destroy: () => { socket.destroyed = true; } };
     const internals = client as unknown as {
       _socket: typeof socket;

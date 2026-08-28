@@ -10,6 +10,7 @@
  */
 
 import * as net from "node:net";
+import { MAX_FRAME_PAYLOAD } from "./iicp_tcp.js";
 import { fetchRelayBindTicket } from "./relay_ticket.js";
 
 const IICP_MAGIC = Buffer.from("IICP");
@@ -51,6 +52,7 @@ function _dec(buf: Buffer): Record<number, unknown> {
 }
 
 function makeFrame(msgType: number, payload: Buffer): Buffer {
+  if (payload.length > MAX_FRAME_PAYLOAD) throw new Error("relay frame payload too large");
   const header = Buffer.alloc(FRAME_HEADER_LEN);
   IICP_MAGIC.copy(header, 0);
   header.writeUInt8(FRAMING_VERSION, 4);
@@ -181,9 +183,10 @@ export class RelayWorkerClient {
     const readFrame = async (): Promise<[number, Buffer] | null> => {
       const h = await readExact(FRAME_HEADER_LEN);
       if (!h) return null;
-      if (!h.subarray(0, 4).equals(IICP_MAGIC)) return null;
+      if (!h.subarray(0, 4).equals(IICP_MAGIC) || h.readUInt8(4) !== FRAMING_VERSION) return null;
       const mt = h.readUInt8(5);
       const plen = h.readUInt32BE(8);
+      if (plen > MAX_FRAME_PAYLOAD) return null;
       const payload = plen > 0 ? await readExact(plen) : Buffer.alloc(0);
       if (!payload) return null;
       return [mt, payload];
