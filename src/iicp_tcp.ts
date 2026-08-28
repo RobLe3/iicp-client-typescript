@@ -32,6 +32,20 @@ export const FRAME_HEADER_LEN = 12; // magic(4) + ver(1) + type(1) + flags(1) + 
 /** Length-field payload bytes; the 12-byte header is excluded. */
 export const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
 
+const STABLE_TASK_MESSAGE_TYPES = new Set<number>([
+  0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+  0x08, 0x09, 0x0a, 0x0d, 0x0e,
+]);
+
+/** Fail-closed type-byte disposition for the stable native task profile. */
+export function stableTaskMessageTypeError(msgType: number): string | undefined {
+  if (STABLE_TASK_MESSAGE_TYPES.has(msgType)) return undefined;
+  if (msgType === 0x00 || msgType === 0xff) return "invalid_type";
+  if (msgType === 0x0b || msgType === 0x0c) return "conflicted_type";
+  if (msgType >= 0xf0 && msgType <= 0xfe) return "unsupported_extension";
+  return "unknown_type";
+}
+
 export enum MsgType {
   INIT = 0x01,
   ACK = 0x02,
@@ -398,6 +412,10 @@ export class IicpTcpServer {
         const version = buf.readUInt8(4);
         const msgType = buf.readUInt8(5);
         if (version !== FRAMING_VERSION) {
+          socket.destroy();
+          return;
+        }
+        if (stableTaskMessageTypeError(msgType) !== undefined) {
           socket.destroy();
           return;
         }
@@ -954,6 +972,12 @@ export class IicpTcpClient {
       throw new IicpTcpClientError(`unsupported framing version ${version} in response`);
     }
     const msgType = this._buf.readUInt8(5);
+    const typeError = stableTaskMessageTypeError(msgType);
+    if (typeError !== undefined) {
+      throw new IicpTcpClientError(
+        `rejected native task frame type 0x${msgType.toString(16).padStart(2, "0")}: ${typeError}`,
+      );
+    }
     const payloadLen = this._buf.readUInt32BE(8);
     if (payloadLen > MAX_FRAME_PAYLOAD) {
       throw new IicpTcpClientError(

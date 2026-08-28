@@ -8,6 +8,7 @@ import {
   FRAME_HEADER_LEN,
   MAX_FRAME_PAYLOAD,
   MsgType,
+  stableTaskMessageTypeError,
 } from "../src/iicp_tcp.js";
 
 const fixture = JSON.parse(
@@ -18,6 +19,11 @@ const fixture = JSON.parse(
     name: string;
     wire_hex: string;
     expected: Record<string, string | number>;
+  }>;
+  stable_task_type_scenarios: Array<{
+    name: string;
+    message_type: number;
+    expected: { outcome: string; reason?: string };
   }>;
 };
 
@@ -60,5 +66,15 @@ describe("native framing fixture", () => {
       () => encodeFrame(MsgType.CALL, Buffer.alloc(MAX_FRAME_PAYLOAD + 1)),
       /frame payload too large/,
     );
+  });
+
+  it("matches the stable task type boundary", () => {
+    for (const scenario of fixture.stable_task_type_scenarios) {
+      assert.equal(
+        stableTaskMessageTypeError(scenario.message_type),
+        scenario.expected.reason,
+        scenario.name,
+      );
+    }
   });
 });
