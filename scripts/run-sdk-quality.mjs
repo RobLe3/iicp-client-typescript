@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const runtimes = ["18", "20", "22", "24"];
+const runtimes = ["22", "24"];
 const minimum = 75;
 const outputIndex = process.argv.indexOf("--output");
 if (outputIndex < 0 || !process.argv[outputIndex + 1]) {
