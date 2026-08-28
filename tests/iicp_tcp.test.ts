@@ -355,6 +355,20 @@ describe("IicpTcpServer", () => {
     assert.ok(sock.destroyed || sock.readableEnded);
   });
 
+  it("rejects a conflicted type before waiting for its body", async () => {
+    const sock = await connectAndCollect(HOST, port);
+    sock.write(encodeFrame(MsgType.INIT, Buffer.from(cborEncode({ 1: FRAMING_VERSION }))));
+    await readFrame(sock);
+    const header = Buffer.alloc(FRAME_HEADER_LEN);
+    IICP_MAGIC.copy(header);
+    header.writeUInt8(FRAMING_VERSION, 4);
+    header.writeUInt8(0x0b, 5);
+    header.writeUInt32BE(MAX_FRAME_PAYLOAD, 8);
+    sock.write(header);
+    await new Promise<void>((resolve) => sock.once("close", () => resolve()));
+    assert.ok(sock.destroyed || sock.readableEnded);
+  });
+
   it("REGRESSION (iter-1410): payload-bearing frames don't close the session", async () => {
     // Send INIT + PING back-to-back as one write — pre-fix the session loop
     // closed after INIT because decode would error on missing payload bytes.
@@ -434,6 +448,29 @@ describe("IicpTcpClient", () => {
     try {
       await client.connect();
       await assert.rejects(() => client.handshake(), /response frame payload too large/);
+    } finally {
+      await client.disconnect();
+      await new Promise<void>((resolve) => fake.close(() => resolve()));
+    }
+  });
+
+  it("rejects a conflicted response type before waiting for its body", async () => {
+    const fake = net.createServer((socket) => {
+      socket.once("data", () => {
+        const header = Buffer.alloc(FRAME_HEADER_LEN);
+        IICP_MAGIC.copy(header);
+        header.writeUInt8(FRAMING_VERSION, 4);
+        header.writeUInt8(0x0b, 5);
+        header.writeUInt32BE(MAX_FRAME_PAYLOAD, 8);
+        socket.write(header);
+      });
+    });
+    await new Promise<void>((resolve) => fake.listen(0, HOST, resolve));
+    const fakePort = (fake.address() as net.AddressInfo).port;
+    const client = new IicpTcpClient({ host: HOST, port: fakePort });
+    try {
+      await client.connect();
+      await assert.rejects(() => client.handshake(), /conflicted_type/);
     } finally {
       await client.disconnect();
       await new Promise<void>((resolve) => fake.close(() => resolve()));
