@@ -1365,7 +1365,11 @@ async function runServe(opts: ServeOpts): Promise<number> {
   // watchdog. undefined is reserved for --skip-registration (no heartbeat by design).
   let token: string | undefined;
   if (!opts.skipRegistration) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    // A dynamic public route becomes eligible only after the node is listening
+    // and the directory can dial it. One expected pre-listener attempt is
+    // enough; the empty-token heartbeat re-registers after serve() binds.
+    const registrationAttempts = tunnelHandle ? 1 : 3;
+    for (let attempt = 1; attempt <= registrationAttempts; attempt++) {
       try {
         token = await node.register();
         // eslint-disable-next-line no-console
@@ -1390,7 +1394,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
         break;
       } catch (exc) {
         const msg = exc instanceof Error ? exc.message : String(exc);
-        if (attempt >= 3) {
+        if (attempt >= registrationAttempts) {
           // eslint-disable-next-line no-console
           console.warn(`[iicp-node] registration failed after ${attempt} attempts: ${msg} — starting heartbeat loop anyway; it will re-register on the first 401`);
           writeNodeEvent(nodeId, "register_fail", `error=${msg} attempts=${attempt}`, logDir);
@@ -3263,6 +3267,12 @@ async function runService(argv: string[]): Promise<number> {
   };
 
   if (subcmd === "install") {
+    const { cloudflaredPath } = await import("./tunnel.js");
+    if (process.env.IICP_CLOUDFLARED_PATH === undefined && cloudflaredPath() === null) {
+      process.stderr.write(
+        "WARNING: Quick Tunnel fallback is unavailable under the supervisor because cloudflared could not be resolved. Direct reachability remains supported.\n",
+      );
+    }
     if (dryRun) {
       process.stdout.write(`# ${unit.platform} service: ${unit.name}\n# path: ${unit.path}\n${unit.content}`);
     } else {

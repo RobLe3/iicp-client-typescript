@@ -17,14 +17,14 @@
       ]
     },
     "confidentiality-downgrade": {
-      "assertion": "no key → refused by default",
+      "assertion": "no key \u2192 refused by default",
       "command": [
         "@node",
         "--import",
         "tsx",
         "--test",
         "--test-reporter=tap",
-        "--test-name-pattern=^no\\ key\\ →\\ refused\\ by\\ default$",
+        "--test-name-pattern=^no\\ key\\ \u2192\\ refused\\ by\\ default$",
         "tests/client.test.ts"
       ]
     },
@@ -170,6 +170,18 @@
         "--test-reporter=tap",
         "--test-name-pattern=^applies\\ the\\ shared\\ credential\\ rotation\\ and\\ refusal\\ lifecycle$",
         "tests/current_node_token.test.ts"
+      ]
+    },
+    "dynamic-public-route-readiness": {
+      "assertion": "starts empty-token recovery as soon as the listener is ready",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^starts\\ empty\\-token\\ recovery\\ as\\ soon\\ as\\ the\\ listener\\ is\\ ready$",
+        "tests/serve.test.ts"
       ]
     },
     "minimum-version": {

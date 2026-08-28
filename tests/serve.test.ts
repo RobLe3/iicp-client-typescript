@@ -321,6 +321,32 @@ describe("heartbeat self-heal (#404)", () => {
     assert.equal(hbCalls, 1);
   });
 
+  it("starts empty-token recovery as soon as the listener is ready", async () => {
+    const node = new IicpNode(cfg());
+    const port = await freePort();
+    let resolveTick!: () => void;
+    const ticked = new Promise<void>((resolve) => { resolveTick = resolve; });
+    (node as unknown as { _heartbeatTick: (t: string) => Promise<string> })._heartbeatTick = async (token) => {
+      assert.equal(token, "");
+      resolveTick();
+      return "recovered-token";
+    };
+
+    const stop = node.serve(async () => ({}), {
+      host: "127.0.0.1",
+      port,
+      nodeToken: "",
+    });
+    try {
+      await Promise.race([
+        ticked,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("empty-token recovery did not start")), 1_000)),
+      ]);
+    } finally {
+      stop();
+    }
+  });
+
   it("keeps the same token on a healthy tick", async () => {
     const node = new IicpNode(cfg());
     (node as unknown as { heartbeat: (t: string) => Promise<void> }).heartbeat = async () => undefined;

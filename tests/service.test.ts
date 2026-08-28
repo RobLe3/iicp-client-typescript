@@ -40,6 +40,57 @@ describe("service supervisor unit rendering", () => {
     assert.ok(unit.content.includes("Restart=on-failure"));
     assert.ok(!unit.content.includes("--daemon"));
   });
+
+  it("preserves only explicit tunnel policy and a resolved cloudflared binary", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "iicp-cloudflared-"));
+    const binary = path.join(tmp, "cloudflared");
+    fs.writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const oldOverride = process.env.IICP_CLOUDFLARED_PATH;
+    const oldTunnel = process.env.IICP_TUNNEL;
+    try {
+      process.env.IICP_CLOUDFLARED_PATH = binary;
+      process.env.IICP_TUNNEL = "yes";
+      const launchd = renderLaunchd("mynode");
+      const systemd = renderSystemd("mynode");
+      const resolved = fs.realpathSync(binary);
+      assert.ok(launchd.content.includes(`<key>IICP_CLOUDFLARED_PATH</key><string>${resolved}</string>`));
+      assert.ok(launchd.content.includes("<key>IICP_TUNNEL</key><string>1</string>"));
+      assert.ok(systemd.content.includes(`Environment=IICP_CLOUDFLARED_PATH=${resolved}`));
+      assert.ok(systemd.content.includes("Environment=IICP_TUNNEL=1"));
+
+      delete process.env.IICP_TUNNEL;
+      assert.equal(renderLaunchd("mynode").content.includes("<key>IICP_TUNNEL</key>"), false);
+    } finally {
+      if (oldOverride === undefined) delete process.env.IICP_CLOUDFLARED_PATH;
+      else process.env.IICP_CLOUDFLARED_PATH = oldOverride;
+      if (oldTunnel === undefined) delete process.env.IICP_TUNNEL;
+      else process.env.IICP_TUNNEL = oldTunnel;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an invalid override or unavailable forced tunnel", () => {
+    const oldOverride = process.env.IICP_CLOUDFLARED_PATH;
+    const oldTunnel = process.env.IICP_TUNNEL;
+    const oldPath = process.env.PATH;
+    try {
+      process.env.IICP_CLOUDFLARED_PATH = "relative/cloudflared";
+      delete process.env.IICP_TUNNEL;
+      assert.throws(() => renderLaunchd("mynode"), /absolute path/);
+
+      delete process.env.IICP_CLOUDFLARED_PATH;
+      process.env.PATH = "";
+      process.env.IICP_TUNNEL = "1";
+      assert.throws(() => renderSystemd("mynode"), /requires cloudflared/);
+    } finally {
+      if (oldOverride === undefined) delete process.env.IICP_CLOUDFLARED_PATH;
+      else process.env.IICP_CLOUDFLARED_PATH = oldOverride;
+      if (oldTunnel === undefined) delete process.env.IICP_TUNNEL;
+      else process.env.IICP_TUNNEL = oldTunnel;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+    }
+  });
 });
 
 describe("service manager lifecycle planning", () => {

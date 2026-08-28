@@ -418,19 +418,38 @@ export const INSTALL_HINT =
   "macOS `brew install cloudflared` · Linux: https://pkg.cloudflare.com · " +
   "Windows `winget install Cloudflare.cloudflared`";
 
-/** Locate the cloudflared binary on PATH, or null (we never auto-install it). */
+function resolvedExecutable(candidate: string): string | null {
+  try {
+    const resolved = fs.realpathSync(candidate);
+    if (!fs.statSync(resolved).isFile()) return null;
+    fs.accessSync(resolved, fs.constants.X_OK);
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve cloudflared for interactive and supervisor-managed execution.
+ *
+ * An explicit IICP_CLOUDFLARED_PATH is authoritative and must be absolute.
+ * Invalid explicit configuration fails closed instead of selecting another
+ * binary from PATH.
+ */
 export function cloudflaredPath(): string | null {
+  const configured = process.env.IICP_CLOUDFLARED_PATH;
+  if (configured !== undefined) {
+    if (!path.isAbsolute(configured)) return null;
+    return resolvedExecutable(configured);
+  }
   const exts = process.platform === "win32" ? [".exe", ".cmd", ""] : [""];
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!dir) continue;
     for (const ext of exts) {
       const candidate = path.join(dir, `cloudflared${ext}`);
       try {
-        fs.accessSync(candidate, fs.constants.X_OK);
-        return candidate;
-      } catch {
-        /* keep scanning */
-      }
+        const resolved = resolvedExecutable(candidate);
+        if (resolved) return resolved;
+      } catch { /* keep scanning */ }
     }
   }
   return null;
