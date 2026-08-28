@@ -15,7 +15,10 @@ test("process crash snapshot restores the last committed state", () => {
   const snapshot = join(root, "snapshot.json");
   const worker = [
     'import { writeFileSync } from "node:fs";',
-    'import { LifecycleStore } from "./src/service_lifecycle.ts";',
+    // The package is CommonJS, so tsx exposes the module as the default export
+    // when this standalone ESM crash worker imports the TypeScript source.
+    'import lifecycle from "./src/service_lifecycle.ts";',
+    'const { LifecycleStore } = lifecycle;',
     'const store = new LifecycleStore();',
     'store.submit("crash-task", "crash-idem", "sha256:request");',
     'store.transition("crash-task", "running");',

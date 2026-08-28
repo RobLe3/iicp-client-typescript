@@ -109,9 +109,19 @@ function supervisorTunnelEnvironment(): Record<string, string> {
     );
   }
 
+  const native = process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
+  let normalizedNative: string | undefined;
+  if (native !== undefined) {
+    const value = native.trim().toLowerCase();
+    if (["1", "true", "yes"].includes(value)) normalizedNative = "1";
+    else if (["0", "false", "no"].includes(value)) normalizedNative = "0";
+    else throw new Error("IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP must be one of 1/true/yes or 0/false/no");
+  }
+
   return {
     ...(binary ? { IICP_CLOUDFLARED_PATH: binary } : {}),
     ...(normalized !== undefined ? { IICP_TUNNEL: normalized } : {}),
+    ...(normalizedNative !== undefined ? { IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP: normalizedNative } : {}),
   };
 }
 

@@ -10,6 +10,7 @@ describe("service supervisor unit rendering", () => {
   it("launchd unit runs foreground serve with hourly auto-update defaults", () => {
     delete process.env.IICP_AUTO_UPDATE;
     delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+    delete process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
     const unit = renderLaunchd("mynode");
 
     assert.equal(unit.platform, "launchd");
@@ -22,12 +23,14 @@ describe("service supervisor unit rendering", () => {
     assert.ok(unit.content.includes("<key>IICP_SUPERVISED</key><string>1</string>"));
     assert.ok(unit.content.includes("<key>IICP_TUNNEL_DEAD_POLICY</key><string>auto</string>"));
     assert.ok(unit.content.includes("<key>KeepAlive</key><true/>"));
+    assert.ok(!unit.content.includes("<key>IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP</key>"));
     assert.ok(!unit.content.includes("--daemon"));
   });
 
   it("systemd unit runs foreground serve with hourly auto-update defaults", () => {
     delete process.env.IICP_AUTO_UPDATE;
     delete process.env.IICP_AUTO_UPDATE_INTERVAL_S;
+    delete process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
     const unit = renderSystemd("mynode");
 
     assert.equal(unit.platform, "systemd");
@@ -38,6 +41,7 @@ describe("service supervisor unit rendering", () => {
     assert.ok(unit.content.includes("Environment=IICP_SUPERVISED=1"));
     assert.ok(unit.content.includes("Environment=IICP_TUNNEL_DEAD_POLICY=auto"));
     assert.ok(unit.content.includes("Restart=on-failure"));
+    assert.ok(!unit.content.includes("Environment=IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP="));
     assert.ok(!unit.content.includes("--daemon"));
   });
 
@@ -47,9 +51,11 @@ describe("service supervisor unit rendering", () => {
     fs.writeFileSync(binary, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
     const oldOverride = process.env.IICP_CLOUDFLARED_PATH;
     const oldTunnel = process.env.IICP_TUNNEL;
+    const oldNative = process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
     try {
       process.env.IICP_CLOUDFLARED_PATH = binary;
       process.env.IICP_TUNNEL = "yes";
+      process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP = "yes";
       const launchd = renderLaunchd("mynode");
       const systemd = renderSystemd("mynode");
       const resolved = fs.realpathSync(binary);
@@ -57,6 +63,8 @@ describe("service supervisor unit rendering", () => {
       assert.ok(launchd.content.includes("<key>IICP_TUNNEL</key><string>1</string>"));
       assert.ok(systemd.content.includes(`Environment=IICP_CLOUDFLARED_PATH=${resolved}`));
       assert.ok(systemd.content.includes("Environment=IICP_TUNNEL=1"));
+      assert.ok(launchd.content.includes("<key>IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP</key><string>1</string>"));
+      assert.ok(systemd.content.includes("Environment=IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP=1"));
 
       delete process.env.IICP_TUNNEL;
       assert.equal(renderLaunchd("mynode").content.includes("<key>IICP_TUNNEL</key>"), false);
@@ -65,6 +73,8 @@ describe("service supervisor unit rendering", () => {
       else process.env.IICP_CLOUDFLARED_PATH = oldOverride;
       if (oldTunnel === undefined) delete process.env.IICP_TUNNEL;
       else process.env.IICP_TUNNEL = oldTunnel;
+      if (oldNative === undefined) delete process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
+      else process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP = oldNative;
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
@@ -89,6 +99,17 @@ describe("service supervisor unit rendering", () => {
       else process.env.IICP_TUNNEL = oldTunnel;
       if (oldPath === undefined) delete process.env.PATH;
       else process.env.PATH = oldPath;
+    }
+  });
+
+  it("refuses an invalid experimental native setting", () => {
+    const oldNative = process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
+    try {
+      process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP = "sometimes";
+      assert.throws(() => renderLaunchd("mynode"), /must be one of/);
+    } finally {
+      if (oldNative === undefined) delete process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP;
+      else process.env.IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP = oldNative;
     }
   });
 });

@@ -141,16 +141,14 @@ export function modalitiesForModel(model: string): string[] {
 }
 
 /**
- * #457 / ADR-040 — derive the native binary transport_endpoint from the HTTP `endpoint`.
- * They share one host:port (serve() multiplexes both planes on one socket via first-byte
- * detection), so the native URI is the same authority with the `iicp` scheme (`iicpsec`
- * for TLS). Returns null if the endpoint is not a parseable http(s) URL.
+ * Derive the experimental plaintext native endpoint from direct HTTP.
+ * The maintained server has no native TLS terminator, so an HTTPS reverse
+ * proxy or tunnel is never rewritten to `iicpsec://` automatically.
  */
 export function deriveNativeEndpoint(endpoint: string): string | null {
   try {
     const u = new URL(endpoint);
     if (u.protocol === "http:") return `iicp://${u.host}`;
-    if (u.protocol === "https:") return `iicpsec://${u.host}`;
     return null;
   } catch {
     return null;
@@ -253,10 +251,10 @@ export interface NodeConfig {
   /** Max tokens per request, declared on the capability object (REGISTER `capabilities[].max_tokens`). Default: 8192. */
   maxTokens?: number;
   /**
-   * Optional native IICP binary endpoint (spec/iicp-dir.md v0.7.0).
-   * Scheme MUST be `iicp://` (plaintext) or `iicpsec://` (TLS).
-   * Default IICP port is 9484 (ADR-040). When set, the directory persists it
-   * and clients SHOULD prefer it over `endpoint` for task CALLs.
+   * Experimental native IICP endpoint (ADR-040), disabled by default.
+   * `iicp://` is plaintext development use; `iicpsec://` requires a real native
+   * TLS terminator. Port 9484 is an unassigned project convention. When set,
+   * the directory persists it for explicitly enabled experimental peers.
    */
   transportEndpoint?: string;
   /** #331 Phase A.1 / ADR-041 — NAT-traversal observability surfaced to the
@@ -1141,25 +1139,25 @@ export class IicpNode {
       }
     });
 
-    // #457 / ADR-040 — native IICP binary transport on the SAME port as HTTP. A single
-    // listener peeks the first bytes of each connection: the IICP frame magic ("IICP")
-    // routes to the native handler, anything else (an HTTP request line) to the control
-    // plane above. One socket ⇒ one pinhole ⇒ native is reachable exactly when HTTP is
-    // (advertise-when-reachable), and CGNAT nodes need no second hole. The native handler
-    // shares the same backend task handler as HTTP.
-    const tcpServer = new IicpTcpServer({
-      host,
-      port,
-      nodeId: this._cfg.nodeId,
-      handler: ((t: { task_id: string; intent: string; payload: Record<string, unknown> }) =>
-        handler({ task_id: t.task_id, intent: t.intent, payload: t.payload })) as TcpTaskHandler,
-    });
+    // Merely importing the experimental implementation does not mount it.
+    // An explicit transportEndpoint opt-in gates both listener routing and
+    // registration; ordinary nodes remain HTTP-only.
+    const nativeEnabled = Boolean(this._cfg.transportEndpoint);
+    const tcpServer = nativeEnabled
+      ? new IicpTcpServer({
+          host,
+          port,
+          nodeId: this._cfg.nodeId,
+          handler: ((t: { task_id: string; intent: string; payload: Record<string, unknown> }) =>
+            handler({ task_id: t.task_id, intent: t.intent, payload: t.payload })) as TcpTaskHandler,
+        })
+      : null;
     const mux = net.createServer((socket) => {
       socket.once("data", (chunk: Buffer) => {
-        const isNative = chunk.length >= 4 && chunk.subarray(0, 4).equals(IICP_MAGIC);
+        const isNative = nativeEnabled && chunk.length >= 4 && chunk.subarray(0, 4).equals(IICP_MAGIC);
         // Put the peeked bytes back so the chosen consumer parses from the start.
         socket.unshift(chunk);
-        if (isNative) {
+        if (isNative && tcpServer) {
           void tcpServer.handleConnection(socket);
         } else {
           server.emit("connection", socket);
@@ -1167,6 +1165,11 @@ export class IicpNode {
       });
       socket.on("error", () => undefined);
     });
+    if (nativeEnabled) {
+      console.warn(
+        "[iicp-node] experimental plaintext native TCP enabled; it is excluded from stable and production claims.",
+      );
+    }
     mux.listen(port, host, () => this._runtimeHealth.markRunning());
 
     let hbTimer: ReturnType<typeof setInterval> | undefined;

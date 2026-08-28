@@ -10,7 +10,7 @@ const release = readFileSync(new URL("../.github/workflows/release.yml", import.
 
 test("minimum Node version is declared and candidate remains pre-1", () => {
   assert.equal(pkg.engines.node, "^22.0.0 || ^24.0.0");
-  assert.ok(Number(process.versions.node.split(".")[0]) >= 18);
+  assert.ok(Number(process.versions.node.split(".")[0]) >= 22);
   assert.equal(pkg.version.split(".")[0], "0");
 });
 

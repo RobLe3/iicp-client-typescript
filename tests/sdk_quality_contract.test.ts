@@ -10,11 +10,13 @@ test("quality runner emits the shared content-free evidence contract", () => {
   for (const forbidden of ["credentials", "test_output", "node_ids", "endpoints"]) {
     assert.ok(!runner.includes(forbidden));
   }
+  assert.match(runner, /const runtimes = \["22", "24"\]/);
+  assert.doesNotMatch(runner, /const runtimes = \["18", "20"/);
 });
 
 test("quality documentation identifies local matrix and coverage ratchet", () => {
   const quality = readFileSync("QUALITY.md", "utf8");
-  assert.match(quality, /Node 18, 20, 22 and 24/);
+  assert.match(quality, /Node 22 and 24/);
   assert.match(quality, /75 percent/);
   assert.match(quality, /free GitHub account/);
 });
