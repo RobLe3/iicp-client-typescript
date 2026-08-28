@@ -496,13 +496,33 @@ multimodal task via discover.
 
 ### Listen port — default 9484, auto-increment (v0.7.5+)
 
-The official IICP port **9484** is the default listen port (`IICP_PORT`, `--port`).
+The unassigned project-default port **9484** is the default listen port
+(`IICP_PORT`, `--port`); it is not an IANA-assigned IICP service port.
 The `iicp-node` CLI auto-increments to the next free port when 9484 is already in
 use, so several nodes on one host don't need hand-picked ports — first binds 9484,
 second 9485, third 9486, etc. Each node gets its own port (hence its own NAT
 pinhole); multiple models on one node share that single port. Auto-increment is
 skipped when you pass an explicit `--public-endpoint`. `node.serve(handler, { port })`
 uses the port you give it as-is (no auto-increment at the library level).
+
+---
+
+### Experimental native TCP boundary
+
+Provider nodes serve the supported HTTP task path by default. Importing the
+native implementation does not mount or advertise it; the native TCP draft is
+outside the coordinated stable and production support baseline. A direct
+development endpoint requires an explicit runtime opt-in:
+
+```bash
+IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP=1 iicp-node serve --node my-node
+```
+
+Automatic derivation accepts only direct `http://` endpoints and produces
+plaintext `iicp://`. It never rewrites an `https://` endpoint to `iicpsec://`,
+because an HTTPS reverse proxy or Quick Tunnel does not prove a native TLS
+route. Generated launchd and systemd units omit the setting by default and
+preserve it only when explicitly configured.
 
 ---
 

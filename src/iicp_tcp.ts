@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Native IICP binary transport (port 9484) — server + framing + cbor payloads.
+ * Experimental native IICP binary transport — server + framing + CBOR payloads.
+ * Provider nodes require the separate IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP=1
+ * runtime opt-in before mounting or advertising this plaintext development
+ * binding. It is excluded from stable and production support claims.
  *
  * TypeScript port of iicp-client-python iicp_tcp.py (iter-1414). Wire-
  * compatible with adapter nodes and REACH FRAME-PING-01 / FRAME-INIT-01
  * conformance probes.
  *
- * cbor-x is an optional peer dependency installed only when an SDK consumer
- * actually wants to run a native-transport node. HTTP-only nodes don't need it.
+ * cbor-x is an optional peer dependency. Installing it alone does not enable
+ * the native listener; HTTP-only nodes do not need it.
  *
  * Implements the iter-1410 framing fixes from the start: session loop reads
  * the announced payload BEFORE decoding (pre-fix the adapter version closed
@@ -37,7 +40,7 @@ const STABLE_TASK_MESSAGE_TYPES = new Set<number>([
   0x08, 0x09, 0x0a, 0x0d, 0x0e,
 ]);
 
-/** Fail-closed type-byte disposition for the stable native task profile. */
+/** Fail-closed type-byte disposition for the bounded experimental task profile. */
 export function stableTaskMessageTypeError(msgType: number): string | undefined {
   if (STABLE_TASK_MESSAGE_TYPES.has(msgType)) return undefined;
   if (msgType === 0x00 || msgType === 0xff) return "invalid_type";

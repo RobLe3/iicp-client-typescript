@@ -211,6 +211,15 @@ function envBool(name: string, fallback = false): boolean {
   return v.toLowerCase() === "true" || v === "1" || v.toLowerCase() === "yes";
 }
 
+function explicitBoolEnv(name: string): boolean | undefined {
+  const raw = process.env[name];
+  if (raw === undefined) return undefined;
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes"].includes(value)) return true;
+  if (["0", "false", "no"].includes(value)) return false;
+  throw new CliError(`${name} must be one of 1/true/yes or 0/false/no`);
+}
+
 export const TUNNEL_DEAD_EXIT_CODE = 75;
 export type TunnelDeadPolicy = "auto" | "retry" | "exit" | "log-only";
 export type TunnelDeadBehavior = "exit" | "retry" | "log-only";
@@ -296,6 +305,9 @@ function printHelp(): void {
       `                             unverified, then relay. --tunnel forces it; --no-tunnel disables fallback.\n` +
       `                             Dead policy: IICP_TUNNEL_DEAD_POLICY=auto|retry|exit|log-only;\n` +
       `                             generated services set IICP_SUPERVISED=1.\n` +
+      `  IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP=1 mounts and advertises the plaintext native TCP draft\n` +
+      `                             for direct development endpoints only; disabled by default and excluded\n` +
+      `                             from stable and production claims.\n` +
       `  --relay-worker-endpoint H  IICP_RELAY_WORKER_ENDPOINT — <host>:<port> of a relay node (R2 last-resort)\n` +
       `  --relay-capable            IICP_RELAY_CAPABLE — advertise as relay server for CGNAT/tier-4 operators\n` +
       `  --relay-accept-port N      IICP_RELAY_ACCEPT_PORT — TCP port for relay accept server (default 9485).\n` +
@@ -451,7 +463,7 @@ async function checkDependencies(backendUrl: string): Promise<DepIssue[]> {
 
   // 2) Optional Node deps mapped to npm peerDependencies
   const optional: Array<[string, string, string]> = [
-    ["cbor-x", "cbor-x", "native IICP TCP transport (port 9484)"],
+    ["cbor-x", "cbor-x", "experimental native IICP TCP draft (disabled by default; not stable/production)"],
     ["nat-upnp", "nat-upnp", "UPnP NAT detection + IPv6 firewall pinhole"],
     ["prom-client", "prom-client", "/metrics endpoint"],
   ];
@@ -756,7 +768,7 @@ async function _autoElectRelay(
 /**
  * Return the first bindable TCP port >= `start` on `host`.
  *
- * The official IICP port 9484 is the starting point; when running multiple
+ * The provisional, unassigned project port 9484 is the starting point; when running multiple
  * nodes on one host (each model on its own port → its own pinhole) the second
  * node auto-increments to 9485, the third to 9486, and so on. Probes by
  * attempting a real listen so the chosen port is genuinely free before NAT
@@ -957,7 +969,7 @@ async function runServe(opts: ServeOpts): Promise<number> {
   }
 
   // Resolve the actual listen port before NAT detection: start at the
-  // requested port (default 9484, the official IICP port) and auto-increment
+  // requested port (default 9484, an unassigned project convention) and auto-increment
   // to the next free port. Keeps one port per node (multiple models share it)
   // while N nodes on one host each get a distinct port → distinct pinhole.
   // Skipped when the operator supplies an explicit --public-endpoint.
@@ -1346,16 +1358,22 @@ async function runServe(opts: ServeOpts): Promise<number> {
     opts.skipRegistration = true;
   }
 
-  // #457 / ADR-040 — advertise the native IICP binary transport. serve() multiplexes it
-  // onto the SAME socket as HTTP (first-byte detection), so transport_endpoint shares the
-  // endpoint's host:port with the iicp:// scheme. Set from the FINAL endpoint (after NAT
-  // profile application); register() only sends it when registering (skipRegistration gates
-  // the non-routable case) → advertise-when-reachable. Opt out with IICP_DISABLE_NATIVE_TRANSPORT=1.
-  if (!opts.skipRegistration && process.env["IICP_DISABLE_NATIVE_TRANSPORT"] !== "1") {
+  // Native TCP remains a development-only draft outside the coordinated
+  // stable support baseline. It requires explicit opt-in, and HTTPS is never
+  // rewritten to iicpsec because this server has no native TLS terminator.
+  if (explicitBoolEnv("IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP") === true) {
     const finalEndpoint = (node["_cfg"] as { endpoint?: string }).endpoint;
     const nativeEndpoint = finalEndpoint ? deriveNativeEndpoint(finalEndpoint) : null;
     if (nativeEndpoint) {
       (node["_cfg"] as Record<string, unknown>).transportEndpoint = nativeEndpoint;
+      console.warn(
+        "[iicp-node] experimental plaintext native TCP enabled; it is excluded from stable and production claims.",
+      );
+    } else {
+      console.warn(
+        "[iicp-node] experimental native TCP was requested but no direct HTTP endpoint can be derived; " +
+          "HTTPS/tunnel endpoints are not native TLS routes, so the listener remains disabled.",
+      );
     }
   }
 

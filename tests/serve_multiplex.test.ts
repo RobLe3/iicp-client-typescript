@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * #457 / ADR-040 — `iicp-node serve` multiplexes the HTTP control plane and the native
- * IICP binary transport on ONE port (first-byte detection). These tests prove BOTH planes
- * answer on the same socket, and that transport_endpoint derives from the HTTP endpoint.
- *
- * Fails without the fix: pre-#457 serve() bound only an HTTP server on the port, so a
- * native IICP CALL would hit the HTTP parser and never get a RESPONSE.
+ * The native TCP draft is mounted only after an explicit endpoint opt-in.
  */
 
 import { describe, it, before, after } from "node:test";
@@ -61,6 +56,7 @@ describe("#457 single-port HTTP + native transport multiplexer", () => {
     region: "test-region",
     model: "test-model",
     maxConcurrent: 4,
+    transportEndpoint: "iicp://127.0.0.1:9484",
   };
 
   before(async () => {
@@ -94,7 +90,32 @@ describe("#457 single-port HTTP + native transport multiplexer", () => {
 
   it("derives transport_endpoint from the HTTP endpoint (same host:port, iicp scheme)", () => {
     assert.equal(deriveNativeEndpoint("http://203.0.113.5:9484"), "iicp://203.0.113.5:9484");
-    assert.equal(deriveNativeEndpoint("https://node.example:9484"), "iicpsec://node.example:9484");
+    assert.equal(deriveNativeEndpoint("https://node.example:9484"), null);
     assert.equal(deriveNativeEndpoint("not-a-url"), null);
+  });
+
+  it("does not mount native TCP without an explicit transport endpoint", async () => {
+    const httpOnlyPort = await freePort();
+    const httpOnlyNode = new IicpNode({
+      nodeId: "http-only-node",
+      endpoint: "http://test.local",
+      intent: "urn:iicp:intent:llm:chat:v1",
+      region: "test-region",
+      model: "test-model",
+      maxConcurrent: 4,
+    });
+    const stop = httpOnlyNode.serve(async () => ({ result: { ok: true } }), {
+      host: "127.0.0.1",
+      port: httpOnlyPort,
+    });
+    try {
+      await waitPort(httpOnlyPort);
+      const client = new IicpTcpClient({ host: "127.0.0.1", port: httpOnlyPort, timeoutMs: 1000 });
+      await client.connect();
+      await assert.rejects(client.handshake());
+      await client.disconnect();
+    } finally {
+      stop();
+    }
   });
 });
