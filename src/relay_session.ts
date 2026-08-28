@@ -11,7 +11,7 @@
 import * as net from "node:net";
 import { randomUUID } from "node:crypto";
 import { consumeRelayBindTicket, type RelayBindTicketClaims, verifyRelayBindTicket } from "./relay_ticket.js";
-import { decodeLifecycleResponse } from "./iicp_tcp.js";
+import { decodeLifecycleResponse, MAX_FRAME_PAYLOAD } from "./iicp_tcp.js";
 import { NativeResponseSequence, type NativeResponseFrame } from "./native_response_sequence.js";
 
 const IICP_MAGIC = Buffer.from("IICP");
@@ -100,6 +100,7 @@ function _dec(buf: Buffer): unknown {
 }
 
 function makeFrame(msgType: number, payload: Buffer): Buffer {
+  if (payload.length > MAX_FRAME_PAYLOAD) throw new Error("relay frame payload too large");
   const header = Buffer.alloc(FRAME_HEADER_LEN);
   IICP_MAGIC.copy(header, 0);
   header.writeUInt8(FRAMING_VERSION, 4);
@@ -480,18 +481,20 @@ export class RelayAcceptServer {
     const rest = await readExactly(FRAME_HEADER_LEN - 4);
     if (!rest) return;
     const header = Buffer.concat([magic, rest]);
+    const version = header.readUInt8(4);
     const msgType = header.readUInt8(5);
     const payloadLen = header.readUInt32BE(8);
-    if (msgType !== MT_INIT) return;
+    if (version !== FRAMING_VERSION || msgType !== MT_INIT || payloadLen > MAX_FRAME_PAYLOAD) return;
     if (payloadLen > 0) { const _ = await readExactly(payloadLen); if (!_) return; }
     socket.write(makeFrame(MT_ACK, _enc(new Map<number, unknown>([[1, FRAMING_VERSION]])) as Buffer));
 
     // Step 2: RELAY_BIND
     const rh = await readExactly(FRAME_HEADER_LEN);
     if (!rh) return;
+    if (!rh.subarray(0, 4).equals(IICP_MAGIC) || rh.readUInt8(4) !== FRAMING_VERSION) return;
     const rmt = rh.readUInt8(5);
     const rlen = rh.readUInt32BE(8);
-    if (rmt !== MT_RELAY_BIND) return;
+    if (rmt !== MT_RELAY_BIND || rlen > MAX_FRAME_PAYLOAD) return;
     const rbuf = rlen > 0 ? await readExactly(rlen) : Buffer.alloc(0);
     if (!rbuf) return;
     let workerId: string, intent: string, models: string[], bindTicket: string;
@@ -583,8 +586,10 @@ export class RelayAcceptServer {
       while (!socket.destroyed) {
         const fh = await readExactly(FRAME_HEADER_LEN);
         if (!fh) break;
+        if (!fh.subarray(0, 4).equals(IICP_MAGIC) || fh.readUInt8(4) !== FRAMING_VERSION) break;
         const ft = fh.readUInt8(5);
         const fl = fh.readUInt32BE(8);
+        if (fl > MAX_FRAME_PAYLOAD) break;
         const fp = fl > 0 ? await readExactly(fl) : Buffer.alloc(0);
         if (!fp) break;
 

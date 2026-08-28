@@ -29,7 +29,8 @@ import {
 export const IICP_MAGIC = Buffer.from("IICP", "ascii"); // 0x49 0x49 0x43 0x50
 export const FRAMING_VERSION = 0x01;
 export const FRAME_HEADER_LEN = 12; // magic(4) + ver(1) + type(1) + flags(1) + reserved(1) + length(4)
-const MAX_PAYLOAD = 16 * 1024 * 1024;
+/** Length-field payload bytes; the 12-byte header is excluded. */
+export const MAX_FRAME_PAYLOAD = 16 * 1024 * 1024;
 
 export enum MsgType {
   INIT = 0x01,
@@ -57,6 +58,9 @@ export interface IicpFrame {
 }
 
 export function encodeFrame(msgType: number, payload: Buffer = Buffer.alloc(0), flags = 0): Buffer {
+  if (payload.length > MAX_FRAME_PAYLOAD) {
+    throw new Error(`IICP frame payload too large: ${payload.length} > ${MAX_FRAME_PAYLOAD}`);
+  }
   const header = Buffer.alloc(FRAME_HEADER_LEN);
   IICP_MAGIC.copy(header, 0);
   header.writeUInt8(FRAMING_VERSION, 4);
@@ -76,10 +80,16 @@ export function decodeFrame(data: Buffer): { frame: IicpFrame; consumed: number 
     throw new Error(`Invalid IICP magic: ${magic.toString("hex")}`);
   }
   const version = data.readUInt8(4);
+  if (version !== FRAMING_VERSION) {
+    throw new Error(`Unsupported IICP framing version: ${version}; expected ${FRAMING_VERSION}`);
+  }
   const msgType = data.readUInt8(5);
   const flags = data.readUInt8(6);
   // reserved at 7
   const payloadLen = data.readUInt32BE(8);
+  if (payloadLen > MAX_FRAME_PAYLOAD) {
+    throw new Error(`IICP frame payload too large: ${payloadLen} > ${MAX_FRAME_PAYLOAD}`);
+  }
   const total = FRAME_HEADER_LEN + payloadLen;
   if (data.length < total) {
     throw new Error(`IICP payload truncated: need ${total}, have ${data.length}`);
@@ -312,6 +322,7 @@ export class IicpTcpServer {
 
   private async _handleConnection(socket: net.Socket): Promise<void> {
     let buf = Buffer.alloc(0);
+    let initialized = false;
     // Aggregate incoming TCP bytes into a Buffer queue. The async loop reads
     // synchronously off `buf`; new TCP data appends.
     const dataQueue: Buffer[] = [];
@@ -384,8 +395,14 @@ export class IicpTcpServer {
           socket.destroy();
           return;
         }
+        const version = buf.readUInt8(4);
+        const msgType = buf.readUInt8(5);
+        if (version !== FRAMING_VERSION) {
+          socket.destroy();
+          return;
+        }
         const payloadLen = buf.readUInt32BE(8);
-        if (payloadLen + FRAME_HEADER_LEN > MAX_PAYLOAD) {
+        if (payloadLen > MAX_FRAME_PAYLOAD) {
           socket.destroy();
           return;
         }
@@ -409,7 +426,13 @@ export class IicpTcpServer {
         }
         buf = Buffer.from(buf.subarray(consumed));
 
+        if ((!initialized && msgType !== MsgType.INIT) || (initialized && msgType === MsgType.INIT)) {
+          socket.destroy();
+          return;
+        }
+
         const keepOpen = await this._dispatch(frame, socket);
+        if (!initialized) initialized = true;
         if (!keepOpen) {
           socket.end();
           return;
@@ -427,7 +450,7 @@ export class IicpTcpServer {
   private async _dispatch(frame: IicpFrame, socket: net.Socket): Promise<boolean> {
     switch (frame.msgType) {
       case MsgType.INIT:
-        return this._onInit(socket);
+        return this._onInit(frame, socket);
       case MsgType.PING:
         return this._onPing(frame, socket);
       case MsgType.DISCOVER:
@@ -443,7 +466,14 @@ export class IicpTcpServer {
     }
   }
 
-  private async _onInit(socket: net.Socket): Promise<boolean> {
+  private async _onInit(frame: IicpFrame, socket: net.Socket): Promise<boolean> {
+    let body: unknown;
+    try {
+      body = await decodeCbor(frame.payload);
+    } catch {
+      return false;
+    }
+    if (numericField(body, 1) !== FRAMING_VERSION) return false;
     const ack = await encodeAck(FRAMING_VERSION, this._nodeId);
     socket.write(encodeFrame(MsgType.ACK, ack));
     return true;
@@ -722,18 +752,30 @@ export class IicpTcpClient {
     if (msgType !== MsgType.ACK) {
       throw new IicpTcpClientError(`expected ACK (0x02), got 0x${msgType.toString(16)}`);
     }
-    if (payload.length) {
-      const body = (await decodeCbor(payload)) as Record<number, unknown>;
-      const v = body?.[1];
-      if (typeof v === "number") this.framingVersion = v;
-      const id = body?.[2];
-      if (typeof id === "string") this.peerNodeId = id;
+    const body = payload.length
+      ? ((await decodeCbor(payload)) as Record<number, unknown>)
+      : undefined;
+    const version = body?.[1];
+    if (version !== FRAMING_VERSION) {
+      throw new IicpTcpClientError(
+        `ACK negotiated unsupported framing version ${String(version)}`,
+      );
+    }
+    this.framingVersion = FRAMING_VERSION;
+    const id = body?.[2];
+    if (typeof id === "string") this.peerNodeId = id;
+  }
+
+  private _requireHandshake(): void {
+    if (this.framingVersion !== FRAMING_VERSION) {
+      throw new IicpTcpClientError("native session handshake is not complete");
     }
   }
 
   /** Send PING; return echoed bytes from PONG (or null if not echoed). */
   async ping(echo?: Buffer): Promise<Buffer | null> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
+    this._requireHandshake();
     const pingMap = new Map<number, unknown>();
     if (echo) pingMap.set(1, echo);
     const payload = await encodeCbor(pingMap);
@@ -753,6 +795,7 @@ export class IicpTcpClient {
   /** Send DISCOVER for `intent`; return the nodes list from the RESPONSE. */
   async discover(intent: string, sessionId = "discover-1"): Promise<Record<string, unknown>[]> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
+    this._requireHandshake();
     const discMap = new Map<number, unknown>();
     discMap.set(2, sessionId);
     discMap.set(3, intent);
@@ -774,6 +817,7 @@ export class IicpTcpClient {
     opts: { sessionId?: string; callId?: string; timeoutMs?: number } = {}
   ): Promise<Record<string, unknown>> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
+    this._requireHandshake();
     const body = new Map<number, unknown>();
     body.set(2, opts.sessionId ?? "call-1");
     body.set(3, intent);
@@ -811,6 +855,7 @@ export class IicpTcpClient {
     },
   ): AsyncIterableIterator<NativeResponseFrame> {
     if (!this._socket) throw new IicpTcpClientError("not connected");
+    this._requireHandshake();
     if (!opts.taskId) throw new IicpTcpClientError("taskId is required for lifecycle streaming");
     const sessionId = opts.sessionId ?? "call-1";
     const callId = opts.callId ?? randomUUID();
@@ -862,6 +907,10 @@ export class IicpTcpClient {
   /** Send CLOSE (graceful teardown). Server hangs up; caller should disconnect. */
   async close(): Promise<void> {
     if (!this._socket || this._socket.destroyed) return;
+    if (this.framingVersion !== FRAMING_VERSION) {
+      this._socket.destroy();
+      return;
+    }
     this._socket.write(encodeFrame(MsgType.CLOSE, Buffer.alloc(0)));
   }
 
@@ -900,8 +949,17 @@ export class IicpTcpClient {
     if (!this._buf.subarray(0, 4).equals(IICP_MAGIC)) {
       throw new IicpTcpClientError(`bad magic in response: ${this._buf.subarray(0, 4).toString("hex")}`);
     }
+    const version = this._buf.readUInt8(4);
+    if (version !== FRAMING_VERSION) {
+      throw new IicpTcpClientError(`unsupported framing version ${version} in response`);
+    }
     const msgType = this._buf.readUInt8(5);
     const payloadLen = this._buf.readUInt32BE(8);
+    if (payloadLen > MAX_FRAME_PAYLOAD) {
+      throw new IicpTcpClientError(
+        `response frame payload too large: ${payloadLen} > ${MAX_FRAME_PAYLOAD}`,
+      );
+    }
     const total = FRAME_HEADER_LEN + payloadLen;
     while (this._buf.length < total) {
       if (this._closed) throw new IicpTcpClientError("connection closed mid-frame");
