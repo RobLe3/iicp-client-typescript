@@ -53,7 +53,16 @@ export interface ResolvedEndpoint {
   addresses: ReadonlyArray<{ address: string; family: 4 | 6 }>;
 }
 
-export async function resolveEndpoint(url: string, allowPrivate = privateEndpointsAllowed()): Promise<ResolvedEndpoint> {
+type EndpointResolver = (
+  host: string,
+  options: { all: true; verbatim: true },
+) => Promise<Array<{ address: string; family: number }>>;
+
+export async function resolveEndpoint(
+  url: string,
+  allowPrivate = privateEndpointsAllowed(),
+  resolver: EndpointResolver = dnsLookup as EndpointResolver,
+): Promise<ResolvedEndpoint> {
   let parsed: URL;
   try { parsed = new URL(url); } catch { throw new Error("IICP-ENDPOINT-REFUSED: invalid provider URL"); }
   if (!["http:", "https:"].includes(parsed.protocol)) {
@@ -73,7 +82,7 @@ export async function resolveEndpoint(url: string, allowPrivate = privateEndpoin
     answers = [{ address: host, family: literalFamily as 4 | 6 }];
   } else {
     try {
-      answers = await dnsLookup(host, { all: true, verbatim: true }) as Array<{ address: string; family: 4 | 6 }>;
+      answers = await resolver(host, { all: true, verbatim: true }) as Array<{ address: string; family: 4 | 6 }>;
     } catch {
       throw new Error("IICP-ENDPOINT-REFUSED: provider hostname resolution failed");
     }

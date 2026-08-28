@@ -26,6 +26,40 @@ function decision(vector: any, keys: Map<string, any>, signatureValid: boolean):
   return "accept_anchored";
 }
 
+function assertFixtureDecision(vectorId: string, expected: string): void {
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const fixture = JSON.parse(readFileSync(join(here, "../parity/dispatch-ticket-trust-v2-crypto.json"), "utf8"));
+  const domain = Buffer.from(fixture.domain_separator_b64url, "base64url");
+  const keys = new Map<string, any>(fixture.keys.map((key: any) => [key.key_id, key]));
+  const vector = fixture.vectors.find((value: any) => value.id === vectorId);
+  const key = keys.get(vector.claims.key_id)!;
+  const rawEd25519SpkiPrefix = Buffer.from("302a300506032b6570032100", "hex");
+  const publicKey = createPublicKey({
+    key: Buffer.concat([rawEd25519SpkiPrefix, Buffer.from(key.public_key_b64url, "base64url")]),
+    format: "der",
+    type: "spki",
+  });
+  const message = Buffer.concat([domain, Buffer.from(canonical(vector.claims), "utf8")]);
+  const signatureValid = verify(null, message, publicKey, Buffer.from(vector.signature_b64url, "base64url"));
+  assert.equal(decision(vector, keys, signatureValid), expected);
+}
+
+test("expired dispatch-ticket key fails closed", () => {
+  assertFixtureDecision("expired_key_refused", "reject_key_expired");
+});
+
+test("replayed dispatch ticket fails closed", () => {
+  assertFixtureDecision("local_replay_refused", "reject_local_replay");
+});
+
+test("revoked dispatch-ticket key fails closed after rotation", () => {
+  assertFixtureDecision("revoked_key_refused", "reject_key_revoked");
+});
+
+test("tampered dispatch-ticket signature fails closed", () => {
+  assertFixtureDecision("tampered_claim_refused", "reject_signature");
+});
+
 test("dispatch-ticket v2 signed vectors are portable", () => {
   const here = fileURLToPath(new URL(".", import.meta.url));
   const fixture = JSON.parse(readFileSync(join(here, "../parity/dispatch-ticket-trust-v2-crypto.json"), "utf8"));
