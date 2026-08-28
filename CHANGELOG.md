@@ -9,6 +9,15 @@ in the main repo).
 
 ## [Unreleased]
 
+## [0.7.110] — 2026-08-28
+
+### Changed — explicit qualification boundary
+
+- Replace the overbroad Node 18-or-newer package claim with the declared Node
+  22 and Node 24 qualification range. Runtime and wire behavior are unchanged.
+- Add a component-owned npm candidate builder with package-content inspection,
+  online/offline exact-install checks and content-free artifact evidence.
+
 ## [0.7.109] — 2026-08-25
 
 ### Added — shell completion

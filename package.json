@@ -41,7 +41,7 @@
     "url": "https://github.com/RobLe3/iicp-client-typescript/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "^22.0.0 || ^24.0.0"
   },
   "dependencies": {
     "cbor-x": "^1.6.4",
