@@ -166,15 +166,20 @@ describe("initiation", () => {
 
   it("waits through shared capacity with jitter instead of failing", async () => {
     process.env.IICP_TUNNEL_WAIT_FOR_CAPACITY = "1";
-    process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = "1";
+    process.env.IICP_TUNNEL_CREATE_MIN_INTERVAL_S = "2";
     process.env.IICP_TUNNEL_CREATE_JITTER_MAX_S = "0";
     const first = await openQuickTunnel(9484, 10_000, fakeBin({ name: "wait-one" }));
+    const gate = JSON.parse(
+      fs.readFileSync(path.join(process.env.IICP_HOME ?? "", "state", "quick_tunnel_create_gate.json"), "utf8"),
+    ) as { quick_tunnel_create_not_before: number };
     const started = Date.now();
+    const remainingBeforeOpen = Math.max(0, gate.quick_tunnel_create_not_before * 1000 - started);
+    assert.ok(remainingBeforeOpen > 0, "the first opener must leave an observable pacing interval");
     const second = await openQuickTunnel(9485, 10_000, fakeBin({ name: "wait-two" }));
     try {
-      // URL parsing already consumes part of the one-second gate before the second
-      // opener starts; it must still wait rather than reject.
-      assert.ok(Date.now() - started >= 700);
+      // Process startup time varies by runtime and host. Assert against the
+      // persisted remaining gate instead of a fixed wall-clock guess.
+      assert.ok(Date.now() - started >= remainingBeforeOpen - 100);
       assert.match(second.url, /wait-two\.trycloudflare\.com$/);
     } finally {
       first.close();
