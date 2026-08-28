@@ -1,7 +1,7 @@
 import { afterEach, describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
 import { IicpClient } from "../src/client.js";
-import { RESTRICTED_DIRECTORY_PROFILE_ID, validateRestrictedDecision } from "../src/restricted_directory.js";
+import { RESTRICTED_DIRECTORY_PROFILE_ID, resolveSecret, validateRestrictedDecision } from "../src/restricted_directory.js";
 import type { RestrictedDirectoryContext } from "../src/types.js";
 
 const context = (): RestrictedDirectoryContext => ({
@@ -38,6 +38,30 @@ describe("restricted directory boundary", () => {
     });
     const client = new IicpClient({ directory_url: "https://directory.example", route_discovery_mode: "ticketed", restricted_directory: context() });
     await client.discoverWithNegotiation("urn:iicp:intent:llm:chat:v1");
+    assert.equal(calls, 1);
+  });
+  it("missing restricted credential fails before network", () => {
+    delete process.env.IICP_TEST_MISSING_RESTRICTED_MEMBER;
+    assert.throws(
+      () => resolveSecret({ kind: "environment", name: "IICP_TEST_MISSING_RESTRICTED_MEMBER" }),
+      /credential is unavailable/,
+    );
+  });
+  it("restricted directory failure does not fall back", async () => {
+    let calls = 0;
+    mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      throw new TypeError("isolated directory unavailable");
+    });
+    const client = new IicpClient({
+      directory_url: "https://directory.example",
+      route_discovery_mode: "ticketed",
+      restricted_directory: context(),
+    });
+    await assert.rejects(
+      client.discoverWithNegotiation("urn:iicp:intent:llm:chat:v1"),
+      /isolated directory unavailable/,
+    );
     assert.equal(calls, 1);
   });
   it("refuses legacy fallback", () => {

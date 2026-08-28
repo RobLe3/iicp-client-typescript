@@ -27,6 +27,17 @@ describe("endpoint security", () => {
     assert.deepEqual(endpoint.addresses, [{ address: "93.184.216.34", family: 4 }]);
   });
 
+  it("fails closed when DNS resolution fails", async () => {
+    await assert.rejects(
+      resolveEndpoint(
+        "https://provider.example.com/v1",
+        false,
+        async () => { throw new Error("simulated DNS failure"); },
+      ),
+      /hostname resolution failed/,
+    );
+  });
+
   it("refuses literal metadata addresses", async () => {
     await assert.rejects(resolveEndpoint("http://169.254.169.254/latest"), /prohibited address/);
   });
@@ -79,6 +90,26 @@ describe("endpoint security", () => {
       );
       assert.equal(response.status, 200);
       assert.deepEqual(JSON.parse(response.text), { ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      if (previous === undefined) delete process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES;
+      else process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES = previous;
+    }
+  });
+
+  it("TLS handshake failure is bounded and visible", async () => {
+    const previous = process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES;
+    process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES = "1";
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" }).end('{"ok":true}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      await assert.rejects(
+        postJsonPinned(`https://127.0.0.1:${address.port}/`, {}, {}, 2_000),
+      );
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       if (previous === undefined) delete process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES;

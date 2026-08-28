@@ -65,6 +65,15 @@ describe("IICP-CX confidentiality", () => {
     assert.throws(() => decryptPayload(env, wrongPriv, wrongPub));
   });
 
+  it("rejects tampered ciphertext", () => {
+    const { cxPublicKey, privBytes, pubBytes } = generateTestKeypair();
+    const env = encryptPayload({ private: "payload" }, cxPublicKey, "tamper-task", "urn:iicp:intent:llm:chat:v1");
+    const ciphertext = Buffer.from(env["encrypted_body"] as string, "base64url");
+    ciphertext[0] ^= 0x01;
+    env["encrypted_body"] = ciphertext.toString("base64url");
+    assert.throws(() => decryptPayload(env, privBytes, pubBytes));
+  });
+
   it("unsupported algorithm throws", () => {
     const badKey: CxPublicKey = { algorithm: "RSA", key: "abc", key_id: "00000000" };
     assert.throws(() => encryptPayload({}, badKey, "t1", "urn:iicp:intent:llm:chat:v1"), /Unsupported/);

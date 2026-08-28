@@ -3,186 +3,319 @@
   "evidence_policy": "digest-only",
   "network_policy": "isolated-fixtures-only",
   "non_authorizing": true,
-  "scenario_commands": {
-    "ciphertext-tamper": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/confidentiality.test.ts"
-    ],
-    "confidentiality-downgrade": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/confidentiality.test.ts"
-    ],
-    "confidentiality-key-missing": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/confidentiality.test.ts"
-    ],
-    "config-malformed": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/cli_ux.test.ts"
-    ],
-    "config-missing": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/cli_ux.test.ts"
-    ],
-    "config-permission-denied": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/operator_identity.test.ts"
-    ],
-    "credential-expired": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/dispatch_ticket_trust_runtime.test.ts"
-    ],
-    "credential-missing": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/current_node_token.test.ts"
-    ],
-    "credential-replayed": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/dispatch_ticket_trust_store.test.ts"
-    ],
-    "credential-rotated": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/dispatch_ticket_trust_store.test.ts"
-    ],
-    "cross-flavor-equivalence": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/conformance.test.ts"
-    ],
-    "directory-unavailable": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/restricted_directory.test.ts"
-    ],
-    "dns-failure": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/endpoint_security.test.ts"
-    ],
-    "duplicate-registration": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/register_operator_wiring.test.ts"
-    ],
-    "minimum-version": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/cli_ux.test.ts"
-    ],
-    "offline-locked-install": [
-      "@npm",
-      "run",
-      "build"
-    ],
-    "package-version-self-report": [
-      "@npm",
-      "run",
-      "build"
-    ],
-    "partial-response": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/conformance.test.ts"
-    ],
-    "process-crash-restart": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/service_lifecycle_identity.test.ts"
-    ],
-    "rate-limit": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/relay_session.test.ts"
-    ],
-    "request-timeout": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/client.test.ts"
-    ],
-    "rollback-last-supported": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/updater.test.ts"
-    ],
-    "signature-mismatch": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/dispatch_ticket_trust_crypto.test.ts"
-    ],
-    "tls-failure": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/endpoint_security.test.ts"
-    ],
-    "unsupported-version": [
-      "@npx",
-      "--no-install",
-      "tsx",
-      "--test",
-      "tests/updater.test.ts"
-    ]
+  "scenarios": {
+    "ciphertext-tamper": {
+      "assertion": "rejects tampered ciphertext",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^rejects\\ tampered\\ ciphertext$",
+        "tests/confidentiality.test.ts"
+      ]
+    },
+    "confidentiality-downgrade": {
+      "assertion": "no key → refused by default",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^no\\ key\\ →\\ refused\\ by\\ default$",
+        "tests/client.test.ts"
+      ]
+    },
+    "confidentiality-key-missing": {
+      "assertion": "skips keyless node and uses keyed candidate",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^skips\\ keyless\\ node\\ and\\ uses\\ keyed\\ candidate$",
+        "tests/client.test.ts"
+      ]
+    },
+    "config-malformed": {
+      "assertion": "malformed node configuration fails closed",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^malformed\\ node\\ configuration\\ fails\\ closed$",
+        "tests/pre1_runtime_boundaries.test.ts"
+      ]
+    },
+    "config-missing": {
+      "assertion": "missing node configuration is explicitly absent",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^missing\\ node\\ configuration\\ is\\ explicitly\\ absent$",
+        "tests/pre1_runtime_boundaries.test.ts"
+      ]
+    },
+    "config-permission-denied": {
+      "assertion": "permission-denied config write leaves no file",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^permission\\-denied\\ config\\ write\\ leaves\\ no\\ file$",
+        "tests/pre1_runtime_boundaries.test.ts"
+      ]
+    },
+    "credential-expired": {
+      "assertion": "expired dispatch-ticket key fails closed",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^expired\\ dispatch\\-ticket\\ key\\ fails\\ closed$",
+        "tests/dispatch_ticket_trust_crypto.test.ts"
+      ]
+    },
+    "credential-missing": {
+      "assertion": "missing restricted credential fails before network",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^missing\\ restricted\\ credential\\ fails\\ before\\ network$",
+        "tests/restricted_directory.test.ts"
+      ]
+    },
+    "credential-replayed": {
+      "assertion": "replayed dispatch ticket fails closed",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^replayed\\ dispatch\\ ticket\\ fails\\ closed$",
+        "tests/dispatch_ticket_trust_crypto.test.ts"
+      ]
+    },
+    "credential-rotated": {
+      "assertion": "revoked dispatch-ticket key fails closed after rotation",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^revoked\\ dispatch\\-ticket\\ key\\ fails\\ closed\\ after\\ rotation$",
+        "tests/dispatch_ticket_trust_crypto.test.ts"
+      ]
+    },
+    "cross-flavor-equivalence": {
+      "assertion": "profile fixture native policy scenarios use the routing gate",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^profile\\ fixture\\ native\\ policy\\ scenarios\\ use\\ the\\ routing\\ gate$",
+        "tests/policy_manifest.test.ts"
+      ]
+    },
+    "directory-unavailable": {
+      "assertion": "restricted directory failure does not fall back",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^restricted\\ directory\\ failure\\ does\\ not\\ fall\\ back$",
+        "tests/restricted_directory.test.ts"
+      ]
+    },
+    "dns-failure": {
+      "assertion": "fails closed when DNS resolution fails",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^fails\\ closed\\ when\\ DNS\\ resolution\\ fails$",
+        "tests/endpoint_security.test.ts"
+      ]
+    },
+    "duplicate-registration": {
+      "assertion": "applies the shared credential rotation and refusal lifecycle",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^applies\\ the\\ shared\\ credential\\ rotation\\ and\\ refusal\\ lifecycle$",
+        "tests/current_node_token.test.ts"
+      ]
+    },
+    "minimum-version": {
+      "assertion": "minimum Node version is declared and candidate remains pre-1",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^minimum\\ Node\\ version\\ is\\ declared\\ and\\ candidate\\ remains\\ pre\\-1$",
+        "tests/pre1_release_boundaries.test.ts"
+      ]
+    },
+    "offline-locked-install": {
+      "assertion": "offline candidate contract pins locked release inputs",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^offline\\ candidate\\ contract\\ pins\\ locked\\ release\\ inputs$",
+        "tests/pre1_release_boundaries.test.ts"
+      ]
+    },
+    "package-version-self-report": {
+      "assertion": "package version self-report matches the candidate contract",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^package\\ version\\ self\\-report\\ matches\\ the\\ candidate\\ contract$",
+        "tests/pre1_release_boundaries.test.ts"
+      ]
+    },
+    "partial-response": {
+      "assertion": "fails when required field missing",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^fails\\ when\\ required\\ field\\ missing$",
+        "tests/conformance.test.ts"
+      ]
+    },
+    "process-crash-restart": {
+      "assertion": "process crash snapshot restores the last committed state",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^process\\ crash\\ snapshot\\ restores\\ the\\ last\\ committed\\ state$",
+        "tests/service_lifecycle.test.ts"
+      ]
+    },
+    "rate-limit": {
+      "assertion": "rate-limits each source independently and recovers after the window",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^rate\\-limits\\ each\\ source\\ independently\\ and\\ recovers\\ after\\ the\\ window$",
+        "tests/relay_session.test.ts"
+      ]
+    },
+    "request-timeout": {
+      "assertion": "timeout is classified deterministically",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^timeout\\ is\\ classified\\ deterministically$",
+        "tests/backends.test.ts"
+      ]
+    },
+    "rollback-last-supported": {
+      "assertion": "does not re-exec when the upgrade fails",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^does\\ not\\ re\\-exec\\ when\\ the\\ upgrade\\ fails$",
+        "tests/updater.test.ts"
+      ]
+    },
+    "signature-mismatch": {
+      "assertion": "tampered dispatch-ticket signature fails closed",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^tampered\\ dispatch\\-ticket\\ signature\\ fails\\ closed$",
+        "tests/dispatch_ticket_trust_crypto.test.ts"
+      ]
+    },
+    "tls-failure": {
+      "assertion": "TLS handshake failure is bounded and visible",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^TLS\\ handshake\\ failure\\ is\\ bounded\\ and\\ visible$",
+        "tests/endpoint_security.test.ts"
+      ]
+    },
+    "unsupported-version": {
+      "assertion": "parseVersion rejects non-stable candidates",
+      "command": [
+        "@node",
+        "--import",
+        "tsx",
+        "--test",
+        "--test-reporter=tap",
+        "--test-name-pattern=^parseVersion\\ rejects\\ non\\-stable\\ candidates$",
+        "tests/updater.test.ts"
+      ]
+    }
   },
-  "schema": "iicp.pre1-component-case-map.v1",
-  "support_command": [
-    "@npx",
-    "--no-install",
-    "tsx",
-    "--test",
-    "tests/client.test.ts",
-    "tests/conformance.test.ts"
-  ]
+  "schema": "iicp.pre1-component-case-map.v2",
+  "support": {
+    "assertion": "candidate ranker runs after policy eligibility and records exploration",
+    "command": [
+      "@node",
+      "--import",
+      "tsx",
+      "--test",
+      "--test-reporter=tap",
+      "--test-name-pattern=^candidate\\ ranker\\ runs\\ after\\ policy\\ eligibility\\ and\\ records\\ exploration$",
+      "tests/client.test.ts"
+    ]
+  }
 }
