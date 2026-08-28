@@ -1186,11 +1186,15 @@ export class IicpNode {
     if (nodeToken !== undefined) {
       this._runtimeHealth.setSupervisorRequired(true);
       let currentToken = nodeToken;
-      hbTimer = setInterval(() => {
+      const heartbeatTick = () => {
         void this._heartbeatTick(currentToken).then((t) => {
           currentToken = t;
         });
-      }, HEARTBEAT_INTERVAL_MS);
+      };
+      hbTimer = setInterval(heartbeatTick, HEARTBEAT_INTERVAL_MS);
+      // Empty means startup registration was deferred until the listener
+      // existed. The listening event is the first safe time to recover.
+      if (nodeToken === "") mux.once("listening", heartbeatTick);
     }
     if (this._cfg.enableMesh) {
       // Phase 2 mesh: bootstrap then gossip every 30s (managed inside PeerManager).

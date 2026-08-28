@@ -7,6 +7,7 @@
  */
 import * as os from "node:os";
 import * as path from "node:path";
+import { cloudflaredPath } from "./tunnel.js";
 
 export interface ServiceUnit {
   platform: "launchd" | "systemd";
@@ -87,6 +88,33 @@ function envValue(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+function supervisorTunnelEnvironment(): Record<string, string> {
+  const configuredPath = process.env.IICP_CLOUDFLARED_PATH;
+  const binary = cloudflaredPath();
+  if (configuredPath !== undefined && binary === null) {
+    throw new Error("IICP_CLOUDFLARED_PATH must be an absolute path to an executable file");
+  }
+
+  const explicit = process.env.IICP_TUNNEL;
+  let normalized: string | undefined;
+  if (explicit !== undefined) {
+    const value = explicit.trim().toLowerCase();
+    if (["1", "true", "yes"].includes(value)) normalized = "1";
+    else if (["0", "false", "no"].includes(value)) normalized = "0";
+    else throw new Error("IICP_TUNNEL must be one of 1/true/yes or 0/false/no");
+  }
+  if (normalized === "1" && binary === null) {
+    throw new Error(
+      "IICP_TUNNEL=1 requires cloudflared; set IICP_CLOUDFLARED_PATH to its absolute executable path",
+    );
+  }
+
+  return {
+    ...(binary ? { IICP_CLOUDFLARED_PATH: binary } : {}),
+    ...(normalized !== undefined ? { IICP_TUNNEL: normalized } : {}),
+  };
+}
+
 export function detectPlatform(requested = "auto"): "launchd" | "systemd" {
   if (requested === "launchd" || requested === "systemd") return requested;
   if (requested !== "auto") throw new Error("platform must be auto, launchd or systemd");
@@ -114,6 +142,7 @@ export function renderLaunchd(node: string, name?: string, executable = "iicp-no
     IICP_SUPERVISED: envValue("IICP_SUPERVISED", "1"),
     IICP_TUNNEL_DEAD_POLICY: envValue("IICP_TUNNEL_DEAD_POLICY", "auto"),
     IICP_LOG_DIR: logDir,
+    ...supervisorTunnelEnvironment(),
   };
   const envXml = Object.entries(env)
     .map(([k, v]) => `    <key>${xmlEscape(k)}</key><string>${xmlEscape(v)}</string>`)
@@ -168,6 +197,7 @@ export function renderSystemd(node: string, name?: string, executable = "iicp-no
     IICP_SUPERVISED: envValue("IICP_SUPERVISED", "1"),
     IICP_TUNNEL_DEAD_POLICY: envValue("IICP_TUNNEL_DEAD_POLICY", "auto"),
     IICP_LOG_DIR: logDir,
+    ...supervisorTunnelEnvironment(),
   };
   const envLines = Object.entries(env).map(([k, v]) => `Environment=${k}=${shellQuote(v)}`).join("\n");
   const content = `[Unit]

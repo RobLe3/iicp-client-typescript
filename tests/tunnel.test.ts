@@ -85,6 +85,29 @@ afterEach(() => {
 });
 
 describe("setup", () => {
+  it("uses only an absolute executable IICP_CLOUDFLARED_PATH override", () => {
+    const binary = fakeBin();
+    const oldOverride = process.env.IICP_CLOUDFLARED_PATH;
+    const oldPath = process.env.PATH;
+    try {
+      process.env.IICP_CLOUDFLARED_PATH = binary;
+      assert.equal(cloudflaredPath(), fs.realpathSync(binary));
+
+      process.env.IICP_CLOUDFLARED_PATH = "relative/cloudflared";
+      process.env.PATH = path.dirname(binary);
+      assert.equal(cloudflaredPath(), null);
+
+      delete process.env.IICP_CLOUDFLARED_PATH;
+      assert.equal(cloudflaredPath(), fs.realpathSync(binary));
+    } finally {
+      if (oldOverride === undefined) delete process.env.IICP_CLOUDFLARED_PATH;
+      else process.env.IICP_CLOUDFLARED_PATH = oldOverride;
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      fs.rmSync(path.dirname(binary), { recursive: true, force: true });
+    }
+  });
+
   it("cloudflaredPath returns null when absent", () => {
     const oldPath = process.env.PATH;
     process.env.PATH = "/nonexistent-dir-iicp-test";
