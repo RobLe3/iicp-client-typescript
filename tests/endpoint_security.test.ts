@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 
 import { addressAllowed, hostnameAllowed, postJsonPinned, resolveEndpoint } from "../src/endpoint_security.js";
+import { MAX_HTTP_TASK_BODY_BYTES } from "../src/http_resource.js";
 
 describe("endpoint security", () => {
   it("covers mapped and private address classes", () => {
@@ -130,6 +131,31 @@ describe("endpoint security", () => {
       await assert.rejects(
         postJsonPinned(`http://127.0.0.1:${address.port}/`, {}, { Authorization: "Bearer secret" }, 2_000),
         /cross-origin provider redirect/,
+      );
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      if (previous === undefined) delete process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES;
+      else process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES = previous;
+    }
+  });
+
+  it("aborts a provider response whose declared size exceeds the stable boundary", async () => {
+    const previous = process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES;
+    process.env.IICP_PROXY_ALLOW_LOOPBACK_NODES = "1";
+    const server = createServer((_req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Content-Length": String(MAX_HTTP_TASK_BODY_BYTES + 1),
+      });
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address !== "string");
+      await assert.rejects(
+        postJsonPinned(`http://127.0.0.1:${address.port}/`, {}, {}, 2_000),
+        /encoded task response exceeds/,
       );
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

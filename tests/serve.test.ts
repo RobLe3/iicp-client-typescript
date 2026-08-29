@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IicpNode } from "../src/node.js";
 import type { NodeConfig } from "../src/node.js";
+import { MAX_HTTP_TASK_BODY_BYTES } from "../src/http_resource.js";
 import {
   decryptResponse,
   encryptPayloadWithContext,
@@ -172,6 +173,44 @@ describe("IicpNode server", () => {
     const b = body as Record<string, unknown>;
     assert.equal(b.status, "completed");
     assert.equal(b.task_id, "t-001");
+  });
+
+  it("rejects a declared oversize task before reading the body", async () => {
+    const result = await new Promise<{ status: number; body: unknown }>((resolve, reject) => {
+      const req = http.request({
+        host: "127.0.0.1",
+        port,
+        path: "/v1/task",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": String(MAX_HTTP_TASK_BODY_BYTES + 1),
+        },
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => resolve({
+          status: res.statusCode ?? 0,
+          body: JSON.parse(Buffer.concat(chunks).toString()),
+        }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+    assert.equal(result.status, 413);
+    assert.equal((result.body as { error: { code: string } }).error.code, "request_too_large");
+  });
+
+  it("rejects unsupported task content encoding", async () => {
+    const { status, body } = await jsonReq(
+      "POST",
+      port,
+      "/v1/task",
+      { task_id: "encoded", intent: "x", payload: {} },
+      { "Content-Encoding": "gzip" },
+    );
+    assert.equal(status, 415);
+    assert.equal((body as { error: { code: string } }).error.code, "unsupported_content_encoding");
   });
 
   it("decrypts iicp_conf before invoking the task handler", async () => {

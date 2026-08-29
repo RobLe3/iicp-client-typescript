@@ -37,6 +37,13 @@ import {
   registryRouteStatus,
   supervisedRecoveryEnabled,
 } from "./recovery.js";
+import {
+  HttpResourceError,
+  MAX_HTTP_TASK_BODY_BYTES,
+  encodeTaskResponse,
+  resourceErrorBody,
+  validateTaskRequestHeaders,
+} from "./http_resource.js";
 
 const DEFAULT_DIRECTORY = "https://iicp.network/api";
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -1740,6 +1747,20 @@ export class IicpNode {
     res: http.ServerResponse,
     handler: TaskHandler
   ): void {
+    try {
+      validateTaskRequestHeaders(req);
+    } catch (error) {
+      const resourceError = error as HttpResourceError;
+      const body = resourceErrorBody(resourceError);
+      res.shouldKeepAlive = !resourceError.closeConnection;
+      res.writeHead(resourceError.status, {
+        "Content-Type": "application/json",
+        "Content-Length": body.length,
+        ...(resourceError.closeConnection ? { Connection: "close" } : {}),
+      });
+      res.end(body);
+      return;
+    }
     // F4 (#524) — rate-limit browser-origin task dispatch (the CORS confused-
     // deputy vector) only. Non-browser callers send no Origin and are the
     // operator's own authed traffic — never throttled.
@@ -1756,14 +1777,40 @@ export class IicpNode {
       }
     }
     const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    let received = 0;
+    let rejected = false;
+    req.on("data", (chunk: Buffer) => {
+      received += chunk.length;
+      if (received > MAX_HTTP_TASK_BODY_BYTES) {
+        if (!rejected) {
+          rejected = true;
+          const error = new HttpResourceError(
+            "request_too_large",
+            413,
+            `encoded task request exceeds ${MAX_HTTP_TASK_BODY_BYTES} bytes`,
+            true,
+          );
+          const body = resourceErrorBody(error);
+          res.shouldKeepAlive = false;
+          res.writeHead(413, {
+            "Content-Type": "application/json",
+            "Content-Length": body.length,
+            Connection: "close",
+          });
+          res.end(body);
+        }
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
+      if (rejected) return;
       let task: Record<string, unknown> = {};
       try {
         task = JSON.parse(Buffer.concat(chunks).toString() || "{}") as Record<string, unknown>;
       } catch {
         res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: { code: "IICP-E000", message: "invalid JSON" } }));
+        res.end(JSON.stringify({ error: { code: "invalid_http_body", message: "invalid JSON" } }));
         return;
       }
 
@@ -1910,6 +1957,26 @@ export class IicpNode {
         .then((result) => {
           this._activeTasks--;
           const latencyMs = Date.now() - t0;
+          let response: Record<string, unknown> = { task_id: taskId, status: "completed", ...result, generated_by_ai: true };
+          if (task.cx_response_encryption === "required" && cxSharedSecret) {
+            response = {
+              task_id: taskId,
+              status: "encrypted",
+              iicp_conf_resp: encryptResponse(response, cxSharedSecret, taskId),
+            };
+          }
+          const encoded = encodeTaskResponse(response);
+          if (encoded.status !== 200) {
+            if (this._tasksCounter) {
+              (this._tasksCounter as unknown as { labels: (...args: unknown[]) => { inc: () => void } })
+                .labels("error", intent, qos).inc();
+            }
+            this._tasksFailedPending++;
+            if (latencyMs > 0) this._tasksLatencyTotalMsPending += latencyMs;
+            res.writeHead(encoded.status, { "Content-Type": "application/json", "Content-Length": encoded.body.length });
+            res.end(encoded.body);
+            return;
+          }
           if (this._tasksCounter) {
             (this._tasksCounter as unknown as { labels: (...args: unknown[]) => { inc: () => void } })
               .labels("completed", intent, qos).inc();
@@ -1924,17 +1991,8 @@ export class IicpNode {
           }
           this._tasksSuccessPending++;
           if (latencyMs > 0) this._tasksLatencyTotalMsPending += latencyMs;
-          let response: Record<string, unknown> = { task_id: taskId, status: "completed", ...result, generated_by_ai: true };
-          if (task.cx_response_encryption === "required" && cxSharedSecret) {
-            response = {
-              task_id: taskId,
-              status: "encrypted",
-              iicp_conf_resp: encryptResponse(response, cxSharedSecret, taskId),
-            };
-          }
-          const body = JSON.stringify(response);
-          res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
-          res.end(body);
+          res.writeHead(encoded.status, { "Content-Type": "application/json", "Content-Length": encoded.body.length });
+          res.end(encoded.body);
           // TC-9c: fire best-effort CIPWorkerReceipt to the directory (server-side award path).
           if (this._runtimeHmacKey && this._runtimeToken) {
             void this._postCipReceipt(taskId, tokens, result, queryingNodeId);
@@ -1949,9 +2007,13 @@ export class IicpNode {
           this._tasksFailedPending++;
           const latencyMs = Date.now() - t0;
           if (latencyMs > 0) this._tasksLatencyTotalMsPending += latencyMs;
-          const body = JSON.stringify({ task_id: taskId, status: "error", error: { message: err.message } });
-          res.writeHead(500, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) });
-          res.end(body);
+          const encoded = encodeTaskResponse({
+            task_id: taskId,
+            status: "error",
+            error: { code: "backend_error", message: "task execution failed" },
+          });
+          res.writeHead(500, { "Content-Type": "application/json", "Content-Length": encoded.body.length });
+          res.end(encoded.body);
         });
       });
     });

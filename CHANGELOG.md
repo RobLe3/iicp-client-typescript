@@ -9,6 +9,12 @@ in the main repo).
 
 ## [Unreleased]
 
+### Security — bounded stable HTTP task path
+
+- Enforce the protocol's 1 MiB encoded request and response boundary for
+  `POST /v1/task`, including declared and chunked bodies, identity-only content
+  encoding, bounded provider output, and non-retryable oversize failures.
+
 ## [0.7.110] — 2026-08-28
 
 ### Changed — explicit qualification boundary
