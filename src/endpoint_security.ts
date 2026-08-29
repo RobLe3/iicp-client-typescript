@@ -5,6 +5,12 @@ import * as http from "node:http";
 import * as https from "node:https";
 import { BlockList, isIP } from "node:net";
 import type { LookupFunction } from "node:net";
+import {
+  HttpResourceError,
+  MAX_HTTP_TASK_BODY_BYTES,
+  encodeTaskRequest,
+  validateTaskResponseHeaders,
+} from "./http_resource.js";
 
 const BLOCKED_SUFFIXES = [".local", ".internal", ".lan", ".test", ".invalid", ".localhost"];
 const blocked = new BlockList();
@@ -107,8 +113,8 @@ export async function postJsonPinned(
 ): Promise<PinnedResponse> {
   const endpoint = await resolveEndpoint(url);
   const selected = endpoint.addresses[0];
-  const payload = JSON.stringify(body);
-  const requestHeaders = { ...headers, "Content-Length": String(Buffer.byteLength(payload)) };
+  const payload = encodeTaskRequest(body);
+  const requestHeaders = { ...headers, "Content-Length": String(payload.length) };
   const transport = endpoint.url.protocol === "https:" ? https : http;
   const pinnedLookup: LookupFunction = (_hostname, _options, callback) => {
     callback(null, selected.address, selected.family);
@@ -127,8 +133,45 @@ export async function postJsonPinned(
       lookup: pinnedLookup,
     }, (res: http.IncomingMessage) => {
       const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer | string) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, text: Buffer.concat(chunks).toString("utf8") }));
+      let total = 0;
+      let settled = false;
+      try {
+        validateTaskResponseHeaders(res.headers);
+      } catch (error) {
+        settled = true;
+        res.destroy();
+        reject(error);
+        return;
+      }
+      res.on("data", (chunk: Buffer | string) => {
+        if (settled) return;
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += data.length;
+        if (total > MAX_HTTP_TASK_BODY_BYTES) {
+          settled = true;
+          res.destroy();
+          reject(new HttpResourceError(
+            "response_too_large",
+            500,
+            `encoded task response exceeds ${MAX_HTTP_TASK_BODY_BYTES} bytes`,
+            true,
+          ));
+          return;
+        }
+        chunks.push(data);
+      });
+      res.on("end", () => {
+        if (!settled) {
+          settled = true;
+          resolve({ status: res.statusCode ?? 0, headers: res.headers, text: Buffer.concat(chunks, total).toString("utf8") });
+        }
+      });
+      res.on("error", (error) => {
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      });
     });
     req.setTimeout(timeoutMs, () => req.destroy(new Error(`Request timed out after ${timeoutMs}ms`)));
     req.on("error", reject);

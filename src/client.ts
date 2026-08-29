@@ -8,6 +8,7 @@ import { decryptResponse, encryptPayloadWithContext } from "./confidentiality.js
 import { policyManifestBindingMatches, verifyDispatchRouteTicket } from "./dispatch_ticket";
 import { postJsonPinned } from "./endpoint_security.js";
 import { IicpError } from "./errors.js";
+import { HttpResourceError, MAX_HTTP_TASK_BODY_BYTES, encodeTaskRequest } from "./http_resource.js";
 import { ensureIntentAllowed } from "./policy.js";
 import { applyCandidateRanker, rankerReceiptProfile, weightedV1Order } from "./selection.js";
 import type { CandidateRanker, RankerDecision } from "./selection.js";
@@ -829,6 +830,7 @@ export class IicpClient {
     traceparent?: string,
   ): Promise<unknown> {
     try {
+      const payload = encodeTaskRequest(body);
       const headers = {
         "Content-Type": "application/json",
         Accept: "application/json",
@@ -843,19 +845,36 @@ export class IicpClient {
             const response = await fetch(url, {
               method: "POST",
               headers,
-              body: JSON.stringify(body),
+              body: payload,
               signal: AbortSignal.timeout(timeoutMs),
               redirect: "manual",
             });
-            return { status: response.status, headers: {}, text: await response.text() };
+            const declared = response.headers.get("content-length");
+            if (declared !== null && Number(declared) > MAX_HTTP_TASK_BODY_BYTES) {
+              throw new HttpResourceError(
+                "response_too_large",
+                500,
+                `encoded task response exceeds ${MAX_HTTP_TASK_BODY_BYTES} bytes`,
+              );
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+            if (buffer.length > MAX_HTTP_TASK_BODY_BYTES) {
+              throw new HttpResourceError(
+                "response_too_large",
+                500,
+                `encoded task response exceeds ${MAX_HTTP_TASK_BODY_BYTES} bytes`,
+              );
+            }
+            return { status: response.status, headers: {}, text: buffer.toString("utf8") };
           })()
         : await postJsonPinned(url, body, headers, timeoutMs, this.cfg.tls_verify);
       if (res.status < 200 || res.status >= 300) {
         const text = res.text;
         let code = "SDK-05";
         try {
-          const j = JSON.parse(text) as { error?: string };
-          if (j.error) code = j.error;
+          const j = JSON.parse(text) as { error?: string | { code?: string } };
+          if (typeof j.error === "string") code = j.error;
+          else if (j.error?.code) code = j.error.code;
         } catch { /* ignore */ }
         throw new IicpError(
           `POST ${url} returned ${res.status}: ${text.slice(0, 200)}`,
@@ -866,6 +885,13 @@ export class IicpClient {
       return JSON.parse(res.text) as unknown;
     } catch (err) {
       if (err instanceof IicpError) throw err;
+      if (err instanceof HttpResourceError) {
+        throw new IicpError(err.message, err.code, {
+          status_code: err.status,
+          component: "adapter",
+          cause: err,
+        });
+      }
       if ((err as { name?: string }).name === "AbortError") {
         throw new IicpError(
           `Request timed out after ${timeoutMs}ms`,
