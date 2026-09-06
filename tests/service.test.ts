@@ -61,7 +61,8 @@ describe("service supervisor unit rendering", () => {
       const resolved = fs.realpathSync(binary);
       assert.ok(launchd.content.includes(`<key>IICP_CLOUDFLARED_PATH</key><string>${resolved}</string>`));
       assert.ok(launchd.content.includes("<key>IICP_TUNNEL</key><string>1</string>"));
-      assert.ok(systemd.content.includes(`Environment=IICP_CLOUDFLARED_PATH=${resolved}`));
+      const quoted = /^[A-Za-z0-9_/:=.,@%+-]+$/.test(resolved) ? resolved : `'${resolved.replace(/'/g, `'\\''`)}'`;
+      assert.ok(systemd.content.includes(`Environment=IICP_CLOUDFLARED_PATH=${quoted}`));
       assert.ok(systemd.content.includes("Environment=IICP_TUNNEL=1"));
       assert.ok(launchd.content.includes("<key>IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP</key><string>1</string>"));
       assert.ok(systemd.content.includes("Environment=IICP_ENABLE_EXPERIMENTAL_NATIVE_TCP=1"));
