@@ -100,6 +100,21 @@ def cli_path(root: Path) -> Path:
     return root / "node_modules/.bin" / ("iicp-node.cmd" if os.name == "nt" else "iicp-node")
 
 
+def npm_command() -> list[str]:
+    if sys.platform != "win32":
+        return ["npm"]
+    node = shutil.which("node")
+    npm = shutil.which("npm")
+    if not node or not npm:
+        raise ValueError("Windows artifact build requires Node and npm on PATH")
+    # Avoid CreateProcess lookup of extensionless npm and cmd.exe argument
+    # interpretation. The pinned Node distribution carries this JS entrypoint.
+    entry = Path(npm).parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    if not entry.is_file():
+        raise ValueError("Windows npm CLI entrypoint is unavailable")
+    return [node, str(entry)]
+
+
 def build(destination: Path, requested_target: str | None) -> dict:
     common.safe_output(destination)
     target = common.require_target(requested_target, TARGETS)
@@ -108,6 +123,7 @@ def build(destination: Path, requested_target: str | None) -> dict:
     version = package["version"]
     if package.get("engines", {}).get("node") != "^22.0.0 || ^24.0.0":
         raise ValueError("Node package support boundary differs from the qualification policy")
+    npm = npm_command()
     node_version = common.output(["node", "--version"], ROOT)
     match = re.fullmatch(r"v(\d+)\.\d+\.\d+", node_version)
     if match is None or int(match.group(1)) not in {22, 24}:
@@ -119,13 +135,13 @@ def build(destination: Path, requested_target: str | None) -> dict:
     try:
         cache = run_root / "npm-cache"
         online_env = npm_environment(cache)
-        common.run(["npm", "ci"], ROOT, online_env)
-        common.run(["npm", "test"], ROOT, online_env)
-        common.run(["npm", "run", "build"], ROOT, online_env)
+        common.run([*npm, "ci"], ROOT, online_env)
+        common.run([*npm, "test"], ROOT, online_env)
+        common.run([*npm, "run", "build"], ROOT, online_env)
         packed = run_root / "packed"
         packed.mkdir()
         raw = common.output(
-            ["npm", "pack", "--json", "--pack-destination", str(packed)],
+            [*npm, "pack", "--json", "--pack-destination", str(packed)],
             ROOT,
             online_env,
         )
@@ -142,7 +158,7 @@ def build(destination: Path, requested_target: str | None) -> dict:
         online = run_root / "online"
         online.mkdir()
         (online / "package.json").write_text('{"private":true}\n')
-        common.run(["npm", "install", str(tarball)], online, online_env)
+        common.run([*npm, "install", str(tarball)], online, online_env)
         online_version = common.output([str(cli_path(online)), "--version"], online, online_env)
         if version not in online_version:
             raise ValueError("online npm package self-report differs")
@@ -151,7 +167,7 @@ def build(destination: Path, requested_target: str | None) -> dict:
         offline.mkdir()
         (offline / "package.json").write_text('{"private":true}\n')
         offline_env = npm_environment(cache, offline=True)
-        common.run(["npm", "install", str(tarball)], offline, offline_env)
+        common.run([*npm, "install", str(tarball)], offline, offline_env)
         offline_version = common.output([str(cli_path(offline)), "--version"], offline, offline_env)
         if offline_version != online_version or version not in offline_version:
             raise ValueError("offline npm package self-report differs")
@@ -174,7 +190,7 @@ def build(destination: Path, requested_target: str | None) -> dict:
             dependency_cache_sha256=common.tree_sha256(cache),
             toolchains={
                 "node": node_version,
-                "npm": common.output(["npm", "--version"], ROOT),
+                "npm": common.output([*npm, "--version"], ROOT),
             },
         )
         common.publish_staging(staging, destination)

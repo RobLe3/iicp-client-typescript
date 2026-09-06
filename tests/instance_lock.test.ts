@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { once } from "node:events";
 import { spawn, ChildProcess } from "node:child_process";
 import { InstanceLock, NodeAlreadyServingError } from "../src/instance_lock.js";
 
@@ -21,8 +22,9 @@ describe("InstanceLock (#405)", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it("refuses a second live process for the same node_id; --force overrides", () => {
-    const child: ChildProcess = spawn("sleep", ["30"]);
+  it("refuses a second live process for the same node_id; --force overrides", async () => {
+    const child: ChildProcess = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"]);
+    await once(child, "spawn");
     try {
       const run = path.join(tmp, "run");
       fs.mkdirSync(run, { recursive: true });
@@ -30,7 +32,9 @@ describe("InstanceLock (#405)", () => {
       assert.throws(() => InstanceLock.acquire("dup", false), NodeAlreadyServingError);
       assert.ok(InstanceLock.acquire("dup", true), "force overrides");
     } finally {
+      const closed = once(child, "close");
       child.kill();
+      await closed;
     }
   });
 
