@@ -6,7 +6,22 @@
 // supervision (watchdog respawn with NEW url; bounded → onDead).
 // A fake `cloudflared` script stands in — no network, no Cloudflare.
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
+
+// Windows does not execute Unix shebang fixtures. Only our registered fake
+// cloudflared programs are launched through Node; lifecycle tests still observe
+// real child processes, output, exits and watchdog restarts.
+const fakePrograms = new Set<string>();
+const realSpawn = childProcess.spawn;
+if (process.platform === "win32") {
+  mock.method(childProcess, "spawn", ((command: string, args: string[], options: childProcess.SpawnOptions) =>
+    fakePrograms.has(command)
+      ? realSpawn(process.execPath, [command], options)
+      : realSpawn(command, args, options)) as typeof childProcess.spawn);
+  syncBuiltinESMExports();
+}
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -28,6 +43,7 @@ function fakeBin(opts: { name?: string; lifetimeMs?: number; silent?: boolean; r
     ? `#!/usr/bin/env node\nsetTimeout(() => {}, 60000);\n`
     : `#!/usr/bin/env node\nconsole.error("INF | starting tunnel");\nconsole.error("INF | https://${name}.trycloudflare.com");\nsetTimeout(() => {}, ${lifetimeMs});\n`;
   fs.writeFileSync(file, body, { mode: 0o755 });
+  fakePrograms.add(fs.realpathSync(file));
   return file;
 }
 
