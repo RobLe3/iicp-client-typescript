@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { chmodSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -60,10 +61,15 @@ test("corruption, orphan writes, permissions and held locks fail closed", async 
     chmodSync(path, 0o600);
     assert.throws(() => store.load(), TrustBundleStoreCorrupt);
     assert.equal(store.recover(bundle("v1"), { reason: "repair-test", minimum_high_water: 1 }).status, "recovered");
-    chmodSync(path, 0o644);
+    if (process.platform === "win32") {
+      // chmod does not change Windows DACLs. Grant real broad read access.
+      execFileSync("icacls.exe", [path, "/grant", "*S-1-1-0:R"], { windowsHide: true });
+    } else chmodSync(path, 0o644);
     assert.throws(() => store.load(), TrustBundleStoreCorrupt);
 
-    chmodSync(path, 0o600);
+    if (process.platform === "win32") {
+      execFileSync("icacls.exe", [path, "/remove:g", "*S-1-1-0"], { windowsHide: true });
+    } else chmodSync(path, 0o600);
     writeFileSync(store.lockPath, "held", { mode: 0o600 });
     assert.throws(() => store.install(bundle("v2")), TrustBundleStoreLocked);
   } finally {

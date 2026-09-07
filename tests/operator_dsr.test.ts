@@ -46,7 +46,8 @@ describe("#599 operator DSR CLI (TS)", () => {
     const rc = await main(["operator", "dsr", "export", "--directory-url", "https://directory.test/api", "--output", output]);
     assert.equal(rc, 0);
     assert.deepEqual(JSON.parse(readFileSync(output, "utf8")), { schema: "iicp.dsr.export.v1", tracking_id: "dsr-test", retention_notice: "ledger retained" });
-    assert.equal(statSync(output).mode & 0o777, 0o600);
+    // The documented export mode guarantee is POSIX-only; Windows mode bits are not ACLs.
+    if (process.platform !== "win32") assert.equal(statSync(output).mode & 0o777, 0o600);
     assert.equal(requests.length, 2);
     const payload = requests[1].body;
     assert.equal(payload.operator_pub, op.operator_id);

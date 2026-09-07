@@ -9,6 +9,16 @@ in the main repo).
 
 ## [Unreleased]
 
+### Fixed — Windows artifact and trust-store portability
+
+- Resolve npm through the installed Node entrypoint in candidate builds and use
+  portable Node processes in CLI and instance-lock fixtures.
+- Flush runtime-health snapshots using a writable file handle, as Windows requires.
+- Enforce owner-only Windows ACLs for durable dispatch trust stores rather than
+  interpreting POSIX mode bits as Windows permissions. Newly created state grants
+  access only to its owner and LocalSystem; existing broad ACLs and reparse paths
+  are rejected, not silently repaired. PowerShell security-tool failure fails closed.
+
 ### Security — bounded stable HTTP task path
 
 - Enforce the protocol's 1 MiB encoded request and response boundary for

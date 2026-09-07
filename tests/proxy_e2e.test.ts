@@ -82,8 +82,8 @@ describe("proxy E2E (real iicp-node proxy process)", () => {
     await new Promise<void>((r) => probe.server.close(() => r()));
 
     const child: ChildProcess = spawn(
-      join(repoRoot, "node_modules/.bin/tsx"),
-      ["src/cli.ts", "proxy", "--port", String(proxyPort)],
+      process.execPath,
+      ["--import", "tsx", "src/cli.ts", "proxy", "--port", String(proxyPort)],
       {
         cwd: repoRoot,
         env: {

@@ -18,14 +18,14 @@
 // ephemeral port (IICP_PORT=0) and is killed as soon as it gets past the check.
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const TSX = join(repoRoot, "node_modules/.bin/tsx");
+const CLI_PREFIX = ["--import", "tsx", "src/cli.ts"];
 
 // Track every detached `serve` child so we can guarantee the whole tree is reaped
 // even if a test throws before finish() — a leaked serve process would keep the
@@ -33,7 +33,13 @@ const TSX = join(repoRoot, "node_modules/.bin/tsx");
 const serveChildren = new Set<ReturnType<typeof spawn>>();
 function killTree(child: ReturnType<typeof spawn>): void {
   try {
-    if (child.pid) process.kill(-child.pid, "SIGKILL"); // negative pid = the process group
+    if (child.pid) {
+      if (process.platform === "win32") {
+        spawnSync(join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe"), ["/PID", String(child.pid), "/T", "/F"], { timeout: 5_000, stdio: "ignore" });
+      } else {
+        process.kill(-child.pid, "SIGKILL"); // negative pid = the process group
+      }
+    }
   } catch {
     /* already gone */
   }
@@ -62,7 +68,7 @@ interface RunResult {
 /** Run the CLI to completion and capture stdout/stderr/exit. Safe (temp HOME, no prod). */
 function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<RunResult> {
   return new Promise((resolve) => {
-    const child = spawn(TSX, ["src/cli.ts", ...args], {
+    const child = spawn(process.execPath, [...CLI_PREFIX, ...args], {
       cwd: repoRoot,
       env: {
         ...process.env,
@@ -90,7 +96,7 @@ function runCli(args: string[], extraEnv: Record<string, string> = {}): Promise<
  */
 function runServeUntilSignal(args: string[]): Promise<RunResult> {
   return new Promise((resolve) => {
-    const child = spawn(TSX, ["src/cli.ts", "serve", ...args], {
+    const child = spawn(process.execPath, [...CLI_PREFIX, "serve", ...args], {
       cwd: repoRoot,
       env: {
         ...process.env,

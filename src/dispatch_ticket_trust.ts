@@ -13,7 +13,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { windowsPrivatePath } from "./windows_private_path.js";
 
 export const DISPATCH_TICKET_V2_PROFILE = "dispatch_ticket_v2";
 const DOMAIN = Buffer.from("IICP-DISPATCH-TICKET-V2\0", "utf8");
@@ -148,8 +149,19 @@ export class FileDispatchTrustBundleStore implements TrustBundleStore {
 
   private prepareDirectory(): void {
     const directory = dirname(this.path);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    if ((statSync(directory).mode & 0o077) !== 0) throw new TrustBundleStoreError("trust store directory must be owner-only");
+    if (process.platform === "win32") {
+      try { windowsPrivatePath(resolve(directory), "directory-create"); }
+      catch { throw new TrustBundleStoreError("trust store directory requires owner-only Windows ACLs"); }
+    } else {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      if ((statSync(directory).mode & 0o077) !== 0) throw new TrustBundleStoreError("trust store directory must be owner-only");
+    }
+  }
+
+  private createPrivateFile(path: string): number {
+    if (process.platform !== "win32") return openSync(path, "wx", 0o600);
+    windowsPrivatePath(resolve(path), "file-create");
+    return openSync(path, "r+");
   }
 
   private acquireLock(): number {
@@ -157,7 +169,7 @@ export class FileDispatchTrustBundleStore implements TrustBundleStore {
     const deadline = Date.now() + this.lockTimeoutMs;
     while (true) {
       try {
-        const fd = openSync(this.lockPath, "wx", 0o600);
+        const fd = this.createPrivateFile(this.lockPath);
         writeFileSync(fd, `${process.pid}\n`);
         fsyncSync(fd);
         return fd;
@@ -180,7 +192,12 @@ export class FileDispatchTrustBundleStore implements TrustBundleStore {
     if (!existsSync(this.path)) return undefined;
     const metadata = lstatSync(this.path);
     if (metadata.isSymbolicLink() || !metadata.isFile()) throw new TrustBundleStoreCorrupt("trust store must be a regular file, not a link");
-    if ((metadata.mode & 0o077) !== 0) throw new TrustBundleStoreCorrupt("trust store file must be owner-only");
+    if (process.platform === "win32") {
+      try {
+        windowsPrivatePath(resolve(dirname(this.path)), "directory-check");
+        windowsPrivatePath(resolve(this.path), "file-check");
+      } catch { throw new TrustBundleStoreCorrupt("trust store requires owner-only Windows ACLs"); }
+    } else if ((metadata.mode & 0o077) !== 0) throw new TrustBundleStoreCorrupt("trust store file must be owner-only");
     try {
       const raw = readFileSync(this.path);
       if (raw.length > 4 * 1024 * 1024) throw new Error("state exceeds size limit");
@@ -218,7 +235,7 @@ export class FileDispatchTrustBundleStore implements TrustBundleStore {
     };
     const payload = Buffer.from(canonicalTicketClaims(state as unknown as Json), "utf8");
     const temporary = join(dirname(this.path), `${basename(this.path)}.tmp-${process.pid}-${randomUUID()}`);
-    const fd = openSync(temporary, "wx", 0o600);
+    const fd = this.createPrivateFile(temporary);
     try {
       writeFileSync(fd, payload);
       fsyncSync(fd);
@@ -227,7 +244,8 @@ export class FileDispatchTrustBundleStore implements TrustBundleStore {
     }
     try {
       renameSync(temporary, this.path);
-      chmodSync(this.path, 0o600);
+      if (process.platform === "win32") windowsPrivatePath(resolve(this.path), "file-check");
+      else chmodSync(this.path, 0o600);
       try {
         const directoryFd = openSync(dirname(this.path), "r");
         try { fsyncSync(directoryFd); } finally { closeSync(directoryFd); }
