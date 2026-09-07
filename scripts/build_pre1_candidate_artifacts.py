@@ -28,6 +28,8 @@ TARGETS = {
 }
 
 
+REQUIRED_STEPS = ['dependencies', 'locked-tests', 'package-cache', 'online-install', 'offline-install', 'publish-fragment']
+
 def describe() -> dict:
     return {
         "schema": "iicp.pre1-artifact-builder-description.v1",
@@ -38,6 +40,7 @@ def describe() -> dict:
             ["package-content-manifest", "any"],
         ],
         "gates": sorted(common.GATES),
+        "required_steps": REQUIRED_STEPS,
         "requires_clean_source": True,
         "non_authorizing": True,
     }
@@ -115,6 +118,28 @@ def npm_command() -> list[str]:
     return [node, str(entry)]
 
 
+def build_package(run_root, staging, npm, online_env, package, version):
+    common.run([*npm, "run", "build"], ROOT, online_env)
+    packed = run_root / "packed"
+    packed.mkdir()
+    raw = common.output(
+        [*npm, "pack", "--json", "--pack-destination", str(packed)],
+        ROOT,
+        online_env,
+    )
+    result = json.loads(raw)
+    if not isinstance(result, list) or len(result) != 1:
+        raise ValueError("npm pack did not report exactly one artifact")
+    tarball = packed / result[0]["filename"]
+    if not tarball.is_file():
+        raise ValueError("npm tarball is unavailable")
+    content = package_contents(tarball, package["name"], version)
+    content_path = staging / f"iicp-client-{version}-package-contents.json"
+    content_path.write_text(json.dumps(content, indent=2, sort_keys=True) + "\n")
+
+    return tarball, content_path
+
+
 def build(destination: Path, requested_target: str | None) -> dict:
     common.safe_output(destination)
     target = common.require_target(requested_target, TARGETS)
@@ -133,68 +158,58 @@ def build(destination: Path, requested_target: str | None) -> dict:
     staging = run_root / "fragment"
     staging.mkdir()
     try:
-        cache = run_root / "npm-cache"
-        online_env = npm_environment(cache)
-        common.run([*npm, "ci"], ROOT, online_env)
-        common.run([*npm, "test"], ROOT, online_env)
-        common.run([*npm, "run", "build"], ROOT, online_env)
-        packed = run_root / "packed"
-        packed.mkdir()
-        raw = common.output(
-            [*npm, "pack", "--json", "--pack-destination", str(packed)],
-            ROOT,
-            online_env,
-        )
-        result = json.loads(raw)
-        if not isinstance(result, list) or len(result) != 1:
-            raise ValueError("npm pack did not report exactly one artifact")
-        tarball = packed / result[0]["filename"]
-        if not tarball.is_file():
-            raise ValueError("npm tarball is unavailable")
-        content = package_contents(tarball, package["name"], version)
-        content_path = staging / f"iicp-client-{version}-package-contents.json"
-        content_path.write_text(json.dumps(content, indent=2, sort_keys=True) + "\n")
+        steps = common.RequiredSteps(Path(os.environ.get("IICP_PRE1_REQUIRED_STEP_PATH", str(run_root / "required-steps.json"))), COMPONENT, commit, target, REQUIRED_STEPS)
+        with steps.step("dependencies"):
+            cache = run_root / "npm-cache"
+            online_env = npm_environment(cache)
+            common.run([*npm, "ci"], ROOT, online_env)
+        with steps.step("locked-tests"):
+            common.run([*npm, "test"], ROOT, online_env)
+        with steps.step("package-cache"):
+            tarball, content_path = build_package(run_root, staging, npm, online_env, package, version)
+        with steps.step("online-install"):
+            online = run_root / "online"
+            online.mkdir()
+            (online / "package.json").write_text('{"private":true}\n')
+            common.run([*npm, "install", str(tarball)], online, online_env)
+            online_version = common.output([str(cli_path(online)), "--version"], online, online_env)
+            if version not in online_version:
+                raise ValueError("online npm package self-report differs")
 
-        online = run_root / "online"
-        online.mkdir()
-        (online / "package.json").write_text('{"private":true}\n')
-        common.run([*npm, "install", str(tarball)], online, online_env)
-        online_version = common.output([str(cli_path(online)), "--version"], online, online_env)
-        if version not in online_version:
-            raise ValueError("online npm package self-report differs")
+        with steps.step("offline-install"):
+            offline = run_root / "offline"
+            offline.mkdir()
+            (offline / "package.json").write_text('{"private":true}\n')
+            offline_env = npm_environment(cache, offline=True)
+            common.run([*npm, "install", str(tarball)], offline, offline_env)
+            offline_version = common.output([str(cli_path(offline)), "--version"], offline, offline_env)
+            if offline_version != online_version or version not in offline_version:
+                raise ValueError("offline npm package self-report differs")
 
-        offline = run_root / "offline"
-        offline.mkdir()
-        (offline / "package.json").write_text('{"private":true}\n')
-        offline_env = npm_environment(cache, offline=True)
-        common.run([*npm, "install", str(tarball)], offline, offline_env)
-        offline_version = common.output([str(cli_path(offline)), "--version"], offline, offline_env)
-        if offline_version != online_version or version not in offline_version:
-            raise ValueError("offline npm package self-report differs")
-
-        copied = staging / tarball.name
-        shutil.copyfile(tarball, copied)
-        fragment = common.emit_fragment(
-            staging,
-            component=COMPONENT,
-            source_commit=commit,
-            source_version=version,
-            build_target=target,
-            artifacts=[
-                common.artifact("npm-tarball", "any", copied),
-                common.artifact("package-content-manifest", "any", content_path),
-            ],
-            lock_inputs_sha256=common.files_sha256(
-                ROOT, [ROOT / "package.json", ROOT / "package-lock.json"]
-            ),
-            dependency_cache_sha256=common.tree_sha256(cache),
-            toolchains={
-                "node": node_version,
-                "npm": common.output([*npm, "--version"], ROOT),
-            },
-        )
-        common.publish_staging(staging, destination)
-        return fragment
+        with steps.step("publish-fragment"):
+            copied = staging / tarball.name
+            shutil.copyfile(tarball, copied)
+            fragment = common.emit_fragment(
+                staging,
+                component=COMPONENT,
+                source_commit=commit,
+                source_version=version,
+                build_target=target,
+                artifacts=[
+                    common.artifact("npm-tarball", "any", copied),
+                    common.artifact("package-content-manifest", "any", content_path),
+                ],
+                lock_inputs_sha256=common.files_sha256(
+                    ROOT, [ROOT / "package.json", ROOT / "package-lock.json"]
+                ),
+                dependency_cache_sha256=common.tree_sha256(cache),
+                toolchains={
+                    "node": node_version,
+                    "npm": common.output([*npm, "--version"], ROOT),
+                },
+            )
+            common.publish_staging(staging, destination)
+            return fragment
     finally:
         common.clean_failed_staging(run_root)
 

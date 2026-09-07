@@ -56,5 +56,8 @@ class Pre1CandidateArtifactBuilderTest(unittest.TestCase):
                 module.package_contents(tarball, "@iicp/client", "0.7.110")
 
 
+from test_pre1_command_observation import CommandObservationTests
+
+
 if __name__ == "__main__":
     unittest.main()
