@@ -6,6 +6,8 @@ import importlib.util
 import unittest
 from pathlib import Path
 
+from test_pre1_package_execution import PackageExecutionTests  # noqa: F401
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
     "pre1_driver", ROOT / "scripts/run_pre1_qualification_case.py"

@@ -1,0 +1,278 @@
+"""Bind staged assertions to byte-verified installed frozen SDK payloads.
+
+Preparation never installs dependencies or grants qualification credit. The
+caller owns network isolation, runtime selection and workspace lifetime.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import subprocess
+import tarfile
+import zipfile
+from pathlib import Path
+
+SCHEMA = "iicp.pre1-package-execution.v1"
+BINDINGS = (
+    "candidate_manifest_sha256", "artifact_materialization_sha256",
+    "runtime_map_sha256", "qualification_environment_sha256",
+)
+PYTHON_GUARD = '''import os, sys
+from pathlib import Path
+import pytest
+
+def check_origin():
+    import iicp_client
+    root = Path(os.environ["IICP_PRE1_INSTALLED_PACKAGE"]).resolve()
+    for name, module in tuple(sys.modules.items()):
+        if name == "iicp_client" or name.startswith("iicp_client."):
+            origin = getattr(module, "__file__", None)
+            if origin is None or not Path(origin).resolve().is_relative_to(root):
+                raise RuntimeError("packaged Python import origin differs")
+
+def pytest_sessionstart(session):
+    check_origin()
+
+reports = []
+
+def pytest_runtest_logreport(report):
+    reports.append(report)
+
+def pytest_sessionfinish(session, exitstatus):
+    calls = [report for report in reports if report.when == "call"]
+    if len(calls) != 1 or any(not r.passed or hasattr(r, "wasxfail") for r in reports):
+        session.exitstatus = 2
+    check_origin()
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    check_origin()
+    yield
+    check_origin()
+'''
+
+
+def digest(value: object) -> str:
+    return "sha256:" + hashlib.sha256(json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+
+
+def file_digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def safe_path(path: Path) -> Path:
+    if not path.is_absolute() or not path.exists():
+        raise ValueError("package execution path must exist and be absolute")
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError("package execution path contains a symlink")
+    return path.resolve()
+
+
+def tree(path: Path) -> dict[str, str]:
+    safe_path(path)
+    result = {}
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            raise ValueError("package execution tree contains a symlink")
+        if item.is_file():
+            if "__pycache__" in item.parts or item.suffix == ".pyc":
+                continue
+            result[item.relative_to(path).as_posix()] = file_digest(item)
+        elif not item.is_dir():
+            raise ValueError("package execution tree contains a special file")
+    return result
+
+
+def installed_payload(artifact: Path, installed: Path, component: str) -> dict[str, str]:
+    """Require exact package-file equality, not a self-reported install receipt."""
+    safe_path(artifact)
+    expected = {}
+    if component == "client-python":
+        with zipfile.ZipFile(artifact) as archive:
+            for row in archive.infolist():
+                if row.filename.startswith("iicp_client/") and not row.is_dir():
+                    name = row.filename.removeprefix("iicp_client/")
+                    expected[name] = "sha256:" + hashlib.sha256(archive.read(row)).hexdigest()
+    elif component == "client-typescript":
+        with tarfile.open(artifact, "r:gz") as archive:
+            for row in archive.getmembers():
+                if row.isfile() and row.name.startswith("package/"):
+                    name = row.name.removeprefix("package/")
+                    handle = archive.extractfile(row)
+                    if handle is None:
+                        raise ValueError("package archive file is unavailable")
+                    expected[name] = "sha256:" + hashlib.sha256(handle.read()).hexdigest()
+                elif row.issym() or row.islnk():
+                    raise ValueError("package archive contains a link")
+    else:
+        raise ValueError("no packaged adapter for this component")
+    if not expected or any(
+        Path(name).is_absolute() or ".." in Path(name).parts for name in expected
+    ) or tree(installed) != expected:
+        raise ValueError("installed SDK differs from the frozen package payload")
+    return expected
+
+
+def dependencies(workspace: Path, installed: Path, component: str) -> dict[str, str]:
+    base = installed.parent if component == "client-python" else workspace / "node_modules"
+    rows = {}
+    safe_path(base)
+    for item in sorted(base.rglob("*")):
+        name = item.relative_to(base).as_posix()
+        if "__pycache__" in item.parts or item.suffix == ".pyc":
+            continue
+        if item.is_symlink():
+            if component != "client-typescript" or not name.startswith(".bin/") or not item.resolve().is_relative_to(base):
+                raise ValueError("test dependency contains an unsafe link")
+            rows[name] = digest({"link": os.readlink(item), "target_sha256": file_digest(item.resolve())})
+        elif item.is_file():
+            rows[name] = file_digest(item)
+        elif not item.is_dir():
+            raise ValueError("test dependency contains a special file")
+    return rows
+
+
+def rewrite_typescript(text: str) -> str:
+    """Redirect literal runtime/worker paths only; leave assertions unchanged."""
+    def replace(match):
+        prefix, name = match.groups()
+        if ".." in Path(name).parts:
+            raise ValueError("unsafe TypeScript source reference")
+        name = re.sub(r"\.ts$", ".js", name)
+        if not Path(name).suffix:
+            name += ".js"
+        return f"{prefix}node_modules/@iicp/client/dist/{name}"
+    return re.sub(r"(\.{1,2}/)src/([A-Za-z0-9_./-]+)", replace, text)
+
+
+def fixture_tree(workspace: Path) -> dict[str, str]:
+    rows = {}
+    for name in ("tests", "parity", "scripts", ".github"):
+        if (workspace / name).exists():
+            rows.update({f"{name}/{p}": h for p, h in tree(workspace / name).items()})
+    for name in ("package.json", "package-lock.json", "pyproject.toml", "uv.lock", "pre1_origin_guard.py"):
+        if (workspace / name).exists():
+            safe_path(workspace / name)
+            rows[name] = file_digest(workspace / name)
+    if (workspace / "src").exists() or (workspace / "iicp_client").exists():
+        raise ValueError("staged workspace contains checkout runtime source")
+    return rows
+
+
+def assertion_files(root: Path, component: str) -> dict[str, bytes]:
+    metadata = {"pyproject.toml", "uv.lock", "package.json", "package-lock.json",
+                "scripts/run_sdk_quality.py", "scripts/run-sdk-quality.mjs",
+                ".github/workflows/release.yml"}
+    result = {}
+    files = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
+    for name in filter(None, files):
+        if not (name.startswith(("tests/", "parity/")) or name in metadata):
+            continue
+        source = safe_path(root / name)
+        if component == "client-typescript" and name.endswith(".ts"):
+            result[name] = rewrite_typescript(source.read_text()).encode()
+        else:
+            result[name] = source.read_bytes()
+    if component == "client-python":
+        result["pre1_origin_guard.py"] = PYTHON_GUARD.encode()
+    return result
+
+
+def stage(root: Path, workspace: Path, component: str) -> dict[str, str]:
+    """Copy only Git-bound fixtures/metadata; never copy SDK runtime sources."""
+    root, workspace = safe_path(root), safe_path(workspace)
+    if workspace == root or workspace.is_relative_to(root):
+        raise ValueError("package workspace must be outside the checkout")
+    if fixture_tree(workspace):
+        raise ValueError("package assertion staging is not empty")
+    for name, data in assertion_files(root, component).items():
+        dest = workspace / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+    return fixture_tree(workspace)
+
+
+def create_binding(root: Path, workspace: Path, installed: Path, artifact: Path,
+                   component: str, runtime: str, target: str, bindings: dict) -> dict:
+    if set(bindings) != set(BINDINGS) or any(
+        re.fullmatch(r"sha256:[0-9a-f]{64}", str(v)) is None for v in bindings.values()
+    ):
+        raise ValueError("package execution immutable bindings differ")
+    if not safe_path(installed).is_relative_to(safe_path(workspace)):
+        raise ValueError("installed package must be in the run workspace")
+    payload = installed_payload(artifact, installed, component)
+    fixtures = fixture_tree(workspace) or stage(root, workspace, component)
+    expected_fixtures = {name: "sha256:" + hashlib.sha256(data).hexdigest()
+                         for name, data in assertion_files(root, component).items()}
+    if fixtures != expected_fixtures:
+        raise ValueError("staged assertions differ from the reviewed source mapping")
+    value = {
+        "schema": SCHEMA, "component": component, "runtime": runtime, "target": target,
+        "bindings": bindings, "workspace": str(workspace), "installed_package": str(installed),
+        "artifact_sha256": file_digest(artifact), "installed_payload_sha256": digest(payload),
+        "fixtures_sha256": digest(fixtures), "binding_sha256": None,
+        "test_dependencies_sha256": digest(dependencies(workspace, installed, component)),
+        "non_authorizing": True, "qualification_credit": False,
+    }
+    value["binding_sha256"] = digest(value)
+    return value
+
+
+def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> Path:
+    copy = dict(value)
+    copy["binding_sha256"] = None
+    if value.get("schema") != SCHEMA or value.get("binding_sha256") != digest(copy):
+        raise ValueError("package execution binding digest differs")
+    if value.get("non_authorizing") is not True or value.get("qualification_credit") is not False:
+        raise ValueError("package execution binding cannot authorize or grant credit")
+    if any(value.get(k) != context[k] for k in ("component", "runtime", "target")) or value.get("bindings") != {k: context[k] for k in BINDINGS}:
+        raise ValueError("package execution candidate/environment/runtime binding differs")
+    workspace = safe_path(Path(value["workspace"]))
+    home = safe_path(Path(os.environ["HOME"]))
+    installed = safe_path(Path(value["installed_package"]))
+    if not workspace.is_relative_to(home) or workspace == home or workspace.is_relative_to(root.resolve()) or not installed.is_relative_to(workspace):
+        raise ValueError("package execution workspace is not run-isolated")
+    if value["artifact_sha256"] != file_digest(artifact) or value["installed_payload_sha256"] != digest(installed_payload(artifact, installed, context["component"])):
+        raise ValueError("package execution installed artifact binding differs")
+    if value["fixtures_sha256"] != digest(fixture_tree(workspace)):
+        raise ValueError("package assertion fixtures changed")
+    if value["test_dependencies_sha256"] != digest(dependencies(workspace, installed, context["component"])):
+        raise ValueError("package test dependencies changed")
+    return workspace
+
+
+def package_command(root: Path, context: dict, component_manifest: dict,
+                    artifact_root: Path, argv: list[str], env: dict) -> tuple[list[str], dict, Path, dict]:
+    if any(Path(arg.split("::")[0]).name in {
+        "test_dispatch_ticket_trust_crypto.py", "dispatch_ticket_trust_crypto.test.ts",
+    } for arg in argv):
+        raise ValueError("mapped assertion uses a fixture-only decision model, not installed SDK enforcement")
+    path = safe_path(Path(os.environ["IICP_PRE1_PACKAGE_EXECUTION_BINDING"]))
+    value = json.loads(path.read_text())
+    if value.get("binding_sha256") != os.environ.get("IICP_PRE1_PACKAGE_EXECUTION_SHA256"):
+        raise ValueError("package execution binding pin differs")
+    kind = "wheel" if context["component"] == "client-python" else "npm-tarball"
+    artifacts = [r for r in component_manifest["artifacts"] if r["kind"] == kind]
+    if len(artifacts) != 1:
+        raise ValueError("candidate SDK install artifact is ambiguous")
+    artifact = artifact_root / context["component"] / artifacts[0]["name"]
+    workspace = validate_binding(value, context, artifact, root)
+    if context["component"] == "client-python":
+        argv = [*argv[:3], "-p", "pre1_origin_guard", *argv[3:]]
+        env["PYTHONPATH"] = os.pathsep.join((str(Path(value["installed_package"]).parent), str(workspace)))
+        env["IICP_PRE1_INSTALLED_PACKAGE"] = value["installed_package"]
+        env["PYTHONNOUSERSITE"] = "1"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+    else:
+        expected = workspace / "node_modules/@iicp/client"
+        if Path(value["installed_package"]) != expected:
+            raise ValueError("TypeScript installed module path differs")
+    return argv, env, workspace, {"value": value, "artifact": artifact}
