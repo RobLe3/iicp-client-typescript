@@ -122,11 +122,19 @@ class PackageExecutionTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(KeyError):
             adapter.package_command(self.root, self.context, {}, self.home, [], {})
 
-    def test_fixture_only_models_cannot_count_as_sdk_enforcement(self):
-        for filename in ("tests/test_dispatch_ticket_trust_crypto.py::test_expired_dispatch_ticket_key_fails_closed",
-                         "tests/dispatch_ticket_trust_crypto.test.ts"):
-            with self.assertRaisesRegex(ValueError, "fixture-only"):
-                adapter.package_command(self.root, self.context, {}, self.home, ["runtime", filename], {})
+    def test_crypto_bridge_uses_runtime_verifier_not_test_local_policy(self):
+        text = "def _decision(vector: dict, keys: dict, signature_valid: bool):\n    return 'fake'\n\ndef _assert_fixture_decision(): pass\n"
+        bridged = adapter.packaged_assertions("tests/test_dispatch_ticket_trust_crypto.py", text)
+        self.assertIn("verify_dispatch_ticket_v2(", bridged)
+        self.assertNotIn("return 'fake'", bridged)
+        text = "function decision(vector: any, keys: Map<string, any>, signatureValid: boolean): string { return 'fake'; }\nfunction assertFixtureDecision(): void {}"
+        bridged = adapter.packaged_assertions("tests/dispatch_ticket_trust_crypto.test.ts", text)
+        self.assertIn("verifyDispatchTicketV2(", bridged)
+        self.assertNotIn("return 'fake'", bridged)
+
+    def test_cli_fixture_requires_reviewed_shape(self):
+        with self.assertRaisesRegex(ValueError, "fixture shape differs"):
+            adapter.packaged_assertions("tests/pre1_release_boundaries.test.ts", "changed fixture")
 
     def test_python_command_uses_only_installed_path_and_guard(self):
         value = self.binding()

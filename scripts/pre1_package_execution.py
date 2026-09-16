@@ -153,6 +153,71 @@ def rewrite_typescript(text: str) -> str:
     return re.sub(r"(\.{1,2}/)src/([A-Za-z0-9_./-]+)", replace, text)
 
 
+def packaged_assertions(name: str, text: str) -> str:
+    """Strengthen three reviewed source fixtures without changing their vectors.
+
+    Crypto cases use the same canonical runtime API already exercised by each
+    SDK's runtime-verifier suite. No test-local eligibility engine survives.
+    Version qualification observes the compiled CLI, not its source spelling.
+    These substitutions are fixture-digest and harness-commit bound.
+    """
+    if name == "tests/test_dispatch_ticket_trust_crypto.py":
+        start = text.index("def _decision(vector: dict,")
+        end = text.index("def _assert_fixture_decision", start)
+        replacement = '''from iicp_client.dispatch_ticket_trust import (
+    LocalReplayCache, TicketBindings, TrustBundle, verify_dispatch_ticket_v2,
+)
+
+def _decision(vector: dict, keys: dict[str, dict], signature_valid: bool) -> str:
+    claims = vector["claims"]
+    bundle = TrustBundle.from_dict({
+        "bundle_version": 4,
+        "keys": [keys[key_id] for key_id in vector["trust_bundle_key_ids"]],
+    })
+    replay = LocalReplayCache()
+    if vector["jti_seen"]:
+        replay.remember(claims["jti"], claims["expires_at"])
+    return verify_dispatch_ticket_v2(
+        claims, vector["signature_b64url"], bundle,
+        TicketBindings(claims["issuer"], claims["provider_id"], claims["intent"], claims["constraints_digest"]),
+        now=vector["now"], minimum_bundle_version=4, replay_cache=replay,
+    ).code
+
+
+'''
+        return text[:start] + replacement + text[end:]
+    if name == "tests/dispatch_ticket_trust_crypto.test.ts":
+        start = text.index("function decision(vector: any,")
+        end = text.index("function assertFixtureDecision", start)
+        replacement = '''import { LocalDispatchReplayCache, verifyDispatchTicketV2 } from "../node_modules/@iicp/client/dist/dispatch_ticket_trust.js";
+
+function decision(vector: any, keys: Map<string, any>, signatureValid: boolean): string {
+  const replayCache = new LocalDispatchReplayCache();
+  if (vector.jti_seen) replayCache.remember(vector.claims.jti, vector.claims.expires_at);
+  return verifyDispatchTicketV2(
+    vector.claims, vector.signature_b64url,
+    { bundle_version: 4, keys: vector.trust_bundle_key_ids.map((id: string) => keys.get(id)) },
+    { issuer: vector.claims.issuer, provider_id: vector.claims.provider_id,
+      intent: vector.claims.intent, constraints_digest: vector.claims.constraints_digest },
+    { now: vector.now, minimumBundleVersion: 4, replayCache },
+  ).code;
+}
+
+'''
+        return text[:start] + replacement + text[end:]
+    if name == "tests/pre1_release_boundaries.test.ts":
+        lines = text.splitlines()
+        source_check = [line for line in lines if "assert.match(cli," in line]
+        source_read = [line for line in lines if line.startswith("const cli = ")]
+        if len(source_check) != 1 or len(source_read) != 1:
+            raise ValueError("reviewed CLI source fixture shape differs")
+        text = text.replace(source_read[0], 'import { spawnSync } from "node:child_process";')
+        return text.replace(source_check[0], '''  const version = spawnSync(process.execPath, [new URL("../node_modules/@iicp/client/dist/cli.js", import.meta.url).pathname, "--version"], { encoding: "utf8" });
+  assert.equal(version.status, 0);
+  assert.equal(version.stdout.trim(), `iicp-node ${pkg.version}`);''')
+    return text
+
+
 def fixture_tree(workspace: Path) -> dict[str, str]:
     rows = {}
     for name in ("tests", "parity", "scripts", ".github"):
@@ -178,7 +243,9 @@ def assertion_files(root: Path, component: str) -> dict[str, bytes]:
             continue
         source = safe_path(root / name)
         if component == "client-typescript" and name.endswith(".ts"):
-            result[name] = rewrite_typescript(source.read_text()).encode()
+            result[name] = packaged_assertions(name, rewrite_typescript(source.read_text())).encode()
+        elif component == "client-python" and name.endswith(".py"):
+            result[name] = packaged_assertions(name, source.read_text()).encode()
         else:
             result[name] = source.read_bytes()
     if component == "client-python":
@@ -220,6 +287,7 @@ def create_binding(root: Path, workspace: Path, installed: Path, artifact: Path,
         "artifact_sha256": file_digest(artifact), "installed_payload_sha256": digest(payload),
         "fixtures_sha256": digest(fixtures), "binding_sha256": None,
         "test_dependencies_sha256": digest(dependencies(workspace, installed, component)),
+        "assertion_adapter": "canonical-runtime-verifier-and-cli.v1",
         "non_authorizing": True, "qualification_credit": False,
     }
     value["binding_sha256"] = digest(value)
@@ -233,6 +301,8 @@ def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> 
         raise ValueError("package execution binding digest differs")
     if value.get("non_authorizing") is not True or value.get("qualification_credit") is not False:
         raise ValueError("package execution binding cannot authorize or grant credit")
+    if value.get("assertion_adapter") != "canonical-runtime-verifier-and-cli.v1":
+        raise ValueError("package assertion adapter binding differs")
     if any(value.get(k) != context[k] for k in ("component", "runtime", "target")) or value.get("bindings") != {k: context[k] for k in BINDINGS}:
         raise ValueError("package execution candidate/environment/runtime binding differs")
     workspace = safe_path(Path(value["workspace"]))
@@ -251,10 +321,6 @@ def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> 
 
 def package_command(root: Path, context: dict, component_manifest: dict,
                     artifact_root: Path, argv: list[str], env: dict) -> tuple[list[str], dict, Path, dict]:
-    if any(Path(arg.split("::")[0]).name in {
-        "test_dispatch_ticket_trust_crypto.py", "dispatch_ticket_trust_crypto.test.ts",
-    } for arg in argv):
-        raise ValueError("mapped assertion uses a fixture-only decision model, not installed SDK enforcement")
     path = safe_path(Path(os.environ["IICP_PRE1_PACKAGE_EXECUTION_BINDING"]))
     value = json.loads(path.read_text())
     if value.get("binding_sha256") != os.environ.get("IICP_PRE1_PACKAGE_EXECUTION_SHA256"):
