@@ -256,5 +256,120 @@ process.stdout.write(result.stdout); process.exit(result.status ?? 1);'''
             adapter.installed_payload(artifact, installed, "client-typescript")
 
 
+
+class RustPackageExecutionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="pre1-rust-package-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name).resolve()
+        self.root = self.home / "checkout"
+        self.workspace = self.home / "workspace"
+        self.root.mkdir()
+        self.workspace.mkdir()
+        self.mapping = b'{"support":{},"scenarios":{}}'
+        (self.root / "qualification").mkdir()
+        (self.root / "qualification/pre1-cases.json").write_bytes(self.mapping)
+        self.files = {"Cargo.toml": b'[package]\nname="iicp-client"\nversion="0.7.110"\n',
+            "Cargo.lock": b"# locked\n", "src/lib.rs": b"pub fn run() {}\n",
+            "tests/exact.rs": b"#[test] fn exact() {}\n",
+            "qualification/pre1-cases.json": self.mapping}
+        self.artifact = self.home / "iicp-client-0.7.110.crate"
+        self.vendor = self.home / "vendor.tar.gz"
+        self.archive(self.artifact, {"iicp-client-0.7.110/" + k: v for k,v in self.files.items()})
+        self.archive(self.vendor, {**{"source/"+k:v for k,v in self.files.items()},
+            "vendor/dependency/src/lib.rs": b"pub fn dep() {}\n",
+            ".cargo/config.toml": b'[source.crates-io]\nreplace-with="vendored-sources"\n'})
+        self.env = patch.dict(os.environ, {"HOME": str(self.home)})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.installed = adapter.extract_rust_packages(self.artifact, self.vendor, self.workspace)
+        self.bindings = {key: "sha256:"+"a"*64 for key in adapter.BINDINGS}
+        self.context = {"component":"client-rust", "runtime":"msrv-1.86", "target":"macos-arm64", **self.bindings}
+
+    def archive(self, path, files):
+        with tarfile.open(path, "w:gz") as archive:
+            for name,data in files.items():
+                row=tarfile.TarInfo(name); row.size=len(data)
+                archive.addfile(row, io.BytesIO(data))
+
+    def binding(self):
+        return adapter.create_binding(self.root, self.workspace, self.installed, self.artifact,
+            "client-rust", "msrv-1.86", "macos-arm64", self.bindings, self.vendor)
+
+    def validate(self, value):
+        return adapter.validate_binding(value, self.context, self.artifact, self.root, self.vendor)
+
+    def test_frozen_crate_and_vendor_source_are_identical(self):
+        value=self.binding()
+        self.assertEqual(self.validate(value), self.installed)
+        self.assertFalse(value["qualification_credit"])
+        proof=adapter.make_case_proof(value,self.context,"exact",0,"rust-test")
+        adapter.validate_case_proof(proof,self.context,0,"rust-test")
+        self.assertNotIn(str(self.home),json.dumps(proof))
+
+    def test_modified_missing_extra_source_and_vendor_fail(self):
+        value=self.binding()
+        for file in (self.installed/"src/lib.rs",self.workspace/"vendor/dependency/src/lib.rs",self.workspace/".cargo/config.toml"):
+            original=file.read_bytes(); file.write_bytes(b"tamper")
+            with self.assertRaises(ValueError): self.validate(value)
+            file.unlink()
+            with self.assertRaises(ValueError): self.validate(value)
+            file.write_bytes(original)
+        (self.installed/"extra.rs").write_text("extra")
+        with self.assertRaises(ValueError): self.validate(value)
+
+    def test_forged_binding_cannot_replace_packaged_assertions(self):
+        value=self.binding(); (self.installed/"tests/exact.rs").write_text("#[test] fn exact() {} // forged")
+        value["installed_payload_sha256"]=adapter.digest(adapter.tree(self.installed))
+        value["binding_sha256"]=None; value["binding_sha256"]=adapter.digest(value)
+        with self.assertRaises(ValueError):self.validate(value)
+
+    def test_all_semantic_dimensions_fail_even_after_rehash(self):
+        value=self.binding()
+        for key in ("component","runtime","target"):
+            changed=copy.deepcopy(value); changed[key]="wrong"
+            changed["binding_sha256"]=None; changed["binding_sha256"]=adapter.digest(changed)
+            with self.assertRaises(ValueError):self.validate(changed)
+        for key in adapter.BINDINGS:
+            changed=copy.deepcopy(value); changed["bindings"][key]="sha256:"+"b"*64
+            changed["binding_sha256"]=None; changed["binding_sha256"]=adapter.digest(changed)
+            with self.assertRaises(ValueError):self.validate(changed)
+
+    def test_vendor_artifact_must_be_bound_and_source_must_match(self):
+        with self.assertRaises(ValueError):adapter.validate_binding(self.binding(),self.context,self.artifact,self.root)
+        self.archive(self.vendor,{"source/forged.rs":b"forged"})
+        with self.assertRaisesRegex(ValueError,"vendor source differs"):self.binding()
+
+    def test_reviewed_mapping_and_symlink_checks(self):
+        (self.root/"qualification/pre1-cases.json").write_text("changed")
+        with self.assertRaisesRegex(ValueError,"mapping differs"):self.binding()
+        (self.root/"qualification/pre1-cases.json").write_bytes(self.mapping)
+        (self.workspace/"vendor/link").symlink_to(self.root)
+        with self.assertRaises(ValueError):self.binding()
+
+    def test_archive_rejects_traversal_links_and_duplicates(self):
+        for name in ("../escape", "/absolute", "vendor/../escape", "vendor/a:b", "vendor/evil\\file"):
+            self.archive(self.vendor,{name:b"unsafe"})
+            with self.assertRaises(ValueError):adapter.rust_archive_files(self.vendor,"vendor/")
+        for kind in (tarfile.SYMTYPE,tarfile.LNKTYPE,tarfile.FIFOTYPE):
+            with tarfile.open(self.vendor,"w:gz") as archive:
+                row=tarfile.TarInfo("vendor/link");row.type=kind;row.linkname="escape";archive.addfile(row)
+            with self.assertRaises(ValueError):adapter.rust_archive_files(self.vendor,"vendor/")
+        with tarfile.open(self.vendor,"w:gz") as archive:
+            for _ in range(2):
+                row=tarfile.TarInfo("vendor/same");row.size=1;archive.addfile(row,io.BytesIO(b"x"))
+        with self.assertRaises(ValueError):adapter.rust_archive_files(self.vendor,"vendor/")
+
+    def test_extraction_refuses_nonempty_workspace_and_has_restrictive_permissions(self):
+        with self.assertRaisesRegex(ValueError,"empty"):adapter.extract_rust_packages(self.artifact,self.vendor,self.workspace)
+        self.assertEqual((self.installed/"src/lib.rs").stat().st_mode & 0o777,0o600)
+
+    def test_rust_archive_bytes_are_bounded_before_allocation(self):
+        row=tarfile.TarInfo("vendor/large");row.size=1024*1024*1024+1
+        from unittest.mock import MagicMock
+        opened=MagicMock();opened.__enter__.return_value.__iter__.return_value=iter([row])
+        with patch.object(adapter.tarfile,"open",return_value=opened):
+            with self.assertRaisesRegex(ValueError,"bounded"):adapter.rust_archive_files(self.vendor,"vendor/")
+
 if __name__ == "__main__":
     unittest.main()

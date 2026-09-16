@@ -297,7 +297,10 @@ def validate_immutable_bindings(bindings: dict) -> None:
         raise ValueError("package execution immutable bindings differ")
 
 def create_binding(root: Path, workspace: Path, installed: Path, artifact: Path,
-                   component: str, runtime: str, target: str, bindings: dict) -> dict:
+                   component: str, runtime: str, target: str, bindings: dict,
+                   vendor_artifact: Path | None = None) -> dict:
+    if component == "client-rust":
+        return create_rust_binding(root, workspace, installed, artifact, runtime, target, bindings, vendor_artifact)
     validate_immutable_bindings(bindings)
     if not safe_path(installed).is_relative_to(safe_path(workspace)):
         raise ValueError("installed package must be in the run workspace")
@@ -336,7 +339,10 @@ def validate_binding_context(value: dict, context: dict) -> None:
     if any(value.get(k) != context[k] for k in ("component", "runtime", "target")) or value.get("bindings") != {k: context[k] for k in BINDINGS}:
         raise ValueError("package execution candidate/environment/runtime binding differs")
 
-def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> Path:
+def validate_binding(value: dict, context: dict, artifact: Path, root: Path,
+                     vendor_artifact: Path | None = None) -> Path:
+    if context["component"] == "client-rust":
+        return validate_rust_binding(value, context, artifact, root, vendor_artifact)
     validate_binding_identity(value)
     validate_binding_context(value, context)
     workspace = safe_path(Path(value["workspace"]))
@@ -367,6 +373,8 @@ def package_command(root: Path, context: dict, component_manifest: dict,
     value = json.loads(path.read_text())
     if value.get("binding_sha256") != os.environ.get("IICP_PRE1_PACKAGE_EXECUTION_SHA256"):
         raise ValueError("package execution binding pin differs")
+    if context["component"] == "client-rust":
+        return rust_package_command(root, context, component_manifest, artifact_root, argv, env, value)
     kind = "wheel" if context["component"] == "client-python" else "npm-tarball"
     artifacts = [r for r in component_manifest["artifacts"] if r["kind"] == kind]
     if len(artifacts) != 1:
@@ -493,3 +501,189 @@ def write_case_proof(value: dict) -> Path:
     finally:
         Path(temporary).unlink(missing_ok=True)
     return path
+
+
+# Rust uses the unchanged crate payload, including its packaged assertions.
+# The vendor bundle supplies only dependency/config files, never runtime source.
+def rust_archive_files(artifact: Path, prefix: str) -> dict[str, str]:
+    safe_path(artifact)
+    result, seen, total = {}, set(), 0
+    with tarfile.open(artifact, "r|gz") as archive:
+        for row in archive:
+            name = row.name.rstrip("/")
+            total = validate_rust_archive_member(row, name, seen, total)
+            if row.isfile() and name.startswith(prefix):
+                handle = archive.extractfile(row)
+                if handle is None:
+                    raise ValueError("Rust archive member is unavailable")
+                h = hashlib.sha256()
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    h.update(chunk)
+                result[name.removeprefix(prefix)] = "sha256:" + h.hexdigest()
+    if not result:
+        raise ValueError("Rust archive payload is empty")
+    return result
+
+
+
+
+def validate_rust_archive_name(name):
+    if not name or name.startswith("/") or "\\" in name or ":" in name:
+        raise ValueError("Rust archive contains an unsafe member name")
+    if any(part in {"", ".", ".."} for part in name.split("/")):
+        raise ValueError("Rust archive contains an unsafe member path")
+
+
+def validate_rust_archive_member(row, name, seen, total):
+    validate_rust_archive_name(name)
+    if name in seen or not (row.isfile() or row.isdir()):
+        raise ValueError("Rust archive contains an unsafe or duplicate member")
+    seen.add(name)
+    total += row.size
+    if len(seen) > 20000 or total > 1024 * 1024 * 1024:
+        raise ValueError("Rust archive exceeds bounded extraction limits")
+    return total
+
+
+def rust_dependencies(workspace: Path) -> dict[str, str]:
+    return {**{"vendor/" + k: v for k, v in tree(workspace / "vendor").items()},
+            **{".cargo/" + k: v for k, v in tree(workspace / ".cargo").items()}}
+
+
+def verify_rust_payload(workspace, installed, artifact, vendor_artifact):
+    if vendor_artifact is None:
+        raise ValueError("Rust vendor artifact must be candidate-bound")
+    crate = rust_archive_files(artifact, artifact.stem + "/")
+    if tree(installed) != crate:
+        raise ValueError("installed Rust SDK differs from the frozen crate")
+    source = rust_archive_files(vendor_artifact, "source/")
+    if source != crate:
+        raise ValueError("Rust vendor source differs from the frozen crate")
+    vendor = rust_archive_files(vendor_artifact, "vendor/")
+    config = rust_archive_files(vendor_artifact, ".cargo/")
+    expected = {**{"vendor/" + k: v for k, v in vendor.items()},
+                **{".cargo/" + k: v for k, v in config.items()}}
+    if rust_dependencies(workspace) != expected:
+        raise ValueError("Rust vendor dependencies/config differ from the candidate")
+    return crate, expected
+
+
+def rust_fixtures(root: Path, installed: Path) -> dict[str, str]:
+    mapping = "qualification/pre1-cases.json"
+    if (installed / mapping).read_bytes() != (root / mapping).read_bytes():
+        raise ValueError("Rust packaged assertion mapping differs from reviewed source")
+    return {mapping: file_digest(installed / mapping),
+            **{"tests/" + k: v for k, v in tree(installed / "tests").items()}}
+
+
+def create_rust_binding(root, workspace, installed, artifact, runtime, target, bindings, vendor_artifact):
+    validate_immutable_bindings(bindings)
+    validate_workspace_boundary(safe_path(workspace), safe_path(Path(os.environ["HOME"])),
+                               safe_path(installed), root)
+    payload, deps = verify_rust_payload(workspace, installed, artifact, vendor_artifact)
+    value = {"schema": SCHEMA, "component": "client-rust", "runtime": runtime,
+        "target": target, "bindings": bindings, "workspace": str(workspace),
+        "installed_package": str(installed), "artifact_sha256": file_digest(artifact),
+        "vendor_artifact_sha256": file_digest(vendor_artifact),
+        "installed_payload_sha256": digest(payload),
+        "fixtures_sha256": digest(rust_fixtures(root, installed)),
+        "test_dependencies_sha256": digest(deps), "binding_sha256": None,
+        "assertion_adapter": "canonical-runtime-verifier-and-cli.v1",
+        "non_authorizing": True, "qualification_credit": False}
+    value["binding_sha256"] = digest(value)
+    return value
+
+
+def validate_rust_binding(value, context, artifact, root, vendor_artifact):
+    validate_binding_identity(value)
+    validate_binding_context(value, context)
+    workspace = safe_path(Path(value["workspace"]))
+    installed = safe_path(Path(value["installed_package"]))
+    validate_workspace_boundary(workspace, safe_path(Path(os.environ["HOME"])), installed, root)
+    payload, deps = verify_rust_payload(workspace, installed, artifact, vendor_artifact)
+    expected = {"artifact_sha256": file_digest(artifact),
+                "vendor_artifact_sha256": file_digest(vendor_artifact),
+                "installed_payload_sha256": digest(payload),
+                "test_dependencies_sha256": digest(deps),
+                "fixtures_sha256": digest(rust_fixtures(root, installed))}
+    if any(value.get(k) != v for k, v in expected.items()):
+        raise ValueError("Rust package execution inputs changed")
+    return installed
+
+
+def rust_artifacts(component, artifact_root):
+    paths = []
+    for kind in ("crate", "vendored-offline-package"):
+        rows = [row for row in component["artifacts"] if row["kind"] == kind]
+        if len(rows) != 1:
+            raise ValueError("Rust candidate artifact is ambiguous")
+        path = safe_path(artifact_root / "client-rust" / rows[0]["name"])
+        if file_digest(path) != rows[0]["sha256"]:
+            raise ValueError("Rust candidate artifact digest differs")
+        paths.append(path)
+    return paths
+
+
+def rust_package_command(root, context, component, artifact_root, argv, env, value):
+    artifact, vendor = rust_artifacts(component, artifact_root)
+    installed = validate_binding(value, context, artifact, root, vendor)
+    workspace = safe_path(Path(value["workspace"]))
+    home = safe_path(Path(env["HOME"]))
+    cargo_home = home / "rust-cargo-home"
+    cargo_home.mkdir(mode=0o700, exist_ok=True)
+    safe_path(cargo_home)
+    target = home / "rust-build" / context["runtime"]
+    target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    safe_path(target)
+    env = {**env, "CARGO_HOME": str(cargo_home), "CARGO_TARGET_DIR": str(target),
+           "CARGO_NET_OFFLINE": "true", "CARGO_INCREMENTAL": "0"}
+    # Cargo can otherwise discover unrelated configs above the run workspace.
+    if workspace.parent != home or installed.parent != workspace:
+        raise ValueError("Rust package workspace layout differs")
+    for ancestor in (home, *home.parents):
+        for name in ("config", "config.toml"):
+            path = ancestor / ".cargo" / name
+            if path.exists() or path.is_symlink():
+                raise ValueError("Rust inherited Cargo configuration is forbidden")
+    if (cargo_home / "config").exists() or (cargo_home / "config.toml").exists():
+        raise ValueError("Rust inherited Cargo home configuration is forbidden")
+    argv = [*argv[:3], "--offline", *argv[3:]]
+    return argv, env, installed, {"value": value, "artifact": artifact, "vendor_artifact": vendor}
+
+
+
+def extract_rust_packages(artifact: Path, vendor_artifact: Path, workspace: Path) -> Path:
+    """Extract only into an empty caller-owned workspace after validating both archives."""
+    safe_path(workspace)
+    if any(workspace.iterdir()):
+        raise ValueError("Rust extraction workspace must be empty")
+    crate = rust_archive_files(artifact, artifact.stem + "/")
+    if crate != rust_archive_files(vendor_artifact, "source/"):
+        raise ValueError("Rust vendor source differs from the frozen crate")
+    rust_archive_files(vendor_artifact, "vendor/")
+    rust_archive_files(vendor_artifact, ".cargo/")
+    extract_rust_prefix(artifact, artifact.stem + "/", workspace / "source")
+    extract_rust_prefix(vendor_artifact, "vendor/", workspace / "vendor")
+    extract_rust_prefix(vendor_artifact, ".cargo/", workspace / ".cargo")
+    return safe_path(workspace / "source")
+
+
+def extract_rust_prefix(artifact: Path, prefix: str, destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    with tarfile.open(artifact, "r|gz") as archive:
+        for row in archive:
+            if not row.isfile() or not row.name.startswith(prefix):
+                continue
+            relative = row.name.removeprefix(prefix)
+            if Path(relative).is_absolute() or any(p in {"", ".", ".."} for p in relative.split("/")):
+                raise ValueError("Rust extraction path is unsafe")
+            path = destination / relative
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            safe_path(path.parent)
+            handle = archive.extractfile(row)
+            if handle is None:
+                raise ValueError("Rust extraction member is unavailable")
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700 if row.mode & 0o111 else 0o600)
+            with os.fdopen(fd, "wb") as output:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    output.write(chunk)
