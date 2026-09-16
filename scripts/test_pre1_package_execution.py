@@ -17,6 +17,13 @@ import pre1_package_execution as adapter
 
 
 class PackageExecutionTests(unittest.TestCase):
+    def test_lifecycle_child_preserves_installed_import_environment(self):
+        source = '    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}'
+        bridged = adapter.packaged_assertions("tests/test_service_lifecycle.py", source)
+        self.assertEqual(bridged, "    env = dict(os.environ)")
+        with self.assertRaisesRegex(ValueError, "fixture shape differs"):
+            adapter.packaged_assertions("tests/test_service_lifecycle.py", "changed")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="pre1-package-test-")
         self.addCleanup(self.temp.cleanup)

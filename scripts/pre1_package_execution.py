@@ -222,6 +222,11 @@ function decision(vector: any, keys: Map<string, any>, signatureValid: boolean):
 
 '''
         return text[:start] + replacement + text[end:]
+    if name == "tests/test_service_lifecycle.py":
+        source_override = '    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}'
+        if text.count(source_override) != 1:
+            raise ValueError("reviewed lifecycle subprocess fixture shape differs")
+        return text.replace(source_override, "    env = dict(os.environ)")
     if name == "tests/pre1_release_boundaries.test.ts":
         lines = text.splitlines()
         source_check = [line for line in lines if "assert.match(cli," in line]
