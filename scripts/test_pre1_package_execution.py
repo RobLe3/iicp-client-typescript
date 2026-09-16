@@ -118,6 +118,80 @@ class PackageExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dependencies changed"):
             self.validate(value)
 
+    def test_rehashed_fixture_and_binding_cannot_replace_reviewed_assertions(self):
+        value = self.binding()
+        (self.workspace / "tests/test_fixture.py").write_text("def test_fixture(): assert True\n")
+        value["fixtures_sha256"] = adapter.digest(adapter.fixture_tree(self.workspace))
+        value["binding_sha256"] = None
+        value["binding_sha256"] = adapter.digest(value)
+        with self.assertRaisesRegex(ValueError, "reviewed source mapping"):
+            self.validate(value)
+
+    def test_cli_adapter_decodes_file_urls(self):
+        fixture = 'const cli = readFileSync("src/cli.ts");\n  assert.match(cli, /version/);\n'
+        staged = adapter.packaged_assertions("tests/pre1_release_boundaries.test.ts", fixture)
+        self.assertIn('import { fileURLToPath } from "node:url"', staged)
+        self.assertIn("fileURLToPath(new URL(", staged)
+        self.assertNotIn(".pathname", staged)
+
+    def test_cli_subprocess_with_spaces_and_unicode_path(self):
+        import shutil
+        node = shutil.which("node")
+        if not node:
+            self.fail("Node is required for the CLI portability regression")
+        directory = self.home / "IICP space ü"
+        directory.mkdir()
+        cli = directory / "cli.mjs"
+        cli.write_text('console.log("iicp-node 0.7.110");')
+        script = '''import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
+const result=spawnSync(process.execPath,[fileURLToPath(new URL(process.argv[1])),'--version'],{encoding:'utf8'});
+process.stdout.write(result.stdout); process.exit(result.status ?? 1);'''
+        result = subprocess.run([node, "--input-type=module", "-e", script, cli.as_uri()],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "iicp-node 0.7.110")
+
+    def test_case_proof_is_portable_and_bound_to_result(self):
+        value = adapter.make_case_proof(self.binding(), self.context, "test_fixture", 0, "pre1-test")
+        adapter.validate_case_proof(value, self.context, 0, "pre1-test")
+        self.assertNotIn(str(self.home), json.dumps(value))
+        for field, replacement in (("run_id", "different"), ("exit_code", 1),
+                                    ("context", {**self.context, "target": "windows-x86_64"})):
+            changed = copy.deepcopy(value)
+            changed[field] = replacement
+            changed["proof_sha256"] = None
+            changed["proof_sha256"] = adapter.digest(changed)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                adapter.validate_case_proof(changed, self.context, 0, "pre1-test")
+
+    def test_case_proof_atomic_non_overwriting_and_safe(self):
+        proof = adapter.make_case_proof(self.binding(), self.context, "test_fixture", 0, "pre1-test")
+        output = self.home / "proof.json"
+        with patch.dict(os.environ, {"IICP_PRE1_CASE_PROOF_OUTPUT": str(output)}):
+            adapter.write_case_proof(proof)
+            self.assertEqual(json.loads(output.read_text()), proof)
+            with self.assertRaises(ValueError):
+                adapter.write_case_proof(proof)
+        self.assertEqual(list(self.home.glob(".case-proof-*")), [])
+        link = self.home / "linked-proof"
+        link.symlink_to(output)
+        for unsafe in (link, self.home.parent / "outside-proof.json"):
+            with patch.dict(os.environ, {"IICP_PRE1_CASE_PROOF_OUTPUT": str(unsafe)}), self.assertRaises(ValueError):
+                adapter.write_case_proof(proof)
+
+    def test_case_proof_refuses_unknown_fields_and_tampered_summary(self):
+        value = adapter.make_case_proof(self.binding(), self.context, "test_fixture", 0, "pre1-test")
+        for change in (lambda v: v.update(output="secret"),
+                       lambda v: v["execution"].update(installed_package=str(self.installed)),
+                       lambda v: v["execution"]["bindings"].update(runtime_map_sha256="wrong")):
+            changed = copy.deepcopy(value)
+            change(changed)
+            changed["proof_sha256"] = None
+            changed["proof_sha256"] = adapter.digest(changed)
+            with self.assertRaises(ValueError):
+                adapter.validate_case_proof(changed, self.context, 0, "pre1-test")
+
     def test_no_binding_cannot_run_source_case(self):
         with patch.dict(os.environ, {}, clear=True), self.assertRaises(KeyError):
             adapter.package_command(self.root, self.context, {}, self.home, [], {})

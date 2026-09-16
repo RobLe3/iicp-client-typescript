@@ -9,8 +9,10 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -71,16 +73,21 @@ def file_digest(path: Path) -> str:
 def safe_path(path: Path) -> Path:
     if not path.is_absolute() or not path.exists():
         raise ValueError("package execution path must exist and be absolute")
-    if any(p.is_symlink() for p in (path, *path.parents)):
+    if any(unsafe_link(p) for p in (path, *path.parents)):
         raise ValueError("package execution path contains a symlink")
     return path.resolve()
+
+
+def unsafe_link(path: Path) -> bool:
+    attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    return path.is_symlink() or bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
 def tree(path: Path) -> dict[str, str]:
     safe_path(path)
     result = {}
     for item in sorted(path.rglob("*")):
-        if item.is_symlink():
+        if unsafe_link(item):
             raise ValueError("package execution tree contains a symlink")
         if item.is_file():
             if "__pycache__" in item.parts or item.suffix == ".pyc":
@@ -94,30 +101,40 @@ def tree(path: Path) -> dict[str, str]:
 def installed_payload(artifact: Path, installed: Path, component: str) -> dict[str, str]:
     """Require exact package-file equality, not a self-reported install receipt."""
     safe_path(artifact)
-    expected = {}
-    if component == "client-python":
-        with zipfile.ZipFile(artifact) as archive:
-            for row in archive.infolist():
-                if row.filename.startswith("iicp_client/") and not row.is_dir():
-                    name = row.filename.removeprefix("iicp_client/")
-                    expected[name] = "sha256:" + hashlib.sha256(archive.read(row)).hexdigest()
-    elif component == "client-typescript":
-        with tarfile.open(artifact, "r:gz") as archive:
-            for row in archive.getmembers():
-                if row.isfile() and row.name.startswith("package/"):
-                    name = row.name.removeprefix("package/")
-                    handle = archive.extractfile(row)
-                    if handle is None:
-                        raise ValueError("package archive file is unavailable")
-                    expected[name] = "sha256:" + hashlib.sha256(handle.read()).hexdigest()
-                elif row.issym() or row.islnk():
-                    raise ValueError("package archive contains a link")
-    else:
+    readers = {"client-python": wheel_payload, "client-typescript": tarball_payload}
+    if component not in readers:
         raise ValueError("no packaged adapter for this component")
+    expected = readers[component](artifact)
     if not expected or any(
         Path(name).is_absolute() or ".." in Path(name).parts for name in expected
     ) or tree(installed) != expected:
         raise ValueError("installed SDK differs from the frozen package payload")
+    return expected
+
+
+
+def wheel_payload(artifact: Path) -> dict[str, str]:
+    expected = {}
+    with zipfile.ZipFile(artifact, "r") as archive:
+        for row in archive.infolist():
+            if row.filename.startswith("iicp_client/") and not row.is_dir():
+                name = row.filename.removeprefix("iicp_client/")
+                expected[name] = "sha256:" + hashlib.sha256(archive.read(row)).hexdigest()
+    return expected
+
+
+def tarball_payload(artifact: Path) -> dict[str, str]:
+    expected = {}
+    with tarfile.open(artifact, "r:gz") as archive:
+        for row in archive.getmembers():
+            if row.isfile() and row.name.startswith("package/"):
+                name = row.name.removeprefix("package/")
+                handle = archive.extractfile(row)
+                if handle is None:
+                    raise ValueError("package archive file is unavailable")
+                expected[name] = "sha256:" + hashlib.sha256(handle.read()).hexdigest()
+            elif row.issym() or row.islnk():
+                raise ValueError("package archive contains a link")
     return expected
 
 
@@ -129,8 +146,8 @@ def dependencies(workspace: Path, installed: Path, component: str) -> dict[str, 
         name = item.relative_to(base).as_posix()
         if "__pycache__" in item.parts or item.suffix == ".pyc":
             continue
-        if item.is_symlink():
-            if component != "client-typescript" or not name.startswith(".bin/") or not item.resolve().is_relative_to(base):
+        if unsafe_link(item):
+            if not item.is_symlink() or component != "client-typescript" or not name.startswith(".bin/") or not item.resolve().is_relative_to(base):
                 raise ValueError("test dependency contains an unsafe link")
             rows[name] = digest({"link": os.readlink(item), "target_sha256": file_digest(item.resolve())})
         elif item.is_file():
@@ -211,8 +228,8 @@ function decision(vector: any, keys: Map<string, any>, signatureValid: boolean):
         source_read = [line for line in lines if line.startswith("const cli = ")]
         if len(source_check) != 1 or len(source_read) != 1:
             raise ValueError("reviewed CLI source fixture shape differs")
-        text = text.replace(source_read[0], 'import { spawnSync } from "node:child_process";')
-        return text.replace(source_check[0], '''  const version = spawnSync(process.execPath, [new URL("../node_modules/@iicp/client/dist/cli.js", import.meta.url).pathname, "--version"], { encoding: "utf8" });
+        text = text.replace(source_read[0], 'import { spawnSync } from "node:child_process";\nimport { fileURLToPath } from "node:url";')
+        return text.replace(source_check[0], '''  const version = spawnSync(process.execPath, [fileURLToPath(new URL("../node_modules/@iicp/client/dist/cli.js", import.meta.url)), "--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
   assert.equal(version.stdout.trim(), `iicp-node ${pkg.version}`);''')
     return text
@@ -267,12 +284,16 @@ def stage(root: Path, workspace: Path, component: str) -> dict[str, str]:
     return fixture_tree(workspace)
 
 
-def create_binding(root: Path, workspace: Path, installed: Path, artifact: Path,
-                   component: str, runtime: str, target: str, bindings: dict) -> dict:
+
+def validate_immutable_bindings(bindings: dict) -> None:
     if set(bindings) != set(BINDINGS) or any(
         re.fullmatch(r"sha256:[0-9a-f]{64}", str(v)) is None for v in bindings.values()
     ):
         raise ValueError("package execution immutable bindings differ")
+
+def create_binding(root: Path, workspace: Path, installed: Path, artifact: Path,
+                   component: str, runtime: str, target: str, bindings: dict) -> dict:
+    validate_immutable_bindings(bindings)
     if not safe_path(installed).is_relative_to(safe_path(workspace)):
         raise ValueError("installed package must be in the run workspace")
     payload = installed_payload(artifact, installed, component)
@@ -294,7 +315,8 @@ def create_binding(root: Path, workspace: Path, installed: Path, artifact: Path,
     return value
 
 
-def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> Path:
+
+def validate_binding_identity(value: dict) -> None:
     copy = dict(value)
     copy["binding_sha256"] = None
     if value.get("schema") != SCHEMA or value.get("binding_sha256") != digest(copy):
@@ -303,21 +325,36 @@ def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> 
         raise ValueError("package execution binding cannot authorize or grant credit")
     if value.get("assertion_adapter") != "canonical-runtime-verifier-and-cli.v1":
         raise ValueError("package assertion adapter binding differs")
+
+
+def validate_binding_context(value: dict, context: dict) -> None:
     if any(value.get(k) != context[k] for k in ("component", "runtime", "target")) or value.get("bindings") != {k: context[k] for k in BINDINGS}:
         raise ValueError("package execution candidate/environment/runtime binding differs")
+
+def validate_binding(value: dict, context: dict, artifact: Path, root: Path) -> Path:
+    validate_binding_identity(value)
+    validate_binding_context(value, context)
     workspace = safe_path(Path(value["workspace"]))
     home = safe_path(Path(os.environ["HOME"]))
     installed = safe_path(Path(value["installed_package"]))
-    if not workspace.is_relative_to(home) or workspace == home or workspace.is_relative_to(root.resolve()) or not installed.is_relative_to(workspace):
-        raise ValueError("package execution workspace is not run-isolated")
+    validate_workspace_boundary(workspace, home, installed, root)
     if value["artifact_sha256"] != file_digest(artifact) or value["installed_payload_sha256"] != digest(installed_payload(artifact, installed, context["component"])):
         raise ValueError("package execution installed artifact binding differs")
     if value["fixtures_sha256"] != digest(fixture_tree(workspace)):
         raise ValueError("package assertion fixtures changed")
+    expected = {name: "sha256:" + hashlib.sha256(data).hexdigest()
+                for name, data in assertion_files(root, context["component"]).items()}
+    if fixture_tree(workspace) != expected:
+        raise ValueError("package assertions differ from the reviewed source mapping")
     if value["test_dependencies_sha256"] != digest(dependencies(workspace, installed, context["component"])):
         raise ValueError("package test dependencies changed")
     return workspace
 
+
+
+def validate_workspace_boundary(workspace: Path, home: Path, installed: Path, root: Path) -> None:
+    if not workspace.is_relative_to(home) or workspace == home or workspace.is_relative_to(root.resolve()) or not installed.is_relative_to(workspace):
+        raise ValueError("package execution workspace is not run-isolated")
 
 def package_command(root: Path, context: dict, component_manifest: dict,
                     artifact_root: Path, argv: list[str], env: dict) -> tuple[list[str], dict, Path, dict]:
@@ -342,3 +379,112 @@ def package_command(root: Path, context: dict, component_manifest: dict,
         if Path(value["installed_package"]) != expected:
             raise ValueError("TypeScript installed module path differs")
     return argv, env, workspace, {"value": value, "artifact": artifact}
+
+
+def execution_summary(value: dict) -> dict:
+    """Portable evidence; private execution paths never enter a receipt."""
+    keys = ("component", "runtime", "target", "bindings", "artifact_sha256",
+            "installed_payload_sha256", "fixtures_sha256", "test_dependencies_sha256")
+    return {"schema": "iicp.pre1-package-execution-summary.v1",
+            **{key: value[key] for key in keys},
+            "package_execution_sha256": value["binding_sha256"],
+            "non_authorizing": True}
+
+
+def make_case_proof(value: dict, context: dict, assertion: str, exit_code: int,
+                    run_id: str) -> dict:
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        raise ValueError("case proof exit code is invalid")
+    if not isinstance(run_id, str) or not re.fullmatch(r"[a-zA-Z0-9._-]+", run_id):
+        raise ValueError("case proof run identifier is invalid")
+    if not isinstance(assertion, str) or not assertion:
+        raise ValueError("case proof assertion is missing")
+    result = {"schema": "iicp.pre1-packaged-case-proof.v2", "run_id": run_id,
+              "execution": execution_summary(value), "context": context,
+              "assertion": assertion, "exit_code": exit_code,
+              "non_authorizing": True, "proof_sha256": None}
+    result["proof_sha256"] = digest(result)
+    return result
+
+
+def validate_case_proof(value: dict, context: dict, exit_code: int,
+                        run_id: str, expected_execution: dict | None = None,
+                        expected_assertion: str | None = None) -> None:
+    validate_case_proof_identity(value)
+    validate_proof_result(value, context, exit_code, run_id)
+    summary = value["execution"]
+    if expected_execution is not None and summary != expected_execution:
+        raise ValueError("case proof installed execution differs")
+    validate_execution_summary(summary, context)
+    validate_proof_assertion(value, expected_assertion)
+
+
+def validate_case_proof_identity(value: dict) -> None:
+    fields = {"schema", "run_id", "execution", "context", "assertion", "exit_code",
+              "non_authorizing", "proof_sha256"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("case proof fields differ")
+    copy = {**value, "proof_sha256": None}
+    if value["schema"] != "iicp.pre1-packaged-case-proof.v2" or value["proof_sha256"] != digest(copy):
+        raise ValueError("case proof schema or digest differs")
+    validate_proof_result_fields(value)
+
+
+
+def validate_proof_result(value: dict, context: dict, exit_code: int, run_id: str) -> None:
+    if value["context"] != context or value["exit_code"] != exit_code or value["run_id"] != run_id:
+        raise ValueError("case proof execution context or result differs")
+
+
+def validate_proof_assertion(value: dict, expected_assertion: str | None) -> None:
+    if not isinstance(value["assertion"], str) or not value["assertion"]:
+        raise ValueError("case proof assertion is missing")
+    if expected_assertion is not None and value["assertion"] != expected_assertion:
+        raise ValueError("case proof assertion differs from the owned mapping")
+
+
+
+def validate_proof_result_fields(value: dict) -> None:
+    if not isinstance(value["exit_code"], int) or isinstance(value["exit_code"], bool) or value["non_authorizing"] is not True:
+        raise ValueError("case proof authority or exit code differs")
+    if not isinstance(value["run_id"], str) or not re.fullmatch(r"[a-zA-Z0-9._-]+", value["run_id"]):
+        raise ValueError("case proof run identifier is invalid")
+def validate_execution_summary(summary: dict, context: dict) -> None:
+    validate_summary_identity(summary)
+    if any(summary[key] != context[key] for key in ("component", "runtime", "target")):
+        raise ValueError("package execution summary target differs")
+    if summary["bindings"] != {key: context[key] for key in BINDINGS}:
+        raise ValueError("package execution summary immutable bindings differ")
+
+
+def validate_summary_identity(summary: dict) -> None:
+    fields = {"schema", "component", "runtime", "target", "bindings",
+              "artifact_sha256", "installed_payload_sha256", "fixtures_sha256",
+              "test_dependencies_sha256", "package_execution_sha256", "non_authorizing"}
+    if not isinstance(summary, dict) or set(summary) != fields:
+        raise ValueError("package execution summary fields differ")
+    if summary["schema"] != "iicp.pre1-package-execution-summary.v1" or summary["non_authorizing"] is not True:
+        raise ValueError("package execution summary schema or authority differs")
+    for key in fields - {"schema", "component", "runtime", "target", "bindings", "non_authorizing"}:
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", str(summary[key])) is None:
+            raise ValueError("package execution summary digest is invalid")
+
+
+def write_case_proof(value: dict) -> Path:
+    """Publish a complete sidecar atomically, without overwriting earlier evidence."""
+    path = Path(os.environ["IICP_PRE1_CASE_PROOF_OUTPUT"])
+    home = safe_path(Path(os.environ["HOME"]))
+    parent = safe_path(path.parent)
+    if not path.is_absolute() or not parent.is_relative_to(home) or path.exists() or path.is_symlink():
+        raise ValueError("case proof output is unsafe or already exists")
+    descriptor, temporary = tempfile.mkstemp(prefix=".case-proof-", dir=parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    return path
