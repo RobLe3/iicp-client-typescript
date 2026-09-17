@@ -96,6 +96,7 @@ def description() -> dict:
         "evidence_policy": "digest-only",
         "artifact_consumption": "verified-installed-package",
         "package_execution_schema": "iicp.pre1-package-execution.v1",
+        "case_proof_schema": "iicp.pre1-packaged-case-proof.v2",
         "source_commit_binding": True,
         "supported_environment_schemas": [
             "iicp.pre1-qualification-environment.v1",
