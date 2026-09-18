@@ -15,8 +15,9 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pre1_harness_binding import harness_identity, validate_harness_source
-from pre1_environment_contract import validate_modern_environment
+from pre1_environment_contract import validate_modern_environment  # noqa: E402
+from pre1_harness_binding import harness_identity, validate_harness_source  # noqa: E402
+from pre1_package_execution import package_command, validate_binding, make_case_proof, write_case_proof  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPONENT = 'client-typescript'
@@ -93,7 +94,9 @@ def description() -> dict:
         "scenarios": sorted(SCENARIO_COMMANDS),
         "network_policy": "isolated-fixtures-only",
         "evidence_policy": "digest-only",
-        "artifact_consumption": "verified-candidate-root",
+        "artifact_consumption": "verified-installed-package",
+        "package_execution_schema": "iicp.pre1-package-execution.v1",
+        "case_proof_schema": "iicp.pre1-packaged-case-proof.v2",
         "source_commit_binding": True,
         "supported_environment_schemas": [
             "iicp.pre1-qualification-environment.v1",
@@ -456,6 +459,8 @@ def command_environment(runtime_row: dict, runtime: str) -> dict[str, str]:
     if "IICP_PRE1_HARNESS_BINDING" in os.environ:
         env["IICP_PRE1_HARNESS_BINDING"] = os.environ["IICP_PRE1_HARNESS_BINDING"]
     env.update(runtime_row.get("env", {}))
+    primary = "python" if runtime.startswith("cpython-") else "node"
+    env["PATH"] = str(Path(runtime_row["programs"][primary]).parent) + os.pathsep + env.get("PATH", "")
     cache = Path(env["IICP_HOME"]) / "qualification-cache" / COMPONENT / runtime
     cache.mkdir(parents=True, exist_ok=True)
     env["CARGO_TARGET_DIR"] = str(cache / "cargo-target")
@@ -521,27 +526,38 @@ def main() -> int:
     if args.scenario is not None and args.scenario not in SCENARIO_COMMANDS:
         parser.error("scenario is not owned by this component")
     try:
-        runtime, runtime_row, manifest, _context = validate_context(
+        runtime, runtime_row, manifest, context = validate_context(
             args.cell, args.scenario
         )
         validate_runtime(runtime, runtime_row, manifest)
         case = SCENARIO_CASES[args.scenario] if args.scenario else SUPPORT_CASE
         template = case["command"]
         argv = expand_command(template, runtime_row)
+        component = next(row for row in manifest["components"] if row["id"] == COMPONENT)
+        argv, env, workspace, proof = package_command(
+            ROOT, context, component, Path(os.environ["IICP_PRE1_ARTIFACT_ROOT"]),
+            argv, command_environment(runtime_row, runtime),
+        )
         result = subprocess.run(
             argv,
-            cwd=ROOT,
-            env=command_environment(runtime_row, runtime),
+            cwd=workspace,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
         )
         sys.stdout.write(result.stdout)
+        validate_binding(proof["value"], context, proof["artifact"], ROOT)
+
         if result.returncode == 0 and not exact_tap_assertion_passed(
             result.stdout, case["assertion"]
         ):
             raise ValueError("qualification exact assertion did not execute once")
+        case = SCENARIO_CASES[args.scenario] if args.scenario else SUPPORT_CASE
+        sidecar = make_case_proof(proof["value"], context, case["assertion"],
+                                  result.returncode, os.environ["IICP_PRE1_RUN_ID"])
+        write_case_proof(sidecar)
     except (KeyError, OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
         print(f"pre-1.0 {COMPONENT} case refused: {error}", file=sys.stderr)
         return 2
