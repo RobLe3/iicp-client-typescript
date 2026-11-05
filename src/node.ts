@@ -753,7 +753,7 @@ export class IicpNode {
     if (!resp.ok) throw new Error(`Registration failed: ${resp.status}`);
     const data = (await resp.json()) as Record<string, unknown>;
     const token = (data.node_token ?? data.token) as string | undefined;
-    if (!token) throw new Error(`Directory did not return node_token: ${JSON.stringify(data)}`);
+    if (!token) throw new Error("Directory did not return node_token");
     // BUG-5: stash the token so deregister()/heartbeat don't need it re-passed.
     this._runtimeToken = token;
     // ADR-019: capture the directory-issued HMAC key for subsequent pricing
