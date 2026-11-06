@@ -31,7 +31,7 @@ export interface ClientConfig {
   region?: string;
   /** Bearer token for authenticated routes. */
   api_token?: string;
-  /** Verify TLS certificates. Default: true */
+  /** Verify TLS certificates. Default: true. false is rejected with SDK-05. */
   tls_verify: boolean;
   /** IICP-CX S.16: encrypt task payloads when node advertises cx_public_key. Default: false */
   use_confidentiality?: boolean;
