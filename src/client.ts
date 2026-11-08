@@ -134,10 +134,9 @@ export class IicpClient {
   constructor(config?: Partial<ClientConfig>) {
     const merged: ClientConfig = { ...DEFAULT_CONFIG, ...config };
     if (merged.tls_verify === false) {
-      console.warn(
-        "[iicp-client] tls_verify: false has no effect — TLS certificate verification " +
-          "cannot be disabled via this config field. Use NODE_TLS_REJECT_UNAUTHORIZED=0 " +
-          "in the environment if you need to disable cert verification for local testing.",
+      throw new IicpError(
+        "tls_verify: false is not supported; TLS certificate verification is required",
+        "SDK-05",
       );
     }
     // SDK-04: reject oversized timeouts at construction time
