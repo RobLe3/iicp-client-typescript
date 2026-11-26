@@ -8,9 +8,10 @@ const cli = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
 const quality = readFileSync(new URL("../scripts/run-sdk-quality.mjs", import.meta.url), "utf8");
 const release = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
 
-test("minimum Node version is declared and candidate remains pre-1", () => {
+test("package and lockfile declare the supported Node majors and candidate remains pre-1", () => {
   assert.equal(pkg.engines.node, "^22.0.0 || ^24.0.0");
-  assert.ok(Number(process.versions.node.split(".")[0]) >= 22);
+  assert.equal(lock.packages[""].engines.node, pkg.engines.node);
+  assert.ok([22, 24].includes(Number(process.versions.node.split(".")[0])));
   assert.equal(pkg.version.split(".")[0], "0");
 });
 
