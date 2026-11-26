@@ -15,6 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: "24"
@@ -22,3 +25,60 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+      - name: Build and smoke-test changed provider image
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse --verify HEAD^1 >/dev/null
+          if git diff --quiet HEAD^1 HEAD -- Dockerfile package.json package-lock.json scripts/check-dockerfile-security.mjs .github/workflows/quality.yml; then
+            exit 0
+          fi
+
+          image="iicp-typescript-provider-ci:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          existing=$(docker image ls --quiet --filter "reference=$image")
+          test -z "$existing"
+          container=
+          cleanup() {
+            local status=$? remaining
+            if [[ -n "$container" ]]; then
+              docker rm -f "$container" >/dev/null || status=1
+              remaining=$(docker ps --all --quiet --no-trunc --filter "id=$container") || status=1
+              [[ -z "$remaining" ]] || status=1
+            fi
+            remaining=$(docker image ls --quiet --filter "reference=$image") || status=1
+            if [[ -n "$remaining" ]]; then
+              docker image rm "$image" >/dev/null || status=1
+              remaining=$(docker image ls --quiet --filter "reference=$image") || status=1
+              [[ -z "$remaining" ]] || status=1
+            fi
+            # Residual BuildKit cache belongs to the disposable hosted runner.
+            trap - EXIT
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          # Use tracked source only, never a runner cache or checkout metadata.
+          git archive HEAD | docker build --pull --tag "$image" -
+          test "$(docker image inspect --format '{{.Config.User}}' "$image")" = node
+          expected_node=$(sed -n 's/^FROM node:\([0-9.]*\)-slim@.* AS runtime$/v\1/p' Dockerfile)
+          test -n "$expected_node"
+          test "$(docker run --rm --network none "$image" node --version)" = "$expected_node"
+          version=$(node -p 'require("./package.json").version')
+          test "$(docker run --rm --network none "$image" node -p 'require("/app/package.json").version')" = "$version"
+          test "$(docker run --rm --network none "$image" iicp-node --version)" = "iicp-node $version"
+
+          container=$(docker run -d --network none -e IICP_AUTO_UPDATE=0 "$image" \
+            iicp-node serve --skip-registration --no-auto-detect-nat --no-tunnel \
+            --host 127.0.0.1 --port 8020 --model ci \
+            --backend-url http://127.0.0.1:1 --directory-url http://127.0.0.1:1)
+          for attempt in {1..30}; do
+            if docker exec "$container" node -e 'fetch("http://127.0.0.1:8020/iicp/health",{signal:AbortSignal.timeout(1000)}).then(async r=>{if(!r.ok||(await r.json()).status!=="ok")process.exit(1)}).catch(()=>process.exit(1))'; then
+              exit 0
+            fi
+            test "$(docker inspect --format '{{.State.Running}}' "$container")" = true
+            sleep 1
+          done
+          echo "Provider did not report loopback health" >&2
+          exit 1

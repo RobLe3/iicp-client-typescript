@@ -21,7 +21,7 @@
 #
 # See https://iicp.network/docs/sdk-quickstart-docker for the full setup guide.
 
-FROM node:20-slim AS build
+FROM node:22.23.2-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9 AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
 # Install optional peer deps used at runtime (cbor-x for IICP TCP, prom-client
@@ -32,7 +32,7 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
 
-FROM node:20-slim AS runtime
+FROM node:22.23.2-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9 AS runtime
 ARG CLOUDFLARED_VERSION=2026.7.3
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
